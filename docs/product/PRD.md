@@ -2,7 +2,7 @@
 
 > Derived from `docs/rust_game_engine_claude_code_brief.md`. If the two documents conflict, the
 > brief wins until this PRD is formally revised.
-> **Status:** Draft v0.1 · **Working title:** TBD
+> **Status:** Draft v0.1 · **Name:** Oxreal (Oxreal Engine / Oxreal Editor / Oxreal Cook)
 
 ## 1. Vision
 

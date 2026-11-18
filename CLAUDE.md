@@ -15,7 +15,7 @@ from day one. Vulkan is the first graphics backend.
 - Conventions (errors, logging, unsafe, tests): `docs/development/conventions.md`
 - Environment setup: `docs/development/setup.md`
 
-Working title is **TBD**. Do not invent a product name or crate prefix. See open decision D-15.
+The product is named **Oxreal**. The product family is Oxreal Engine, Oxreal Editor and Oxreal Cook. Crates use the `oxreal-` prefix (for example `oxreal-ecs`), while dev tooling such as `xtask` doesn't.
 
 ## Current state
 

@@ -11,8 +11,8 @@ Empty placeholder crates are forbidden (brief §10). State the following:
 - Its layer (TAD §2) and its intended workspace dependencies, checked against the matrix in TAD §4.
 - Why an existing crate can't own this.
 
-If the working title and crate prefix (D-15) are still undecided, ask the user before creating
-the first engine crate. Don't invent a prefix.
+Crate names use the `oxreal-` prefix (D-15), e.g. `oxreal-ecs`, `oxreal-rhi`. Dev tooling under `tools/` is
+exempt (e.g. `xtask`).
 
 ## 1. Location
 | Layer | Directory |
@@ -24,7 +24,7 @@ the first engine crate. Don't invent a prefix.
 ## 2. Cargo.toml
 ```toml
 [package]
-name = "<prefix>-<name>"
+name = "oxreal-<name>"
 description = "<one line: responsibility>"
 version.workspace = true
 edition.workspace = true

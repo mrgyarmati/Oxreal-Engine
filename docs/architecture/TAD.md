@@ -181,4 +181,4 @@ Create these only when M1 work starts, one at a time, each with real code:
 | `rendering/renderer` | rendering | Basic mesh pass, camera |
 | `applications/player` | app-runtime | The vertical-slice app |
 
-The crate name prefix depends on the working title (D-15).
+Crate names use the `oxreal-` prefix, for example `oxreal-math` and `oxreal-rhi` (D-15).
