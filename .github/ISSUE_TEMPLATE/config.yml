@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions and help
+    url: https://github.com/mrgyarmati/Oxreal-Engine/discussions/categories/q-a
+    about: Ask how to build, use or contribute to Oxreal. Issues are for confirmed bugs and concrete proposals.
+  - name: Ideas and early proposals
+    url: https://github.com/mrgyarmati/Oxreal-Engine/discussions/categories/ideas
+    about: Discuss an idea before it becomes a feature request or an ADR.
   - name: Security vulnerability
     url: https://github.com/mrgyarmati/Oxreal-Engine/security/advisories/new
     about: Report security issues privately - never in public issues.

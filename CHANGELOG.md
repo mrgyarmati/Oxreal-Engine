@@ -15,3 +15,4 @@ may contain breaking changes.
 - CI on Windows and Ubuntu LTS (fmt, clippy, tests, rustdoc, layering, cargo-deny).
 - Contribution guidelines, issue and PR templates, Dependabot configuration.
 - Security policy with private vulnerability reporting.
+- GitHub Discussions (Q&A, Ideas, Show and tell) linked from the issue chooser and CONTRIBUTING.
