@@ -86,6 +86,17 @@ rendering) are built only as far as games need them.
 | UI | Runtime UI, HUD, layout and anchoring, focus, transitions, visual designer |
 | Assets | glTF/GLB first, then FBX through a dedicated importer and USD later. Also images, audio and fonts. Stable IDs, dependencies, DDC, non-destructive reimport, hot reload, cooking |
 | Graphs | Shared graph infrastructure (gameplay, material, animation, VFX, audio) with an IR that is interpreted first and compiled later |
+| Languages | Rust is the first-class language for engine and gameplay. Visual scripting is for designers. **Planned later:** C++ and C# for gameplay and tooling through a stable, versioned C ABI and generated bindings (D-21) |
+
+### Additional programming languages (future)
+
+Rust stays the engine's implementation language and the first-class gameplay language. C++ and C#
+are planned as additional **gameplay and tooling** languages so that Unreal (C++) and Unity/.NET
+(C#) developers can bring their skills over. Delivery comes after the Rust gameplay API has
+stabilized, and no milestone is committed yet.
+
+The architecture must not rule this out in the meantime. See TAD §5.8 for the design constraints
+that apply now.
 
 ### Non-destructive reimport (high priority)
 
