@@ -74,6 +74,18 @@ and this project is MIT/Apache-2.0.
   by category with a search box") and design our own implementation.
 - Delegate this research to the `unreal-ux-researcher` agent. Its output is behavioural notes, not code.
 
+## Git and GitHub workflow
+
+- Remote: <https://github.com/mrgyarmati/Oxreal-Engine>. `main` is protected by a ruleset: no
+  direct pushes, no force-pushes, no deletion. Changes land only through pull requests in which
+  all CI checks pass (`rustfmt`, `clippy + test` on windows-2025, ubuntu-24.04 and ubuntu-26.04,
+  `rustdoc`, `cargo-deny`).
+- Never use the admin bypass, push to `main` directly, or force-push shared branches.
+- Work on a topic branch (`feat/…`, `fix/…`, `docs/…`, `ci/…`). Open a PR that fills in
+  `.github/PULL_REQUEST_TEMPLATE.md`, then wait for green CI. The maintainer merges.
+- Add user-visible changes to `CHANGELOG.md` under `[Unreleased]`.
+- Security issues go through private advisories (`SECURITY.md`), never public issues.
+
 ## Workflow (from brief §16)
 
 Before coding: read the relevant ADRs and TAD section, identify the owning crate and its allowed
