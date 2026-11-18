@@ -1,9 +1,20 @@
 name: CI
 
+# Runs on every push to main and every pull request. Must stay green on all platforms (ADR-0002).
+#
+# Supply-chain policy:
+# - Third-party actions are pinned to full commit SHAs (version in a trailing comment).
+#   Dependabot (.github/dependabot.yml) proposes updates.
+# - Runner images are pinned explicitly (no *-latest) so image migrations are deliberate changes.
+# - The Rust toolchain is pinned by rust-toolchain.toml.
+
 on:
   push:
     branches: [main]
   pull_request:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,9 +27,11 @@ env:
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: cargo fmt --all --check
 
   build-test:
@@ -26,22 +39,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        # Windows 10/11 and Ubuntu LTS releases (PRD §5). Fedora/Arch are validated
+        # separately until containerized jobs are added.
+        os: [windows-2025, ubuntu-24.04, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      # Linux windowing/Vulkan dev packages - needed once platform/rendering crates land.
-      # - name: Install Linux dependencies
-      #   if: runner.os == 'Linux'
-      #   run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libvulkan-dev mesa-vulkan-drivers
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Linux windowing/Vulkan dev packages are added here when platform/rendering crates land
+      # (list maintained in docs/development/setup.md).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo xtask layers
 
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-24.04
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo doc --workspace --no-deps --document-private-items --locked
+
   deny:
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2

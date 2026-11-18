@@ -1,0 +1,8 @@
+# Default reviewers. Refine per area (e.g. /crates/rendering/) as maintainers join.
+*                       @mrgyarmati
+
+# Architecture and policy changes always need maintainer review.
+/docs/decisions/        @mrgyarmati
+/docs/architecture/     @mrgyarmati
+/deny.toml              @mrgyarmati
+/.github/               @mrgyarmati

@@ -32,7 +32,7 @@ tools. It has Unreal Engine-class ambitions and an editor that Unreal developers
 ## Building
 
 ```sh
-cargo xtask ci     # fmt check + clippy + tests + layer check
+cargo xtask ci     # fmt check + clippy + tests + rustdoc + layer check
 ```
 
 See [setup](docs/development/setup.md) for platform prerequisites.

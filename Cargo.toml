@@ -35,8 +35,7 @@ print_stderr = "warn"
 unwrap_used = "warn"
 mem_forget = "warn"
 
-[profile.dev]
-# Keep dependencies fast in debug builds; engine code stays debuggable.
+# Optimize third-party dependencies in debug builds; workspace crates stay fully debuggable.
 [profile.dev.package."*"]
 opt-level = 2
 

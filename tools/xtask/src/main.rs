@@ -15,7 +15,7 @@ const USAGE: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  ci       Run everything CI runs: fmt check, clippy (-D warnings), tests, layer check
+  ci       Run everything CI runs: fmt check, clippy (-D warnings), tests, rustdoc, layer check
   layers   Check workspace crate layering rules (docs/architecture/TAD.md section 4)
   help     Show this message";
 
@@ -53,9 +53,14 @@ fn workspace_root() -> PathBuf {
 }
 
 fn run_cargo(args: &[&str]) -> Result<(), String> {
+    run_cargo_with_env(args, &[])
+}
+
+fn run_cargo_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     println!("\n==> cargo {}", args.join(" "));
     let status = Command::new(cargo())
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(workspace_root())
         .status()
         .map_err(|e| format!("failed to launch cargo: {e}"))?;
@@ -77,6 +82,16 @@ fn ci() -> Result<(), String> {
         "warnings",
     ])?;
     run_cargo(&["test", "--workspace"])?;
+    // Same flags as the CI `rustdoc` job: broken intra-doc links and doc warnings fail the build.
+    run_cargo_with_env(
+        &[
+            "doc",
+            "--workspace",
+            "--no-deps",
+            "--document-private-items",
+        ],
+        &[("RUSTDOCFLAGS", "-D warnings")],
+    )?;
     println!("\n==> layer check");
     layers::run(&cargo(), &workspace_root())?;
     println!("\nci: all checks passed");

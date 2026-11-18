@@ -6,9 +6,10 @@
 
 ## Context
 
-The editor should feel familiar to Unreal developers, and a local Unreal Engine source checkout is
-available for reference (path in `docs/UnrealEngineSource.txt`). Unreal source is licensed under the
-Epic Games EULA, which is incompatible with redistributing derived code in an MIT/Apache-2.0 project.
+The editor should feel familiar to Unreal developers, and contributors may have a local Unreal
+Engine source checkout for reference. Each contributor records its path in the git-ignored
+`.claude/unreal-source.local.txt`. Unreal source is licensed under the Epic Games EULA, which is
+incompatible with redistributing derived code in an MIT/Apache-2.0 project.
 
 ## Decision
 

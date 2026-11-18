@@ -15,16 +15,31 @@
 
 ## Vulkan (needed from M1)
 
-- The GPU driver provides the Vulkan loader. The **LunarG Vulkan SDK** provides validation layers,
-  `vulkaninfo`, and shader tools (`glslc`/`dxc`/`slangc` depending on D-04).
-- Debug builds enable `VK_LAYER_KHRONOS_validation` when it's present.
-- Check with `vulkaninfo --summary`.
+- The GPU driver provides the Vulkan loader and ICD. The **LunarG Vulkan SDK** provides
+  validation layers, `vulkaninfo`, and shader tools (`glslc`, `dxc` and `slangc`; which one we use
+  is decided in D-04).
+- Minimum: a Vulkan 1.3-capable driver (ADR-0003). Reference development setup: SDK 1.4.363.1.
+- Debug builds enable `VK_LAYER_KHRONOS_validation` when it's present. Develop with it installed.
+
+### Verify your setup
+
+```sh
+vulkaninfo --summary                      # your GPU should be listed with apiVersion >= 1.3
+vulkaninfo | grep VK_LAYER_KHRONOS_validation   # must be found (PowerShell: | Select-String ...)
+```
+
+If the validation layer isn't listed, the SDK isn't registered. Reinstall the SDK through its
+official installer rather than pointing environment variables at a copied folder.
 
 ## Windows 10/11
 
-- Visual Studio 2022 Build Tools with "Desktop development with C++" (MSVC linker and Windows SDK).
+- Visual Studio Build Tools (2022 or later) with the "Desktop development with C++" workload
+  (MSVC linker and Windows SDK).
 - Toolchain target `x86_64-pc-windows-msvc`.
-- Vulkan SDK from LunarG (the installer sets `VULKAN_SDK`).
+- Vulkan SDK: use the official installer from <https://vulkan.lunarg.com/sdk/home#windows>, or
+  `winget install KhronosGroup.VulkanSDK`. It installs to `C:\VulkanSDK\<version>`, sets
+  `VULKAN_SDK` machine-wide, adds the SDK to `PATH`, and registers the layers. Open a new terminal
+  afterwards.
 
 ## Linux
 
@@ -55,7 +70,14 @@ This list will be finalized when the platform crates land.
 
 ## Unreal Engine source (UX reference, optional)
 
-The local path is recorded in `docs/UnrealEngineSource.txt`. Read
-[ADR-0007](../decisions/0007-unreal-source-as-ux-reference-only.md) before using it: behaviour
-reference only, never code. To let Claude Code read it, add the path to
-`permissions.additionalDirectories` in `.claude/settings.local.json` (machine-specific, not committed).
+Read [ADR-0007](../decisions/0007-unreal-source-as-ux-reference-only.md) first: Unreal source is
+a behaviour reference only, never a source of code. Access requires an Epic Games account
+linked to GitHub, which is not needed to build or contribute to Oxreal.
+
+To use it with Claude Code (the `unreal-ux-researcher` agent):
+
+1. Write the absolute path of your checkout as a single line in `.claude/unreal-source.local.txt`.
+   The file is git-ignored by the `.claude/*.local.*` pattern.
+2. Allow Claude Code to read that directory by adding it to `permissions.additionalDirectories`
+   in `.claude/settings.local.json`. Also add matching `Edit` and `Write` deny rules for it, so
+   the checkout stays read-only.

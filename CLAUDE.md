@@ -26,7 +26,7 @@ scaffold empty placeholder crates. Use the `new-crate` skill.
 ## Commands
 
 ```sh
-cargo xtask ci          # everything CI runs: fmt check, clippy -D warnings, tests, layer check
+cargo xtask ci          # everything CI runs: fmt check, clippy -D warnings, tests, rustdoc, layer check
 cargo xtask layers      # enforce crate layer/dependency rules (docs/architecture/TAD.md §4)
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
@@ -63,7 +63,7 @@ Run `cargo xtask ci` before saying that work is done. Report what was tested and
 
 ## Unreal Engine source reference
 
-A local Unreal Engine source checkout path is recorded in `docs/UnrealEngineSource.txt`
+A local Unreal Engine source checkout path is recorded per machine in the git-ignored `.claude/unreal-source.local.txt`
 (currently `H:\UnrealEngine\UnrealEngine`). Use it **only as a UX and terminology reference**:
 editor layout, panel names, shortcuts, workflow behaviour. The UE source is under the Epic EULA,
 and this project is MIT/Apache-2.0.

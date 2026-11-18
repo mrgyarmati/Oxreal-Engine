@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a new capability or improvement.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [PRD](https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/product/PRD.md) scope first. Oxreal is game-focused, so
+        ArchViz, film/VP, CAD and general modelling are out of scope. Architectural proposals may
+        need an ADR (docs/decisions).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do, and why is it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behaviour. For editor UX, note the familiar Unreal equivalent if any.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Runtime / ECS
+        - Rendering
+        - Editor
+        - Assets / import
+        - Gameplay framework
+        - Physics / animation / AI
+        - Audio / UI / networking
+        - Build / tooling / CI
+        - Documentation
+    validations:
+      required: true
