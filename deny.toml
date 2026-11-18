@@ -1,0 +1,48 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Policy rationale lives in docs/development/dependencies.md and ADR-0001.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Permissive licenses compatible with MIT OR Apache-2.0 distribution.
+# Adding a license here (especially copyleft such as MPL/LGPL) needs a documented review.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# ADR-0001: no existing engine as a foundation.
+deny = [
+    { name = "bevy", reason = "ADR-0001: greenfield engine" },
+    { name = "bevy_ecs", reason = "ADR-0001/0005: engine-owned ECS" },
+    { name = "bevy_reflect", reason = "ADR-0001: engine-owned reflection" },
+    { name = "bevy_app", reason = "ADR-0001: greenfield engine" },
+    { name = "bevy_render", reason = "ADR-0001: greenfield engine" },
+    { name = "fyrox", reason = "ADR-0001: greenfield engine" },
+    { name = "fyrox-core", reason = "ADR-0001: greenfield engine" },
+    { name = "godot", reason = "ADR-0001: greenfield engine" },
+    { name = "gdext", reason = "ADR-0001: greenfield engine" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

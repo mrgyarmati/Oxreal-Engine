@@ -1,0 +1,20 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# Engine-generated caches (derived data, cooked output, saved state)
+/DerivedDataCache/
+/Saved/
+/Cooked/
+**/.ddc/
+
+# IDE / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code machine-local settings
+.claude/settings.local.json
