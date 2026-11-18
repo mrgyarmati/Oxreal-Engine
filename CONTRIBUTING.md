@@ -8,7 +8,19 @@ valuable contribution right now.
 1. Read the [PRD](docs/product/PRD.md), the [TAD](docs/architecture/TAD.md) and the
    [ADRs](docs/decisions/README.md).
 2. Identify the owning crate and its layer. Check the allowed dependencies (TAD §4).
-3. For anything architectural, open a discussion or a proposed ADR first.
+3. For anything architectural, start a thread in
+   [Discussions → Ideas](https://github.com/mrgyarmati/Oxreal-Engine/discussions/categories/ideas)
+   or open a proposed ADR first.
+
+## Where to talk
+
+| Channel | Use it for |
+|---|---|
+| [Discussions → Q&A](https://github.com/mrgyarmati/Oxreal-Engine/discussions/categories/q-a) | Questions about building, using or contributing |
+| [Discussions → Ideas](https://github.com/mrgyarmati/Oxreal-Engine/discussions/categories/ideas) | Early ideas and design conversations before an issue or ADR |
+| [Discussions → Show and tell](https://github.com/mrgyarmati/Oxreal-Engine/discussions/categories/show-and-tell) | Things you've built or experimented with |
+| [Issues](https://github.com/mrgyarmati/Oxreal-Engine/issues/new/choose) | Confirmed bugs and concrete feature proposals (use the forms) |
+| [Security advisories](https://github.com/mrgyarmati/Oxreal-Engine/security/advisories/new) | Vulnerabilities. Report them privately, never in public (see `SECURITY.md`) |
 
 ## Rules
 
