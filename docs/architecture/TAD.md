@@ -144,6 +144,36 @@ The design is open (D-02) but must be decided before M2.
 - All editor mutations go through **commands**. That gives undo/redo, scripting and automation
   (AI-automatable, PRD §2.10) the same entry point.
 
+### 5.8 Additional language support: C++ and C# (future, D-21)
+
+Implementation comes later, after the Rust gameplay API stabilizes. The constraints below apply
+**now**, so that earlier decisions don't rule it out.
+
+**Intended shape (to be decided in an ADR):**
+- A versioned **stable C ABI** layer exposes engine services to other languages: opaque handles,
+  plain-data structs, explicit ownership, error codes and no unwinding across the boundary. It is
+  generated from reflection metadata where possible and never hand-maintained per language.
+- **C++** gets generated headers with a thin RAII wrapper over the C ABI. There is no direct
+  binding to Rust types.
+- **C#** uses .NET hosting (embedding the runtime, with NativeAOT as an option) with generated
+  P/Invoke bindings. Options are evaluated in the ADR.
+- Foreign-language gameplay code plugs into the same contracts as Rust: Behaviours (ADR-0008),
+  systems with declared component access, and events. No parallel gameplay framework.
+
+**Constraints on decisions made before then:**
+1. **Reflection (D-02)** must produce language-neutral type metadata: stable type IDs, field
+   layouts, names, attributes and function signatures that tools can export. Metadata must not
+   exist only as Rust trait magic or generics.
+2. **Plugin ABI (D-13)** and **hot reload (D-11)** must treat the C ABI as the stable boundary,
+   with Rust plugins as one client of it.
+3. **Public engine services** (world access, spawning, events, assets, input) must be expressible
+   as handles plus plain data. Gameplay-facing APIs must not *require* Rust-only constructs such
+   as borrowed closures across frames or generic-only entry points.
+4. **Memory and threading rules** at the boundary must be explicit: who owns what, which threads
+   may call what, and how GC-managed C# objects reference entities (by handle, never by pointer).
+5. A future interop layer must not compromise editor/runtime separation. Its placement in the
+   layer matrix (TAD §4) is decided by the D-21 ADR.
+
 ## 6. Initial interfaces to document before M1 (sketch, non-binding)
 
 ```rust
