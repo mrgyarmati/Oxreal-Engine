@@ -26,7 +26,8 @@ scaffold empty placeholder crates. Use the `new-crate` skill.
 ## Commands
 
 ```sh
-cargo xtask ci          # everything CI runs: fmt check, clippy -D warnings, tests, rustdoc, layer check
+cargo xtask ci          # everything CI runs: fmt, clippy -D warnings, tests, rustdoc, layers, changelog
+cargo xtask changelog check   # validate changelog.d/ fragments
 cargo xtask layers      # enforce crate layer/dependency rules (docs/architecture/TAD.md §4)
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
@@ -83,7 +84,10 @@ and this project is MIT/Apache-2.0.
 - Never use the admin bypass, push to `main` directly, or force-push shared branches.
 - Work on a topic branch (`feat/…`, `fix/…`, `docs/…`, `ci/…`). Open a PR that fills in
   `.github/PULL_REQUEST_TEMPLATE.md`, then wait for green CI. The maintainer merges.
-- Add user-visible changes to `CHANGELOG.md` under `[Unreleased]`.
+- Record user-visible changes as a fragment `changelog.d/<slug>.<kind>.md` (ADR-0009). Never edit
+  `CHANGELOG.md` directly. It is only written at release time by `cargo xtask changelog release`.
+- Versioning: one SemVer version for all crates, and `main` carries `X.Y.0-dev` (ADR-0009,
+  `docs/development/releasing.md`).
 - Security issues go through private advisories (`SECURITY.md`), never public issues.
 
 ## Workflow (from brief §16)

@@ -5,6 +5,7 @@
 // This is a CLI tool, so printing is its output.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod changelog;
 mod layers;
 
 use std::env;
@@ -15,14 +16,21 @@ const USAGE: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  ci       Run everything CI runs: fmt check, clippy (-D warnings), tests, rustdoc, layer check
-  layers   Check workspace crate layering rules (docs/architecture/TAD.md section 4)
-  help     Show this message";
+  ci                           Run everything CI runs: fmt check, clippy (-D warnings), tests,
+                               rustdoc, layer check, changelog fragment check
+  layers                       Check workspace crate layering rules (docs/architecture/TAD.md section 4)
+  changelog check              Validate changelog fragments in changelog.d/ (ADR-0009)
+  changelog release <X.Y.Z> [--dry-run]
+                               Write fragments into CHANGELOG.md as release X.Y.Z and delete them
+                               (--dry-run: print the section only, change nothing)
+  help                         Show this message";
 
 fn main() -> ExitCode {
-    let result = match env::args().nth(1).as_deref() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let result = match args.first().map(String::as_str) {
         Some("ci") => ci(),
         Some("layers") => layers::run(&cargo(), &workspace_root()),
+        Some("changelog") => changelog::run(&workspace_root(), &args[1..]),
         Some("help" | "-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -94,6 +102,8 @@ fn ci() -> Result<(), String> {
     )?;
     println!("\n==> layer check");
     layers::run(&cargo(), &workspace_root())?;
+    println!("\n==> changelog fragment check");
+    changelog::run(&workspace_root(), &["check".to_owned()])?;
     println!("\nci: all checks passed");
     Ok(())
 }

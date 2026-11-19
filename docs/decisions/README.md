@@ -6,6 +6,13 @@ change a decision, write a new ADR that supersedes the old one. Don't rewrite hi
 
 Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Deprecated**.
 
+**How a decision is made.** An ADR arrives in a pull request.
+- If the PR sets the status to **Accepted**, merging it accepts the decision, and the PR review
+  is the decision discussion.
+- A **Proposed** ADR may be merged to record a direction that still needs research. It is
+  accepted later by a follow-up PR that changes only its status (and any refinements).
+- Implementation that depends on a decision waits until its ADR is Accepted.
+
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-greenfield-engine-architecture.md) | Greenfield engine architecture | Accepted |
@@ -16,6 +23,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0006](0006-asset-identity-and-non-destructive-reimport.md) | Stable asset identity and non-destructive reimport | Proposed |
 | [0007](0007-unreal-source-as-ux-reference-only.md) | Unreal Engine source is a UX reference only | Accepted |
 | [0008](0008-unreal-style-gameplay-framework-on-ecs.md) | Unreal-style gameplay framework on top of the engine ECS | Proposed |
+| [0009](0009-versioning-and-release-policy.md) | Versioning and release policy | Accepted |
 
 Open questions that still need ADRs are tracked in
 [`../development/open-decisions.md`](../development/open-decisions.md).

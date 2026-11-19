@@ -21,7 +21,7 @@
 - [ ] No new third-party dependency, **or** it's listed in `docs/development/dependencies.md` with an audit
 - [ ] Every `unsafe` block has a `// SAFETY:` comment
 - [ ] Public API documented. User-facing docs updated where relevant
-- [ ] `CHANGELOG.md` updated (user-visible changes)
+- [ ] Changelog fragment added in `changelog.d/` for user-visible changes (see `changelog.d/README.md`)
 - [ ] No code, shaders or assets derived from Unreal Engine source (ADR-0007)
 
 ## Remaining work / known limitations
