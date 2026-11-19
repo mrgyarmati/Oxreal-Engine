@@ -16,3 +16,4 @@ may contain breaking changes.
 - Contribution guidelines, issue and PR templates, Dependabot configuration.
 - Security policy with private vulnerability reporting.
 - GitHub Discussions (Q&A, Ideas, Show and tell) linked from the issue chooser and CONTRIBUTING.
+- Code of Conduct (Contributor Covenant 3.0) with a confidential reporting address.
