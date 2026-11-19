@@ -32,12 +32,13 @@ serde_json = "1"
 glam = { version = "0.34.3", default-features = false, features = ["std", "f64", "i32", "u32"] }
 
 # Windowing (ADR-0015): winit 0.30 stable line. Linux libraries are loaded at runtime (dlopen).
+# `-notitle` decorations avoid ab_glyph -> ttf-parser (unmaintained, RUSTSEC-2026-0192).
 winit = { version = "0.30.13", default-features = false, features = [
     "rwh_06",
     "x11",
     "wayland",
     "wayland-dlopen",
-    "wayland-csd-adwaita",
+    "wayland-csd-adwaita-notitle",
 ] }
 raw-window-handle = "0.6.2"
 
