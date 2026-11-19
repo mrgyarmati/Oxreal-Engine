@@ -37,21 +37,32 @@ jobs:
           done
           echo "crashes: $crashes / 60"
           ls -la /tmp/core.* 2>/dev/null | head
-      - name: backtraces from core dumps
-        shell: bash
-        run: |
-          set +e
-          for core in $(ls /tmp/core.* 2>/dev/null | head -3); do
-            echo "=== $core"
-            gdb -q -batch -ex "set pagination off" -ex "info threads" -ex "thread apply all bt 30" "$bin" "$core" 2>&1 \
-              | grep -vE "^warning: |auto-load|libthread_db" | head -250
-          done
-      - name: again with validation layers off (layer or driver?)
+      - name: crashing thread only, with loaded libraries
+        if: always()
         shell: bash
         run: |
           set +e +o pipefail
-          crashes=0
-          for i in $(seq 1 60); do
-            OXREAL_VULKAN_VALIDATION=0 "$bin" --ignored > /tmp/run.log 2>&1 || { crashes=$((crashes+1)); tail -3 /tmp/run.log; }
+          for core in $(ls /tmp/core.* 2>/dev/null | head -4); do
+            echo "=== $core"
+            gdb -q -batch -ex "set pagination off" -ex "bt 40" -ex "info symbol \$pc" "$bin" "$core" > /tmp/gdb.txt 2>&1
+            grep -vE "^warning: |auto-load|libthread_db|^\[New LWP" /tmp/gdb.txt | head -60
           done
-          echo "crashes without validation (assertions may fail by design): $crashes / 60"
+      - name: same loop with validation layers off (count only SIGSEGV, exit 139)
+        if: always()
+        shell: bash
+        run: |
+          set +e +o pipefail
+          segv=0
+          for i in $(seq 1 60); do
+            OXREAL_VULKAN_VALIDATION=0 "$bin" --ignored > /tmp/run.log 2>&1; [ $? -eq 139 ] && segv=$((segv+1))
+          done
+          echo "SIGSEGV without validation layers: $segv / 60"
+      - name: same loop, device creation only (tests/device.rs, 2 threads)
+        if: always()
+        shell: bash
+        run: |
+          set +e +o pipefail
+          dev=$(cargo test -p oxreal-rhi-vulkan --test device --no-run --locked --message-format=json 2>/dev/null | jq -r 'select(.executable != null) | .executable' | tail -1)
+          segv=0
+          for i in $(seq 1 60); do "$dev" --ignored > /tmp/run.log 2>&1; [ $? -eq 139 ] && segv=$((segv+1)); done
+          echo "SIGSEGV in device tests: $segv / 60"
