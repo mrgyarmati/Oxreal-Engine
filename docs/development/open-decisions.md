@@ -23,7 +23,7 @@ decision and consequences (use the `adr-author` agent). Update the status here w
 | D-14 | Linux packaging (tarball, Flatpak, AppImage) and graphics driver support matrix (Vulkan baseline version) | M1 / M7 | Open | |
 | D-15 | Working title and crate name prefix | before first engine crate | **Resolved 2026-11-18**: Oxreal, crate prefix `oxreal-`. Checked against crates.io, GitHub and the web. A formal trademark search is still pending before the public launch | n/a |
 | D-16 | Reference hardware for performance targets | M1 | Open | |
-| D-17 | Math library and engine conventions: glam vs own, coordinate system, handedness, units | M1 | Open | |
+| D-17 | Math library and engine conventions: glam vs own, coordinate system, handedness, units | M1 | **Resolved**: glam re-exported by `oxreal-math`; right-handed +Y up, metres, −Z forward; Y-up [0, 1] clip space; reversed infinite depth | [ADR-0011](../decisions/0011-math-library-and-coordinate-conventions.md) |
 | D-18 | Error-handling crates (thiserror / anyhow) and diagnostics stack (tracing, profiling: tracy / puffin) | M0 | **Resolved**: thiserror (libraries), anyhow (apps and tools), tracing through `oxreal-diagnostics`, Tracy behind `profile-tracy` | [ADR-0010](../decisions/0010-errors-logging-and-profiling.md) |
 | D-19 | GPU testing in CI (lavapipe / SwiftShader software Vulkan, self-hosted GPU runners) | M1 | Open | |
 | D-20 | Gameplay framework model: Actor/Pawn/Controller/GameMode concepts on ECS, behaviours, templates | before M4 (shapes M1 ECS) | Proposed | [ADR-0008](../decisions/0008-unreal-style-gameplay-framework-on-ecs.md) |

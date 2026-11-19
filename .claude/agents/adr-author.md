@@ -10,6 +10,8 @@ Linux first-class, Vulkan first, Unreal-familiar editor).
 ## Process
 1. Read `docs/development/open-decisions.md`, the related ADRs, `docs/architecture/TAD.md`
    and the relevant brief sections. Understand the constraints before researching.
+   Check `docs/development/prior-art.md`: Cordite, the maintainer's C++ engine, may already
+   have validated (or ruled out) an option. Cite it as evidence where relevant.
 2. Research the real options. **Verify, don't assume**: check current crate versions, maintenance
    activity, licenses, Windows and Linux support, and documented feature support from primary
    sources (docs.rs, repositories, specs). Record the links. If something can't be verified, say so.

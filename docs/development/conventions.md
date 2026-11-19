@@ -76,10 +76,23 @@ These rules follow [ADR-0010](../decisions/0010-errors-logging-and-profiling.md)
   GPU CI exists (D-19).
 - Benchmarks go in `benchmarks/` and must name their hardware, content and workload.
 
-## Coordinates and units (provisional, D-17)
+## Math, coordinates and units
 
-To be decided in an ADR before M1 rendering lands. Until then, don't hard-code assumptions; route
-them through `foundation/math` constants.
+These rules follow [ADR-0011](../decisions/0011-math-library-and-coordinate-conventions.md).
+
+- Import math types from `oxreal_math` (which re-exports `glam`), never from `glam` directly.
+- **Right-handed, +Y up, +X right, forward is −Z.** Identity rotation and cameras face −Z.
+- **SI units:** metres, kilograms, seconds. The editor may display other units, but data never
+  stores them.
+- Rotations are unit quaternions. Angles are **radians** in code and **degrees** in UI and
+  human-edited files.
+- Column-major matrices and column vectors, with `world = parent * local`.
+- Clip space is **Y up, depth [0, 1]** on every backend. Vulkan flips with a negative viewport
+  height.
+- Scene depth is **reversed** with an infinite far plane: `D32_SFLOAT`, cleared to 0, compared
+  with `GREATER_OR_EQUAL`. Use the `oxreal_math` projection functions. Never build projection
+  matrices by hand.
+- Do all color math in linear RGB. Convert to or from sRGB only at storage and display boundaries.
 
 ## Commits and PRs
 
