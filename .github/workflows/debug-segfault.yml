@@ -1,0 +1,40 @@
+# TEMPORARY: diagnoses a SIGSEGV in the triangle tests on Lavapipe / Ubuntu 26.04 (PR #24).
+# This branch is never merged.
+name: debug-segfault
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  segfault:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools vulkan-validationlayers gdb
+          dpkg -l | grep -E "mesa-vulkan|vulkan-validationlayers|libvulkan1" | awk '{print $2, $3}'
+      - run: cargo xtask slang install
+      - run: cargo test -p oxreal-rhi-vulkan --test triangle --no-run --locked 2>&1 | tail -3
+      - name: each test alone
+        shell: bash
+        run: |
+          bin=$(ls -t target/debug/deps/triangle-* 2>/dev/null | grep -v '\.d$' | head -1)
+          [ -n "$bin" ] || bin=$(find target -type f -executable -name 'triangle-*' | head -1)
+          echo "binary: $bin"; echo "bin=$bin" >> "$GITHUB_ENV"
+          for t in invalid_descriptions_are_rejected_with_reasons misuse_is_reported_at_submit_without_validation_errors objects_destroyed_while_recording_outlive_the_submission triangle_points_up_and_has_its_corner_colors counter_clockwise_triangles_are_front_faces; do
+            echo "=== $t"; "$bin" --ignored --exact "$t" --test-threads=1 2>&1 | tail -4; echo "exit=${PIPESTATUS[0]}"
+          done
+      - name: all tests, single thread
+        shell: bash
+        run: '"$bin" --ignored --test-threads=1 2>&1 | tail -8; echo "exit=${PIPESTATUS[0]}"'
+      - name: all tests in parallel under gdb
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            echo "=== attempt $i"
+            gdb -q -batch -ex "set pagination off" -ex run -ex "thread apply all bt 25" --args "$bin" --ignored 2>&1 \
+              | grep -vE "^\[(New|Thread .* exited)" | tail -120
+          done
