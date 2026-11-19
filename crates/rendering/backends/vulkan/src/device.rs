@@ -1,18 +1,20 @@
 //! GPU selection, the logical device and the memory allocator.
 
-use std::sync::Mutex;
+use std::ffi::{CStr, CString};
+use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use oxreal_diagnostics::{info, warn};
 use oxreal_rhi::{
-    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, DeviceDesc, GpuSelection, RhiError,
-    select_adapter,
+    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, DeviceDesc, Frame, GpuSelection,
+    HandlePool, RhiError, SurfaceDesc, SurfaceHandle, SurfaceTarget, select_adapter,
 };
 
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
 use crate::instance::{VulkanInstance, format_version};
+use crate::present::{Surface, Texture};
 
 /// Creates a Vulkan device according to `desc`.
 ///
@@ -59,9 +61,54 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         });
     };
 
-    let logical = create_logical_device(&instance.instance, probe.physical_device, queue_family)?;
+    // Presentation needs VK_KHR_swapchain. A device without it still works headless, and
+    // `create_surface` reports the limitation.
+    // SAFETY: `probe.physical_device` belongs to the live instance.
+    let device_extensions = unsafe {
+        instance
+            .instance
+            .enumerate_device_extension_properties(probe.physical_device)
+    }
+    .map_err(|e| from_vk("vkEnumerateDeviceExtensionProperties", e))?;
+    let swapchain_available = instance.surface_support()
+        && device_extensions.iter().any(|e| {
+            e.extension_name_as_c_str()
+                .is_ok_and(|n| n == ash::khr::swapchain::NAME)
+        });
+    let enabled_extensions: Vec<&CStr> = if swapchain_available {
+        vec![ash::khr::swapchain::NAME]
+    } else {
+        Vec::new()
+    };
+
+    let logical = create_logical_device(
+        &instance.instance,
+        probe.physical_device,
+        queue_family,
+        &enabled_extensions,
+    )?;
     // SAFETY: queue family `queue_family`, index 0, was requested in `create_logical_device`.
     let queue = unsafe { logical.device.get_device_queue(queue_family, 0) };
+
+    // One timeline semaphore paces every submission on the queue (ADR-0016 §4).
+    let mut timeline_type = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let timeline_info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_type);
+    // SAFETY: the device is alive and timelineSemaphore is enabled (a required feature).
+    let timeline = unsafe { logical.device.create_semaphore(&timeline_info, None) }
+        .map_err(|e| from_vk("vkCreateSemaphore (timeline)", e))?;
+
+    let loaders = Loaders {
+        surface: instance
+            .surface_support()
+            .then(|| ash::khr::surface::Instance::new(&instance.entry, &instance.instance)),
+        swapchain: swapchain_available
+            .then(|| ash::khr::swapchain::Device::new(&instance.instance, &logical.device)),
+        debug: instance
+            .debug_utils()
+            .then(|| ash::ext::debug_utils::Device::new(&instance.instance, &logical.device)),
+    };
 
     let allocator = Allocator::new(&AllocatorCreateDesc {
         instance: instance.instance.clone(),
@@ -84,32 +131,89 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         driver_info = %adapter_info.driver_info,
         vulkan = %adapter_info.api_version,
         validation = instance.validation_enabled(),
+        presentation = swapchain_available,
         "Vulkan device created"
     );
 
-    Ok(VulkanDevice {
+    let device = VulkanDevice {
+        surfaces: Mutex::new(HandlePool::new()),
+        textures: Arc::new(Mutex::new(HandlePool::new())),
+        queue: Mutex::new(QueueState {
+            queue,
+            timeline_value: 0,
+        }),
+        timeline,
+        loaders,
         allocator: Mutex::new(Some(allocator)),
-        queue,
         queue_family,
         physical_device: probe.physical_device,
         adapter_info,
         logical,
         instance,
-    })
+    };
+    device.name_object(timeline, "Oxreal queue timeline");
+    Ok(device)
 }
 
-/// A Vulkan device: the selected GPU, a graphics+compute queue and the memory allocator.
+/// Extension function tables, present when their extension is enabled.
+pub(crate) struct Loaders {
+    pub(crate) surface: Option<ash::khr::surface::Instance>,
+    pub(crate) swapchain: Option<ash::khr::swapchain::Device>,
+    pub(crate) debug: Option<ash::ext::debug_utils::Device>,
+}
+
+/// The queue and its timeline. Vulkan requires external synchronization for queue access, so
+/// both live behind one mutex. Submission order and timeline values stay consistent.
+pub(crate) struct QueueState {
+    pub(crate) queue: vk::Queue,
+    /// The last timeline value signalled by a submission.
+    pub(crate) timeline_value: u64,
+}
+
+/// A Vulkan device: the selected GPU, a graphics+compute queue, the memory allocator, and the
+/// surfaces and textures created on it.
 ///
-/// **Field order is the destruction order:** the allocator frees its memory first, then the
-/// logical device is destroyed (after waiting for the GPU), then the instance.
+/// Teardown order: `Drop` waits for the GPU, destroys every surface (swapchains, views,
+/// semaphores, command pools) and the timeline, and frees the allocator. Then the fields drop in
+/// declaration order, destroying the logical device and finally the instance.
 pub struct VulkanDevice {
+    pub(crate) surfaces: Mutex<HandlePool<Surface>>,
+    pub(crate) textures: Arc<Mutex<HandlePool<Texture>>>,
+    pub(crate) queue: Mutex<QueueState>,
+    pub(crate) timeline: vk::Semaphore,
+    pub(crate) loaders: Loaders,
     allocator: Mutex<Option<Allocator>>,
-    queue: vk::Queue,
-    queue_family: u32,
-    physical_device: vk::PhysicalDevice,
+    pub(crate) queue_family: u32,
+    pub(crate) physical_device: vk::PhysicalDevice,
     adapter_info: AdapterInfo,
     logical: LogicalDevice,
-    instance: VulkanInstance,
+    pub(crate) instance: VulkanInstance,
+}
+
+impl VulkanDevice {
+    /// The logical device.
+    pub(crate) fn raw(&self) -> &ash::Device {
+        &self.logical.device
+    }
+
+    /// Gives a Vulkan object a name for validation messages and GPU debuggers (ADR-0003). Does
+    /// nothing without `VK_EXT_debug_utils`.
+    pub(crate) fn name_object<H: vk::Handle>(&self, handle: H, name: &str) {
+        let Some(debug) = &self.loaders.debug else {
+            return;
+        };
+        let Ok(name) = CString::new(name.replace('\0', "")) else {
+            return;
+        };
+        let info = vk::DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(handle)
+            .object_name(&name);
+        // SAFETY: `handle` is a live object of this device, and `info` and `name` are alive
+        // across the call. Naming has no other preconditions.
+        if let Err(e) = unsafe { debug.set_debug_utils_object_name(&info) } {
+            warn!(error = ?e, "failed to name a Vulkan object");
+        }
+    }
 }
 
 impl std::fmt::Debug for VulkanDevice {
@@ -117,8 +221,8 @@ impl std::fmt::Debug for VulkanDevice {
         f.debug_struct("VulkanDevice")
             .field("adapter", &self.adapter_info.name)
             .field("queue_family", &self.queue_family)
-            .field("queue", &self.queue)
             .field("physical_device", &self.physical_device)
+            .field("presentation", &self.loaders.swapchain.is_some())
             .field("instance", &self.instance)
             .finish_non_exhaustive()
     }
@@ -131,6 +235,17 @@ impl Drop for VulkanDevice {
         if let Err(e) = unsafe { self.logical.device.device_wait_idle() } {
             warn!(error = ?e, "vkDeviceWaitIdle failed while destroying the device");
         }
+        // Surfaces the application didn't destroy: their swapchains, views, semaphores and
+        // command pools go before the device. Their windows are released afterwards.
+        let surfaces = match self.surfaces.get_mut() {
+            Ok(pool) => pool.drain(),
+            Err(poisoned) => poisoned.into_inner().drain(),
+        };
+        for surface in surfaces {
+            self.destroy_surface_objects(surface);
+        }
+        // SAFETY: the GPU is idle, so no submission still signals or waits on the timeline.
+        unsafe { self.logical.device.destroy_semaphore(self.timeline, None) };
         // Free GPU memory explicitly, before the logical device is destroyed. Field order
         // guarantees the same, but making it explicit documents the requirement.
         let allocator = match self.allocator.get_mut() {
@@ -158,6 +273,35 @@ impl oxreal_rhi::Device for VulkanDevice {
         // SAFETY: the device is alive for `&self`. Waiting has no other preconditions.
         unsafe { self.logical.device.device_wait_idle() }
             .map_err(|e| from_vk("vkDeviceWaitIdle", e))
+    }
+
+    fn create_surface(
+        &self,
+        window: Arc<dyn SurfaceTarget>,
+        desc: &SurfaceDesc,
+    ) -> Result<SurfaceHandle, RhiError> {
+        self.create_surface_impl(window, desc)
+    }
+
+    fn resize_surface(
+        &self,
+        surface: SurfaceHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RhiError> {
+        self.resize_surface_impl(surface, width, height)
+    }
+
+    fn destroy_surface(&self, surface: SurfaceHandle) -> Result<(), RhiError> {
+        self.destroy_surface_impl(surface)
+    }
+
+    fn begin_frame(&self, surface: SurfaceHandle) -> Result<Option<Frame>, RhiError> {
+        self.begin_frame_impl(surface)
+    }
+
+    fn end_frame(&self, frame: Frame) -> Result<(), RhiError> {
+        self.end_frame_impl(frame)
     }
 }
 
@@ -289,7 +433,10 @@ fn create_logical_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     queue_family: u32,
+    extensions: &[&CStr],
 ) -> Result<LogicalDevice, RhiError> {
+    let extension_names: Vec<*const std::ffi::c_char> =
+        extensions.iter().map(|name| name.as_ptr()).collect();
     let priorities = [1.0_f32];
     let queue_info = vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family)
@@ -308,12 +455,13 @@ fn create_logical_device(
         .push_next(&mut v13);
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_infos)
+        .enabled_extension_names(&extension_names)
         .push_next(&mut features2);
 
-    // SAFETY: `physical_device` belongs to `instance`. Every enabled feature was verified as
-    // supported during selection. All structures referenced by `create_info` are alive across
-    // the call. `pEnabledFeatures` is null because PhysicalDeviceFeatures2 is chained, as the
-    // spec requires.
+    // SAFETY: `physical_device` belongs to `instance`. Every enabled feature and extension was
+    // verified as supported. All structures and name strings referenced by `create_info` are
+    // alive across the call. `pEnabledFeatures` is null because PhysicalDeviceFeatures2 is
+    // chained, as the spec requires.
     let device = unsafe { instance.create_device(physical_device, &create_info, None) }
         .map_err(|e| from_vk("vkCreateDevice", e))?;
     Ok(LogicalDevice { device })

@@ -11,7 +11,11 @@
 //!   (`tools/ci/required-vulkan-features.txt`, kept in sync with this crate by a test).
 //! - The logical device, a graphics+compute queue and the GPU memory allocator.
 //!
-//! Swapchains and the frame loop come in the next slice.
+//! - Surfaces and swapchains (recreated internally on resize, out-of-date and minimize) and
+//!   the frame loop: two frames in flight paced by one timeline semaphore, per-image present
+//!   semaphores, synchronization2 barriers and dynamic rendering (ADR-0017).
+//!
+//! See `examples/clear.rs` for the whole loop in about 200 lines.
 //!
 //! # Environment variables
 //!
@@ -23,9 +27,11 @@
 
 mod debug;
 mod device;
+mod encoder;
 mod error;
 mod features;
 mod instance;
+mod present;
 
 pub use device::{VulkanDevice, create_device};
 pub use instance::VALIDATION_ENV_VAR;

@@ -24,6 +24,7 @@ Columns:
 | winit | 0.30.13 (`rwh_06`, `x11`, `wayland`, `wayland-dlopen`, `wayland-csd-adwaita-notitle`; no defaults) | Apache-2.0 | `oxreal-window` | Windows and event loop on Win32, Wayland and X11 (ADR-0015) | No (wrapped. Engine `App` trait and event enum.) | Very active, 0.30.13 stable (2026-03), 0.31 in beta. ~68M downloads. | Win + Linux. Linux libraries loaded at runtime (dlopen), no build-time system packages. | 2026-11-19 |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | `oxreal-window` (and the Vulkan backend later) | Native window and display handles for surface creation | **Yes, deliberately** (ADR-0015 §2): `Window` implements its traits | Stable 0.6 line since 2024-05. ~139M downloads. Ecosystem standard. | Win + Linux (pure Rust) | 2026-11-19 |
 | ash | 0.38.0+1.3.281 (`loaded`, `debug`, `std`; no defaults) | MIT OR Apache-2.0 | `oxreal-rhi-vulkan` | Vulkan bindings, with the loader loaded at runtime (ADR-0012) | No (confined to `oxreal-rhi-vulkan`) | Repository active (2026-11). Latest release 2024-04 (Vulkan 1.3.281). ~54M downloads. | Win + Linux. Runtime loading via `libloading` (ISC). | 2026-11-19 |
+| ash-window | 0.13.0 | MIT OR Apache-2.0 | `oxreal-rhi-vulkan` | Vulkan surfaces from `raw-window-handle` (Win32, Wayland, Xlib, XCB) (ADR-0012) | No | Same maintainers as `ash`. Released 2024-04. Small, stable. | Win + Linux (pure Rust) | 2026-11-19 |
 | gpu-allocator | 0.28.0 (`std`, `vulkan`; no defaults) | MIT OR Apache-2.0 | `oxreal-rhi-vulkan` | GPU memory sub-allocation (ADR-0012) | No (behind the RHI memory module) | Very active (repository 2026-11-18). ~33M downloads. Logs via `log`, forwarded by `tracing-log`. | Win + Linux (pure Rust) | 2026-11-19 |
 | tracy-client | 0.19.0 (`enable`, `ondemand`, `only-localhost`; no defaults) | MIT/Apache-2.0. Bundled Tracy C++ client (`tracy-client-sys` 0.30.1) is BSD-3-Clause. | `oxreal-diagnostics` (`profile-tracy` feature only) | Tracy profiler zones and frame marks | No (wrapped by `profile_*` macros) | Released 2026-08. ~14M downloads. | Win + Linux. Builds C++ with `cc` (MSVC / gcc / clang). | 2026-11-19 |
 
@@ -64,7 +65,6 @@ Columns:
 ## Candidates under evaluation (not yet adopted)
 
 These come from brief §11 and later ADRs, and are not commitments until a crate adopts them:
-- ash-window (ADR-0012), with the swapchain slice
 - Rapier and Jolt bindings
 - Kira
 - egui

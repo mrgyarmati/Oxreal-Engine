@@ -48,6 +48,7 @@ raw-window-handle = "0.6.2"
 # Vulkan backend (ADR-0012): runtime-loaded loader; allocator with the Vulkan backend only.
 ash = { version = "0.38.0", default-features = false, features = ["loaded", "debug", "std"] }
 gpu-allocator = { version = "0.28.0", default-features = false, features = ["std", "vulkan"] }
+ash-window = "0.13.0"
 
 # Errors and diagnostics (ADR-0010).
 thiserror = "2.0.21"
@@ -70,7 +71,9 @@ tracy-client = { version = "0.19.0", default-features = false, features = [
 
 # Workspace crates. Each one's layer is checked by `cargo xtask layers`.
 oxreal-diagnostics = { path = "crates/foundation/diagnostics" }
+oxreal-math = { path = "crates/foundation/math" }
 oxreal-rhi = { path = "crates/rendering/rhi" }
+oxreal-window = { path = "crates/platform/window" }
 
 # Lint policy: docs/development/coding-standards.md. CI runs clippy with `-D warnings`, so every
 # "warn" here fails CI. Suppress a lint only with `#[expect(lint, reason = "...")]`.

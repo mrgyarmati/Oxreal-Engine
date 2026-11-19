@@ -25,6 +25,8 @@ pub(crate) struct VulkanInstance {
     pub(crate) instance: ash::Instance,
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     validation: bool,
+    surface_support: bool,
+    debug_utils: bool,
     debug_state: Box<DebugState>,
     pub(crate) entry: ash::Entry,
 }
@@ -82,10 +84,26 @@ impl VulkanInstance {
         // SAFETY: `entry` is a loaded loader. `None` lists the implementation's extensions.
         let extensions = unsafe { entry.enumerate_instance_extension_properties(None) }
             .map_err(|e| from_vk("vkEnumerateInstanceExtensionProperties", e))?;
-        let debug_utils_available = extensions.iter().any(|e| {
-            e.extension_name_as_c_str()
-                .is_ok_and(|n| n == ash::ext::debug_utils::NAME)
-        });
+        let available = |name: &CStr| {
+            extensions
+                .iter()
+                .any(|e| e.extension_name_as_c_str().is_ok_and(|n| n == name))
+        };
+        let debug_utils_available = available(ash::ext::debug_utils::NAME);
+        // Presentation: the generic surface extension plus every platform surface the loader
+        // offers. One binary serves Win32, Wayland and X11 (ADR-0015). Missing ones just mean
+        // that kind of window can't be presented to, which surface creation reports.
+        let surface_extensions: Vec<&CStr> = [
+            ash::khr::surface::NAME,
+            ash::khr::win32_surface::NAME,
+            ash::khr::wayland_surface::NAME,
+            ash::khr::xlib_surface::NAME,
+            ash::khr::xcb_surface::NAME,
+        ]
+        .into_iter()
+        .filter(|name| available(name))
+        .collect();
+        let surface_support = surface_extensions.contains(&ash::khr::surface::NAME);
 
         let app_name = CString::new(app_name.replace('\0', "")).unwrap_or_default();
         let app_info = vk::ApplicationInfo::default()
@@ -98,11 +116,13 @@ impl VulkanInstance {
         } else {
             Vec::new()
         };
-        let extension_names: Vec<*const std::ffi::c_char> = if debug_utils_available {
-            vec![ash::ext::debug_utils::NAME.as_ptr()]
-        } else {
-            Vec::new()
-        };
+        let mut extension_names: Vec<*const std::ffi::c_char> = Vec::new();
+        if debug_utils_available {
+            extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
+        }
+        if surface_support {
+            extension_names.extend(surface_extensions.iter().map(|name| name.as_ptr()));
+        }
 
         let debug_state = Box::<DebugState>::default();
         let mut instance_messenger = messenger_create_info(&debug_state);
@@ -126,6 +146,8 @@ impl VulkanInstance {
             instance,
             debug: None,
             validation,
+            surface_support,
+            debug_utils: debug_utils_available,
             debug_state,
             entry,
         };
@@ -144,6 +166,7 @@ impl VulkanInstance {
             vulkan = %format_version(version),
             validation = this.validation,
             debug_utils = debug_utils_available,
+            surfaces = surface_support,
             "Vulkan instance created"
         );
         Ok(this)
@@ -151,6 +174,16 @@ impl VulkanInstance {
 
     pub(crate) fn validation_enabled(&self) -> bool {
         self.validation
+    }
+
+    /// Whether `VK_KHR_surface` (and the platform surface extensions available) are enabled.
+    pub(crate) fn surface_support(&self) -> bool {
+        self.surface_support
+    }
+
+    /// Whether `VK_EXT_debug_utils` is enabled (object names and command labels).
+    pub(crate) fn debug_utils(&self) -> bool {
+        self.debug_utils
     }
 
     pub(crate) fn validation_error_count(&self) -> u64 {

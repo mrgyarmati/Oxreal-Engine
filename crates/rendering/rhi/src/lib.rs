@@ -10,19 +10,33 @@
 //! - [`AdapterInfo`] and [`select_adapter`]: deterministic GPU selection shared by every backend
 //!   (ADR-0012 §6).
 //! - [`RhiError`]: typed, actionable errors. Device loss is an error, never a panic.
+//! - Surfaces, frames, command encoders and scoped render passes ([`Device::begin_frame`],
+//!   [`RenderPass`]), as decided in ADR-0017.
+//! - [`HandlePool`]: typed generational handles for backend objects (ADR-0016 §1).
 //!
-//! Resources, the bindless model and command recording arrive in the following slices.
+//! Buffers, pipelines and the bindless table arrive in the following slices.
 //!
 //! [ADR-0003]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0003-vulkan-first-graphics-backend.md
 //! [ADR-0016]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0016-rhi-resource-and-bind-model.md
 
 mod adapter;
+mod command;
 mod device;
 mod error;
+mod handle;
+mod surface;
 
 pub use adapter::{
     AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, GPU_ENV_VAR, GpuSelection,
     select_adapter,
 };
+pub use command::{
+    ColorAttachment, CommandEncoder, Frame, LoadOp, RenderPass, RenderPassDesc, StoreOp,
+};
 pub use device::{Device, DeviceDesc, Validation};
 pub use error::{AdapterRejection, RhiError};
+pub use handle::{HandlePool, SurfaceHandle, TextureHandle};
+pub use surface::{PresentMode, SurfaceDesc, SurfaceTarget};
+
+/// Re-export of the interop crate behind [`SurfaceTarget`].
+pub use raw_window_handle;
