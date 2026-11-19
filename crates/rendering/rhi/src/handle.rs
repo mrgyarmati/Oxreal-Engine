@@ -55,6 +55,10 @@ define_handle!(
     BufferHandle
 );
 define_handle!(
+    /// A texture sampler.
+    SamplerHandle
+);
+define_handle!(
     /// A render pipeline.
     PipelineHandle
 );

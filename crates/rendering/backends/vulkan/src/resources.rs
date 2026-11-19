@@ -32,13 +32,26 @@ pub(crate) struct Pipeline {
     pub(crate) color_formats: Vec<TextureFormat>,
 }
 
-/// An object whose destruction waits until nothing can use it any more (ADR-0016 §1).
+/// A sampler and its bindless index.
+#[derive(Debug)]
+pub(crate) struct Sampler {
+    pub(crate) sampler: vk::Sampler,
+    pub(crate) index: u32,
+}
+
+/// An object whose destruction waits until nothing can use it any more (ADR-0016 §1). Bindless
+/// indices are released with their object, so they're reused only after that point.
 #[derive(Debug)]
 pub(crate) enum Retired {
     Texture {
         image: vk::Image,
         view: vk::ImageView,
         allocation: Allocation,
+        bindless_index: Option<u32>,
+    },
+    Sampler {
+        sampler: vk::Sampler,
+        index: u32,
     },
     Buffer {
         buffer: vk::Buffer,
@@ -47,6 +60,17 @@ pub(crate) enum Retired {
     Pipeline(vk::Pipeline),
     CommandPool(vk::CommandPool),
     Surface(Box<SurfaceObjects>),
+}
+
+/// The texture a readback copies from, as it is when the copy is recorded.
+#[derive(Debug, Clone, Copy)]
+struct ReadbackSource {
+    image: vk::Image,
+    extent: vk::Extent2D,
+    /// The layout before the copy, in submission order (the texture is claimed).
+    old_layout: vk::ImageLayout,
+    /// The layout to return to afterwards, for sampled textures.
+    resting: Option<vk::ImageLayout>,
 }
 
 /// A one-time submission that failed, and whether its work may still be pending.
@@ -119,6 +143,12 @@ fn vk_usage(usage: TextureUsage) -> vk::ImageUsageFlags {
     if usage.contains(TextureUsage::COPY_SOURCE) {
         flags |= vk::ImageUsageFlags::TRANSFER_SRC;
     }
+    if usage.contains(TextureUsage::SAMPLED) {
+        flags |= vk::ImageUsageFlags::SAMPLED;
+    }
+    if usage.contains(TextureUsage::COPY_DESTINATION) {
+        flags |= vk::ImageUsageFlags::TRANSFER_DST;
+    }
     flags
 }
 
@@ -128,16 +158,23 @@ pub(crate) fn invalid(details: impl Into<String>) -> RhiError {
     }
 }
 
-/// Creates the pipeline layout every pipeline shares: push constants up to
-/// [`MAX_PUSH_CONSTANT_BYTES`]. The bindless set joins it with the first sampled textures.
-pub(crate) fn create_pipeline_layout(device: &ash::Device) -> Result<vk::PipelineLayout, RhiError> {
+/// Creates the pipeline layout every pipeline shares (ADR-0016 §2): the bindless set as set 0
+/// and push constants up to [`MAX_PUSH_CONSTANT_BYTES`].
+pub(crate) fn create_pipeline_layout(
+    device: &ash::Device,
+    bindless_layout: vk::DescriptorSetLayout,
+) -> Result<vk::PipelineLayout, RhiError> {
     let ranges = [vk::PushConstantRange::default()
         .stage_flags(PUSH_CONSTANT_STAGES)
         .offset(0)
         .size(MAX_PUSH_CONSTANT_BYTES)];
-    let info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges);
-    // SAFETY: the device is alive. 128 bytes is the minimum maxPushConstantsSize every
-    // conformant device supports.
+    let set_layouts = [bindless_layout];
+    let info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(&ranges);
+    // SAFETY: the device and the bindless set layout are alive. 128 bytes is the minimum
+    // maxPushConstantsSize every conformant device supports, and one update-after-bind set is
+    // within every limit (the set's counts were sized to the device).
     unsafe { device.create_pipeline_layout(&info, None) }
         .map_err(|e| from_vk("vkCreatePipelineLayout", e))
 }
@@ -222,18 +259,109 @@ impl Shared {
         };
         self.name_object(image, desc.label);
         self.name_object(view, &format!("{} view", desc.label));
+
+        let (layout, bindless_index, resting_layout) =
+            if usage.contains(vk::ImageUsageFlags::SAMPLED) {
+                match self.make_sampleable(image, view, desc.label) {
+                    Ok(index) => (
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        Some(index),
+                        Some(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                    ),
+                    Err(failure) => {
+                        failure.dispose(
+                            self,
+                            Retired::Texture {
+                                image,
+                                view,
+                                allocation,
+                                bindless_index: None,
+                            },
+                        );
+                        return Err(failure.error);
+                    }
+                }
+            } else {
+                (vk::ImageLayout::UNDEFINED, None, None)
+            };
         let raw = lock(&self.textures).insert(Texture {
             image,
             view,
             extent,
-            layout: vk::ImageLayout::UNDEFINED,
+            layout,
             format: desc.format,
             usage,
             allocation: Some(allocation),
             user: None,
             frame_owner: None,
+            bindless_index,
+            resting_layout,
         });
         Ok(TextureHandle::from_raw(raw))
+    }
+
+    /// Gives a new texture a bindless index and moves it into its resting layout,
+    /// SHADER_READ_ONLY_OPTIMAL, so shaders may sample it from any later submission. Doesn't
+    /// wait: the transition is submitted before anything that could sample the texture. On
+    /// error the index is released, and the failure says whether the image may still be in use.
+    fn make_sampleable(
+        &self,
+        image: vk::Image,
+        view: vk::ImageView,
+        label: &str,
+    ) -> Result<u32, SubmitFailure> {
+        let index = lock(&self.bindless_slots)
+            .textures
+            .allocate()
+            .ok_or_else(|| {
+                SubmitFailure::not_submitted(RhiError::OutOfMemory {
+                    kind: "bindless texture slot",
+                    operation: "creating a sampled texture",
+                })
+            })?;
+        let release = |failure: SubmitFailure| {
+            lock(&self.bindless_slots).textures.release(index);
+            failure
+        };
+        let (pool, cmd) = self
+            .begin_one_time_commands(label)
+            .map_err(|error| release(SubmitFailure::not_submitted(error)))?;
+        let barrier = [vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::NONE)
+            .src_access_mask(vk::AccessFlags2::NONE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(image)
+            .subresource_range(color_subresource())];
+        // SAFETY: `cmd` is recording. The image was just created and nothing else knows it yet.
+        // Its contents are undefined until written, so transitioning from UNDEFINED discards
+        // nothing, and the destination scope covers every later sampling.
+        unsafe {
+            self.raw().cmd_pipeline_barrier2(
+                cmd,
+                &vk::DependencyInfo::default().image_memory_barriers(&barrier),
+            );
+        }
+        self.submit_one_time_commands(pool, cmd, None)
+            .map_err(release)?;
+        let slots = lock(&self.bindless_slots);
+        self.bindless.write_texture(self.raw(), index, view);
+        drop(slots);
+        Ok(index)
+    }
+
+    pub(crate) fn texture_index(&self, texture: TextureHandle) -> Result<u32, RhiError> {
+        let textures = lock(&self.textures);
+        let found = textures
+            .get(texture.to_raw())
+            .ok_or_else(|| invalid(format!("{texture:?} does not exist")))?;
+        found.bindless_index.ok_or_else(|| {
+            invalid(format!(
+                "{texture:?} was not created with TextureUsage::SAMPLED"
+            ))
+        })
     }
 
     pub(crate) fn destroy_texture(&self, texture: TextureHandle) -> Result<(), RhiError> {
@@ -251,6 +379,7 @@ impl Shared {
             image,
             view,
             allocation: Some(allocation),
+            bindless_index,
             ..
         }) = textures.remove(texture.to_raw())
         {
@@ -259,6 +388,7 @@ impl Shared {
                 image,
                 view,
                 allocation,
+                bindless_index,
             });
         }
         Ok(())
@@ -502,7 +632,7 @@ impl Shared {
         // Registered like an encoder, so destroying the texture meanwhile waits for this copy,
         // and claiming it keeps its layout tracking in submission order (ADR-0016 §1).
         let mut registration = Registration::new(shared);
-        let (image, extent, old_layout, format) = {
+        let (image, extent, old_layout, format, resting) = {
             let mut textures = lock(&shared.textures);
             let t = textures
                 .get_mut(texture.to_raw())
@@ -516,8 +646,10 @@ impl Shared {
                 .claim(texture.to_raw(), t)
                 .map_err(|problem| invalid(format!("read_texture: {problem}")))?;
             let old = t.layout;
-            t.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
-            (t.image, t.extent, old, t.format)
+            // A sampled texture goes back to its resting layout in the same command buffer.
+            let resting = t.resting_layout;
+            t.layout = resting.unwrap_or(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            (t.image, t.extent, old, t.format, resting)
         };
         let size = u64::from(extent.width)
             * u64::from(extent.height)
@@ -545,9 +677,12 @@ impl Shared {
             };
 
         let submitted = shared.copy_texture_to_buffer(
-            image,
-            extent,
-            old_layout,
+            ReadbackSource {
+                image,
+                extent,
+                old_layout,
+                resting,
+            },
             buffer,
             &allocation,
             &mut registration,
@@ -581,15 +716,23 @@ impl Shared {
     }
 
     /// Records and submits the readback copy. Returns its timeline value.
+    ///
+    /// # Errors
+    ///
+    /// A [`SubmitFailure`], which says whether the copy may still be pending.
     fn copy_texture_to_buffer(
         &self,
-        image: vk::Image,
-        extent: vk::Extent2D,
-        old_layout: vk::ImageLayout,
+        source: ReadbackSource,
         buffer: vk::Buffer,
         allocation: &Allocation,
         registration: &mut Registration,
     ) -> Result<u64, SubmitFailure> {
+        let ReadbackSource {
+            image,
+            extent,
+            old_layout,
+            resting,
+        } = source;
         // SAFETY: the allocation satisfies the buffer's requirements and is bound exactly once.
         unsafe {
             self.raw()
@@ -637,6 +780,21 @@ impl Shared {
             .dst_access_mask(vk::AccessFlags2::HOST_READ)
             .buffer(buffer)
             .size(vk::WHOLE_SIZE)];
+        // A sampled texture returns to its resting layout, ready for any later sampling.
+        let restore: Vec<vk::ImageMemoryBarrier2<'_>> = resting
+            .into_iter()
+            .map(|layout| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(layout)
+                    .image(image)
+                    .subresource_range(color_subresource())
+            })
+            .collect();
         // SAFETY: `cmd` is recording and the buffer is bound to its memory. The image can't be
         // destroyed before this submission completes (it's claimed by `registration`), and
         // `old_layout` is its layout at this point in submission order (no other unsubmitted
@@ -659,7 +817,9 @@ impl Shared {
             );
             self.raw().cmd_pipeline_barrier2(
                 cmd,
-                &vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barrier),
+                &vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&buffer_barrier)
+                    .image_memory_barriers(&restore),
             );
         }
         self.submit_one_time_commands(pool, cmd, Some(registration))
@@ -873,6 +1033,7 @@ impl Shared {
                 image,
                 view,
                 allocation,
+                bindless_index,
             } => {
                 // SAFETY: unused, per this function's contract. Each is destroyed exactly once,
                 // and the memory is freed after the image.
@@ -881,6 +1042,15 @@ impl Shared {
                     self.raw().destroy_image(image, None);
                 }
                 self.free(allocation);
+                // Nothing can sample the slot any more, so it may point elsewhere from now on.
+                if let Some(index) = bindless_index {
+                    lock(&self.bindless_slots).textures.release(index);
+                }
+            }
+            Retired::Sampler { sampler, index } => {
+                // SAFETY: unused, per this function's contract. Destroyed exactly once.
+                unsafe { self.raw().destroy_sampler(sampler, None) };
+                lock(&self.bindless_slots).samplers.release(index);
             }
             Retired::Buffer { buffer, allocation } => {
                 // SAFETY: as above.

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::{
     AdapterInfo, BufferDesc, BufferHandle, CommandEncoder, Frame, GpuSelection, PipelineHandle,
-    RenderPipelineDesc, RhiError, SubmissionId, SurfaceDesc, SurfaceHandle, SurfaceTarget,
-    TextureDesc, TextureHandle,
+    RenderPipelineDesc, RhiError, SamplerDesc, SamplerHandle, SubmissionId, SurfaceDesc,
+    SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle,
 };
 
 /// Whether to enable the graphics API's validation layers.
@@ -230,6 +230,55 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// [`RhiError::InvalidUsage`] for a stale handle or missing usage.
     fn buffer_address(&self, buffer: BufferHandle) -> Result<u64, RhiError>;
+
+    /// Uploads a texture's pixels: tightly packed rows, top row first, in the texture's format
+    /// (the layout [`Device::read_texture`] returns). Like [`Device::write_buffer`], the upload
+    /// is copied on the queue and **takes effect in submission order**. It doesn't wait for the
+    /// GPU. The texture needs [`crate::TextureUsage::COPY_DESTINATION`].
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle, missing usage, a backbuffer, data whose size
+    /// isn't exactly width × height × bytes per pixel, or a texture an unsubmitted encoder still
+    /// uses; or a device error.
+    fn write_texture(&self, texture: TextureHandle, data: &[u8]) -> Result<(), RhiError>;
+
+    /// The texture's index in the bindless texture array ([`crate::TEXTURES_BINDING`]), for
+    /// shaders to sample it by. It stays the same for the texture's lifetime. The texture needs
+    /// [`crate::TextureUsage::SAMPLED`].
+    ///
+    /// Shaders that use an index are bound by
+    /// [`ShaderCode::from_spirv_unchecked`](crate::ShaderCode::from_spirv_unchecked)'s contract:
+    /// only indices of live textures.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle or missing usage.
+    fn texture_index(&self, texture: TextureHandle) -> Result<u32, RhiError>;
+
+    /// Creates a sampler and gives it a bindless index.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for an anisotropy outside 1 to 16, [`RhiError::OutOfMemory`]
+    /// when the device's sampler limit or the bindless sampler array is full, or another
+    /// backend error.
+    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, RhiError>;
+
+    /// Destroys a sampler once nothing can use it any more, like
+    /// [`Device::destroy_texture`]. Its index is reused only after that.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle.
+    fn destroy_sampler(&self, sampler: SamplerHandle) -> Result<(), RhiError>;
+
+    /// The sampler's index in the bindless sampler array ([`crate::SAMPLERS_BINDING`]).
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle.
+    fn sampler_index(&self, sampler: SamplerHandle) -> Result<u32, RhiError>;
 
     /// Submits the frame's commands and presents its backbuffer.
     ///

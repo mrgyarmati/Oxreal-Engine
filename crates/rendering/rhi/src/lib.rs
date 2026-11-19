@@ -17,12 +17,13 @@
 //!   [`MAX_PUSH_CONSTANT_BYTES`]), draws,
 //!   standalone submissions and [`Device::read_texture`] for tests and tools.
 //!
-//! Buffers, pipelines and the bindless table arrive in the following slices.
+//! See [`BINDLESS_SET`] for how shaders reach textures and samplers by index.
 //!
 //! [ADR-0003]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0003-vulkan-first-graphics-backend.md
 //! [ADR-0016]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0016-rhi-resource-and-bind-model.md
 
 mod adapter;
+mod bindless;
 mod buffer;
 mod command;
 mod device;
@@ -36,6 +37,9 @@ pub use adapter::{
     AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, GPU_ENV_VAR, GpuSelection,
     select_adapter,
 };
+pub use bindless::{
+    AddressMode, BINDLESS_SET, Filter, SAMPLERS_BINDING, SamplerDesc, TEXTURES_BINDING,
+};
 pub use buffer::{BufferDesc, BufferUsage};
 pub use command::{
     ColorAttachment, CommandEncoder, Frame, LoadOp, RenderPass, RenderPassDesc, StoreOp,
@@ -43,7 +47,8 @@ pub use command::{
 pub use device::{Device, DeviceDesc, Validation};
 pub use error::{AdapterRejection, RhiError};
 pub use handle::{
-    BufferHandle, HandlePool, PipelineHandle, SubmissionId, SurfaceHandle, TextureHandle,
+    BufferHandle, HandlePool, PipelineHandle, SamplerHandle, SubmissionId, SurfaceHandle,
+    TextureHandle,
 };
 pub use pipeline::{
     CullMode, MAX_PUSH_CONSTANT_BYTES, RenderPipelineDesc, ShaderCode, ShaderEntry,

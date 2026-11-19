@@ -48,6 +48,32 @@ struct RawBuffer {
     allocation: Allocation,
 }
 
+/// A CPU-writable buffer for uploads (`write_texture`). Retired after its submission, or
+/// destroyed directly if it never reached the GPU.
+pub(crate) struct StagingBuffer(RawBuffer);
+
+impl StagingBuffer {
+    pub(crate) fn buffer(&self) -> vk::Buffer {
+        self.0.buffer
+    }
+
+    /// The first `len` bytes of its mapped memory. CpuToGpu memory is HOST_VISIBLE and
+    /// HOST_COHERENT in gpu-allocator 0.28, so writes need no flush.
+    pub(crate) fn mapped_mut(&mut self, len: usize) -> Option<&mut [u8]> {
+        self.0
+            .allocation
+            .mapped_slice_mut()
+            .and_then(|bytes| bytes.get_mut(..len))
+    }
+
+    pub(crate) fn into_retired(self) -> Retired {
+        Retired::Buffer {
+            buffer: self.0.buffer,
+            allocation: self.0.allocation,
+        }
+    }
+}
+
 impl Shared {
     /// Creates a buffer and binds memory from `location`. On error nothing is left behind.
     fn create_raw_buffer(
@@ -93,6 +119,26 @@ impl Shared {
         }
         self.name_object(buffer, label);
         Ok(RawBuffer { buffer, allocation })
+    }
+
+    /// A staging buffer of `size` bytes in CpuToGpu memory.
+    pub(crate) fn create_staging_buffer(
+        &self,
+        label: &str,
+        size: u64,
+    ) -> Result<StagingBuffer, RhiError> {
+        self.create_raw_buffer(
+            label,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::CpuToGpu,
+        )
+        .map(StagingBuffer)
+    }
+
+    /// Destroys a staging buffer the GPU never used.
+    pub(crate) fn destroy_staging_buffer(&self, staging: StagingBuffer) {
+        self.destroy_raw_buffer(staging.0);
     }
 
     fn destroy_raw_buffer(&self, raw: RawBuffer) {
