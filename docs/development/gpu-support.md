@@ -18,7 +18,7 @@ tests on that hardware.
 
 | Vendor | GPU | Driver | OS / windowing | Vulkan (device) | Oxreal commit | Result | Tested by / date |
 |---|---|---|---|---|---|---|---|
-| | | | | | | | |
+| AMD | Radeon RX 9070 XT | Adrenalin 26.11.2 (LLPC) | Windows 11 Pro (26200) | 1.4.359 | `oxreal-rhi-vulkan` device slice | Device created and destroyed with validation on, **0 validation errors**. Required features verified. | Maintainer machine, 2026-11-19 |
 
 ## Continuous integration
 

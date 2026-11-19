@@ -77,6 +77,65 @@ pub fn init_application_logging() -> Result<(), InitError> {
     Ok(())
 }
 
+/// Runs an application's main logic with logging set up and errors reported properly.
+///
+/// Call it as the whole body of `main`:
+///
+/// ```no_run
+/// fn main() -> std::process::ExitCode {
+///     oxreal_diagnostics::run_application(|| {
+///         // ... the application ...
+///         Ok(())
+///     })
+/// }
+/// ```
+///
+/// - Initializes logging ([`init_application_logging`]).
+/// - Runs `app`. If it returns an error, logs it as a readable message **with its whole cause
+///   chain** (`a: b: c`), not as `Debug` output.
+/// - Returns the process exit code: success, or failure.
+pub fn run_application<F>(app: F) -> std::process::ExitCode
+where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
+    if let Err(e) = init_application_logging() {
+        report_without_logger(&e);
+        return std::process::ExitCode::FAILURE;
+    }
+    match app() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("{}", error_chain(e.as_ref()));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Formats an error and its sources as `outer: cause: root cause`.
+#[must_use]
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // Many errors already include their source's text. Don't repeat it.
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "logging failed to initialize, so stderr is the only channel left to report on"
+)]
+fn report_without_logger(error: &InitError) {
+    eprintln!("error: {}", error_chain(error));
+}
+
 /// Picks the filter source: `OXREAL_LOG` wins over `RUST_LOG`. Empty values count as unset.
 fn select_filter_spec(
     oxreal_log: Option<String>,
@@ -137,5 +196,60 @@ mod tests {
         assert!(message.contains("OXREAL_LOG"), "{message}");
         assert!(message.contains("oxreal_ecs=loud"), "{message}");
         assert!(std::error::Error::source(&err).is_some());
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::error_chain;
+    use std::fmt;
+
+    #[derive(Debug)]
+    struct Layer {
+        text: &'static str,
+        source: Option<Box<Layer>>,
+    }
+
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.text)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_deref().map(|s| s as _)
+        }
+    }
+
+    fn layer(text: &'static str, source: Option<Layer>) -> Layer {
+        Layer {
+            text,
+            source: source.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn joins_the_whole_cause_chain() {
+        let error = layer(
+            "failed to start",
+            Some(layer("no usable GPU", Some(layer("driver too old", None)))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "failed to start: no usable GPU: driver too old"
+        );
+    }
+
+    #[test]
+    fn does_not_repeat_a_cause_already_in_the_message() {
+        let error = layer(
+            "platform event loop failed: os error 5",
+            Some(layer("os error 5", None)),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "platform event loop failed: os error 5"
+        );
     }
 }
