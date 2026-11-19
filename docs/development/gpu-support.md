@@ -24,7 +24,8 @@ tests on that hardware.
 
 | Runner | Device | Status |
 |---|---|---|
-| ubuntu-24.04, ubuntu-26.04 | Mesa Lavapipe (software, Vulkan 1.3 conformant) | Required-feature check on every run (`vulkan features` job). Rendering tests come with the first GPU code (D-19). |
+| ubuntu-24.04 | Mesa Lavapipe 25.2.8 (LLVM 20.1.2), device Vulkan 1.4.318 | All required features verified on every run (`vulkan features` job). Rendering tests come with the first GPU code (D-19). |
+| ubuntu-26.04 | Mesa Lavapipe 26.0.8 (LLVM 21.1.8), device Vulkan 1.4.335 | All required features verified on every run. |
 | windows-2025 | none (no GPU) | Build and non-GPU tests only |
 
 ## Known unsupported

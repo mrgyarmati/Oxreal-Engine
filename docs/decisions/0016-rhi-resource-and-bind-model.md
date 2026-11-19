@@ -39,9 +39,16 @@ Three questions shape everything above the RHI:
 - **Development machine** (AMD RX 9070 XT, Adrenalin, Vulkan 1.4.359): every feature above is
   supported, plus `VK_EXT_descriptor_buffer` and `VK_KHR_push_descriptor`. Bindless limits are
   effectively unbounded, and `maxPushConstantsSize` is 256.
-- **Lavapipe** (CI's software Vulkan): public sources don't state its update-after-bind
-  coverage. **This ADR's PR adds a CI step that checks every required feature on Lavapipe**.
-  The ADR is accepted only if that step passes.
+- **Lavapipe** (CI's software Vulkan): public sources didn't state its update-after-bind
+  coverage, so this ADR's PR added a CI check (`tools/ci/check-vulkan-features.sh`) and
+  **measured it**. **All required features are supported** on:
+
+  | CI image | Lavapipe | Device Vulkan |
+  |---|---|---|
+  | Ubuntu 24.04 | Mesa 25.2.8, LLVM 20.1.2 | 1.4.318 |
+  | Ubuntu 26.04 | Mesa 26.0.8, LLVM 21.1.8 | 1.4.335 |
+
+  The check now runs on every CI run.
 - **Cross-API fit:** DirectX 12 Shader Model 6.6 exposes a global `ResourceDescriptorHeap`
   indexed in shaders, and Metal exposes argument buffers. Bindless with integer indices maps
   onto both.
