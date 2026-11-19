@@ -90,7 +90,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
-      - run: tools/ci/check-vulkan-features.sh
+      - run: bash tools/ci/check-vulkan-features.sh
 
   docs:
     name: rustdoc
