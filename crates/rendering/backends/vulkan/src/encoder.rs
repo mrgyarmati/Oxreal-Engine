@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use ash::vk;
 use oxreal_diagnostics::error;
 use oxreal_rhi::{
-    CommandEncoder, HandlePool, LoadOp, PipelineHandle, RenderPassDesc, StoreOp, SurfaceHandle,
-    TextureFormat,
+    BINDLESS_SET, CommandEncoder, HandlePool, LoadOp, PipelineHandle, RenderPassDesc, StoreOp,
+    SurfaceHandle, TextureFormat,
 };
 
 use crate::device::{Shared, lock};
@@ -195,6 +195,8 @@ struct Pass {
     formats: Vec<TextureFormat>,
     /// Push-constant bytes of the pipeline bound in this pass.
     pipeline_push_bytes: Option<u32>,
+    /// Attachments with a resting layout (sampled textures), returned to it when the pass ends.
+    restore: Vec<(u64, vk::Image, vk::ImageLayout)>,
 }
 
 /// Records commands into a primary command buffer.
@@ -364,6 +366,41 @@ impl VulkanEncoder {
         texture.layout = vk::ImageLayout::PRESENT_SRC_KHR;
     }
 
+    /// Returns a finished pass's sampled attachments to their resting layout, so shaders can
+    /// sample them again from later work. Call right after `vkCmdEndRendering`.
+    fn restore_resting_layouts(&mut self, restore: &[(u64, vk::Image, vk::ImageLayout)]) {
+        let barriers: Vec<vk::ImageMemoryBarrier2<'_>> = restore
+            .iter()
+            .map(|&(_, image, resting)| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ)
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(resting)
+                    .image(image)
+                    .subresource_range(color_subresource())
+            })
+            .collect();
+        let dependency = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+        // SAFETY: `cmd` is recording and the pass's rendering just ended. Each image is an
+        // attachment this encoder claimed when the pass began, so it's alive until this
+        // encoder's work completes, and it is in COLOR_ATTACHMENT_OPTIMAL at this point in the
+        // command buffer.
+        unsafe {
+            self.shared
+                .raw()
+                .cmd_pipeline_barrier2(self.cmd, &dependency)
+        };
+        let mut textures = lock(&self.shared.textures);
+        for &(raw, _, resting) in restore {
+            if let Some(texture) = textures.get_mut(raw) {
+                texture.layout = resting;
+            }
+        }
+    }
+
     fn begin_label(&self, label: &str) -> bool {
         let (Some(debug), Ok(name)) = (&self.shared.debug, CString::new(label.replace('\0', "")))
         else {
@@ -495,6 +532,7 @@ impl CommandEncoder for VulkanEncoder {
             extent: vk::Extent2D::default(),
             formats: Vec::with_capacity(desc.color_attachments.len()),
             pipeline_push_bytes: None,
+            restore: Vec::new(),
         };
 
         let shared = Arc::clone(&self.shared);
@@ -565,6 +603,10 @@ impl CommandEncoder for VulkanEncoder {
                 height: a.height.min(texture.extent.height),
             }));
             pass.formats.push(texture.format);
+            if let Some(resting) = texture.resting_layout {
+                pass.restore
+                    .push((attachment.texture.to_raw(), texture.image, resting));
+            }
 
             let (load_op, clear) = match attachment.load {
                 LoadOp::Clear(color) => (vk::AttachmentLoadOp::CLEAR, color.to_array()),
@@ -627,6 +669,9 @@ impl CommandEncoder for VulkanEncoder {
             // SAFETY: `vkCmdBeginRendering` was recorded for this pass on `cmd`.
             unsafe { self.shared.raw().cmd_end_rendering(self.cmd) };
         }
+        if pass.rendering && !pass.restore.is_empty() {
+            self.restore_resting_layouts(&pass.restore);
+        }
         if pass.labeled
             && let Some(debug) = &self.shared.debug
         {
@@ -661,11 +706,21 @@ impl CommandEncoder for VulkanEncoder {
                     // SAFETY: `cmd` is recording inside a dynamic rendering pass whose
                     // attachment formats match the pipeline's. The pipeline stays alive until
                     // this encoder is done, because destroying it is deferred past this encoder
-                    // (ADR-0016 §1). Viewport and scissor are its dynamic states.
+                    // (ADR-0016 §1). Viewport and scissor are its dynamic states. The bindless set
+                    // is set 0 of the shared pipeline layout every pipeline uses; it lives as long as
+                    // the device, and updates to it while bound are allowed (UPDATE_AFTER_BIND).
                     unsafe {
                         shared
                             .raw()
                             .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, raw);
+                        shared.raw().cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            shared.pipeline_layout,
+                            BINDLESS_SET,
+                            &[shared.bindless.set],
+                            &[],
+                        );
                         shared.raw().cmd_set_viewport(cmd, 0, &viewports);
                         shared.raw().cmd_set_scissor(cmd, 0, &scissors);
                     }

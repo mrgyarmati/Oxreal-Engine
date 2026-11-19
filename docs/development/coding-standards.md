@@ -189,6 +189,11 @@ These follow the conventions Cordite validated, adapted to Oxreal:
   matches the Rust `#[repr(C)]` struct with the same fields in the same order. For example,
   `float2` + `float4` is 24 bytes with the `float4` at offset 8, with no std140/std430
   padding.
+- **Sample textures through `Bindless.slang`.** Add `crates/rendering/rhi/shaders` as an
+  include directory, then `import Bindless;` and call `sampleTexture(textureIndex, samplerIndex,
+  uv)`. The indices come from `Device::texture_index` and `Device::sampler_index`, in push
+  constants. Declare no other descriptor resources: the backend rejects them. `uv` (0, 0) is
+  the texture's top-left texel, the first row of `write_texture`'s data.
 - Shared engine conventions (ADR-0011 depth and clip space, color space, bindless access) live
   in `common/` modules and are imported, never copied.
 - Binding layout follows the RHI bind-model ADR.

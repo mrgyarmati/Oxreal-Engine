@@ -7,12 +7,15 @@
 //! - Which entry points exist, and for which stage.
 //! - How many push-constant bytes the shaders read.
 //! - That every declared capability is one Oxreal's required features guarantee.
+//! - That every descriptor resource is one of the bindless arrays (set 0, bindings 0 and 1).
 //!
 //! It isn't a validator. Full validity is the caller's promise when it creates
 //! [`oxreal_rhi::ShaderCode`]. Numbers come from the SPIR-V specification (unified, 1.6).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+use oxreal_rhi::{BINDLESS_SET, SAMPLERS_BINDING, TEXTURES_BINDING};
 
 const MAGIC: u32 = 0x0723_0203;
 /// SPIR-V 1.0 to 1.6, the versions Vulkan 1.3 accepts.
@@ -54,6 +57,9 @@ mod op {
     pub(super) const TYPE_VECTOR: u32 = 23;
     pub(super) const TYPE_MATRIX: u32 = 24;
     pub(super) const TYPE_ARRAY: u32 = 28;
+    pub(super) const TYPE_IMAGE: u32 = 25;
+    pub(super) const TYPE_SAMPLER: u32 = 26;
+    pub(super) const TYPE_SAMPLED_IMAGE: u32 = 27;
     pub(super) const TYPE_RUNTIME_ARRAY: u32 = 29;
     pub(super) const TYPE_STRUCT: u32 = 30;
     pub(super) const TYPE_POINTER: u32 = 32;
@@ -68,6 +74,8 @@ mod decoration {
     pub(super) const ARRAY_STRIDE: u32 = 6;
     pub(super) const MATRIX_STRIDE: u32 = 7;
     pub(super) const OFFSET: u32 = 35;
+    pub(super) const BINDING: u32 = 33;
+    pub(super) const DESCRIPTOR_SET: u32 = 34;
 }
 
 const STORAGE_PUSH_CONSTANT: u32 = 9;
@@ -113,11 +121,37 @@ impl ModuleInfo {
 #[derive(Debug, Clone)]
 enum Type {
     Scalar(u32),
-    Vector { component: u32, count: u32 },
-    Matrix { column: u32, count: u32 },
-    Array { element: u32, length_id: u32 },
+    Vector {
+        component: u32,
+        count: u32,
+    },
+    Matrix {
+        column: u32,
+        count: u32,
+    },
+    Array {
+        element: u32,
+        length_id: u32,
+    },
     Struct(Vec<u32>),
-    Pointer { storage: u32, pointee: u32 },
+    Pointer {
+        storage: u32,
+        pointee: u32,
+    },
+    /// `OpTypeImage`: its texel type, dimensionality, depth flag (1 = a depth image), whether
+    /// arrayed or multisampled, and the "Sampled" operand (1 = used with a sampler).
+    Image {
+        sampled_type: u32,
+        dim: u32,
+        depth: u32,
+        arrayed: u32,
+        multisampled: u32,
+        sampled: u32,
+    },
+    Sampler,
+    /// `OpTypeSampledImage`, a combined image and sampler: not part of the bindless model.
+    SampledImage,
+    RuntimeArray(u32),
     Unsized,
 }
 
@@ -129,6 +163,8 @@ struct Module {
     types: HashMap<u32, Type>,
     /// Integer type id → width in bits, to tell which constants can be array lengths.
     integer_types: HashMap<u32, u32>,
+    /// Float type id → width in bits, to check texture texel types.
+    float_types: HashMap<u32, u32>,
     /// Integer constants that fit in 32 bits.
     constants: HashMap<u32, u32>,
     /// Computed sizes, keyed by type and (for matrices and arrays) the struct member they
@@ -141,6 +177,11 @@ struct Module {
     member_row_major: HashMap<(u32, u32), bool>,
     push_constant_pointer_types: Vec<u32>,
     capabilities: Vec<u32>,
+    /// Variable id → (pointer type, storage class).
+    variables: HashMap<u32, (u32, u32)>,
+    /// Ids decorated with DescriptorSet and Binding.
+    descriptor_sets: HashMap<u32, u32>,
+    bindings: HashMap<u32, u32>,
     entry_points: Vec<(Stage, String)>,
 }
 
@@ -203,6 +244,7 @@ pub(crate) fn inspect(words: &[u32]) -> Result<ModuleInfo, String> {
             disallowed.join(", ")
         ));
     }
+    module.check_descriptor_bindings()?;
 
     let mut push_constant_bytes = 0;
     for &pointer in &module.push_constant_pointer_types {
@@ -270,6 +312,8 @@ impl Module {
                 self.types.insert(id(0)?, Type::Scalar(width / 8));
                 if opcode == op::TYPE_INT {
                     self.integer_types.insert(id(0)?, width);
+                } else {
+                    self.float_types.insert(id(0)?, width);
                 }
             }
             op::TYPE_VECTOR => {
@@ -300,7 +344,26 @@ impl Module {
                 );
             }
             op::TYPE_RUNTIME_ARRAY => {
-                self.types.insert(id(0)?, Type::Unsized);
+                self.types.insert(id(0)?, Type::RuntimeArray(id(1)?));
+            }
+            op::TYPE_IMAGE => {
+                self.types.insert(
+                    id(0)?,
+                    Type::Image {
+                        sampled_type: id(1)?,
+                        dim: id(2)?,
+                        depth: id(3)?,
+                        arrayed: id(4)?,
+                        multisampled: id(5)?,
+                        sampled: id(6)?,
+                    },
+                );
+            }
+            op::TYPE_SAMPLER => {
+                self.types.insert(id(0)?, Type::Sampler);
+            }
+            op::TYPE_SAMPLED_IMAGE => {
+                self.types.insert(id(0)?, Type::SampledImage);
             }
             op::TYPE_STRUCT => {
                 self.types.insert(
@@ -333,12 +396,22 @@ impl Module {
                 if id(2)? == STORAGE_PUSH_CONSTANT {
                     self.push_constant_pointer_types.push(id(0)?);
                 }
+                self.variables.insert(id(1)?, (id(0)?, id(2)?));
             }
-            op::DECORATE => {
-                if id(1)? == decoration::ARRAY_STRIDE {
+            // A repeated DescriptorSet or Binding decoration would be resolved last-wins here. Valid
+            // SPIR-V (`ShaderCode`'s contract, checked by spirv-val) never repeats one.
+            op::DECORATE => match id(1)? {
+                decoration::ARRAY_STRIDE => {
                     self.array_strides.insert(id(0)?, id(2)?);
                 }
-            }
+                decoration::DESCRIPTOR_SET => {
+                    self.descriptor_sets.insert(id(0)?, id(2)?);
+                }
+                decoration::BINDING => {
+                    self.bindings.insert(id(0)?, id(2)?);
+                }
+                _ => {}
+            },
             op::MEMBER_DECORATE => {
                 let key = (id(0)?, id(1)?);
                 match id(2)? {
@@ -357,6 +430,109 @@ impl Module {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Checks that every descriptor resource is one of the bindless arrays (ADR-0016 §2). Anything
+    /// else wouldn't match the pipeline layout every pipeline shares.
+    fn check_descriptor_bindings(&self) -> Result<(), String> {
+        let mut ids: Vec<u32> = self
+            .descriptor_sets
+            .keys()
+            .chain(self.bindings.keys())
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let (Some(&set), Some(&binding)) =
+                (self.descriptor_sets.get(&id), self.bindings.get(&id))
+            else {
+                return Err(format!(
+                    "resource %{id} has a DescriptorSet or Binding decoration without the other"
+                ));
+            };
+            if set != BINDLESS_SET {
+                return Err(format!(
+                    "resource %{id} is in descriptor set {set}; Oxreal shaders use only the bindless set {BINDLESS_SET} (ADR-0016 §2, Bindless.slang)"
+                ));
+            }
+            match (binding, self.resource_element(id)?) {
+                (
+                    TEXTURES_BINDING,
+                    &Type::Image {
+                        sampled_type,
+                        dim: 1,
+                        depth,
+                        arrayed: 0,
+                        multisampled: 0,
+                        sampled: 1,
+                    },
+                ) => {
+                    // The set holds 8-bit RGBA/BGRA (UNORM or sRGB) textures, which sample as
+                    // floats. Integer texel types and depth comparison need other formats.
+                    if self.float_types.get(&sampled_type) != Some(&32) {
+                        return Err(format!(
+                            "resource %{id}: bindless textures sample as 32-bit floats (Texture2D or Texture2D<float4>), not other texel types"
+                        ));
+                    }
+                    if depth == 1 {
+                        return Err(format!(
+                            "resource %{id}: depth textures (comparison sampling) aren't part of the bindless set"
+                        ));
+                    }
+                }
+                (SAMPLERS_BINDING, Type::Sampler) => {}
+                (TEXTURES_BINDING, _) => {
+                    return Err(format!(
+                        "resource %{id} at binding {TEXTURES_BINDING} must be an array of sampled 2D textures (Texture2D[])"
+                    ));
+                }
+                (SAMPLERS_BINDING, _) => {
+                    return Err(format!(
+                        "resource %{id} at binding {SAMPLERS_BINDING} must be an array of samplers (SamplerState[])"
+                    ));
+                }
+                (other, _) => {
+                    return Err(format!(
+                        "resource %{id} uses binding {other}; the bindless set has only bindings {TEXTURES_BINDING} (textures) and {SAMPLERS_BINDING} (samplers)"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The element type of a descriptor resource: the variable's pointee, or its array's element.
+    fn resource_element(&self, id: u32) -> Result<&Type, String> {
+        let lookup = |id: u32| {
+            self.types
+                .get(&id)
+                .ok_or_else(|| format!("resource type %{id} is undefined"))
+        };
+        let &(pointer, _) = self
+            .variables
+            .get(&id)
+            .ok_or_else(|| format!("decorated resource %{id} is not a variable"))?;
+        let Type::Pointer { pointee, .. } = lookup(pointer)? else {
+            return Err(format!("resource %{id} does not have a pointer type"));
+        };
+        let element = match lookup(*pointee)? {
+            Type::RuntimeArray(element) => lookup(*element)?,
+            // The set's size depends on the device, so a fixed length could exceed it
+            // (VUID-VkGraphicsPipelineCreateInfo-layout-07991).
+            Type::Array { .. } => {
+                return Err(format!(
+                    "resource %{id} is a fixed-size array; declare bindless arrays unsized (Texture2D[], SamplerState[]): their size depends on the device"
+                ));
+            }
+            other => other,
+        };
+        if matches!(element, Type::SampledImage) {
+            return Err(format!(
+                "resource %{id} is a combined image sampler (Sampler2D), which the bindless model doesn't support: use Texture2D[] and SamplerState[] (Bindless.slang)"
+            ));
+        }
+        Ok(element)
     }
 
     /// Size in bytes of type `id` in an explicit layout, never smaller than the bytes it can
@@ -466,7 +642,12 @@ impl Module {
                 storage: STORAGE_PHYSICAL_STORAGE_BUFFER,
                 ..
             } => Ok(8),
-            Type::Pointer { .. } | Type::Unsized => Err(format!(
+            Type::Pointer { .. }
+            | Type::Unsized
+            | Type::RuntimeArray(_)
+            | Type::Image { .. }
+            | Type::SampledImage
+            | Type::Sampler => Err(format!(
                 "push constants contain type %{id}, which has no fixed size in an explicit layout"
             )),
         }
@@ -739,6 +920,105 @@ mod tests {
         let mut ours = ALLOWED_CAPABILITIES.to_vec();
         ours.sort_unstable();
         assert_eq!(ours, compiler, "keep both allowlists in sync (ADR-0013)");
+    }
+
+    /// A module declaring one descriptor resource: `element` (operands of its type instruction)
+    /// in a runtime array, at `set` and `binding`.
+    fn with_resource(element_op: u32, element: &[u32], set: u32, binding: u32) -> Vec<u32> {
+        Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, set])
+            .op(op::DECORATE, &[40, decoration::BINDING, binding])
+            .op(op::TYPE_FLOAT, &[10, 32])
+            .op(element_op, element)
+            .op(op::TYPE_RUNTIME_ARRAY, &[30, 20])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0
+    }
+
+    /// `OpTypeImage %20 %float 2D depth=0 arrayed=0 ms=0 sampled=1 Unknown`.
+    const TEXTURE_2D: [u32; 8] = [20, 10, 1, 0, 0, 0, 1, 0];
+
+    #[test]
+    fn the_bindless_arrays_are_accepted() {
+        assert!(inspect(&with_resource(op::TYPE_IMAGE, &TEXTURE_2D, 0, 0)).is_ok());
+        assert!(inspect(&with_resource(op::TYPE_SAMPLER, &[20], 0, 1)).is_ok());
+    }
+
+    #[test]
+    fn other_descriptor_resources_are_rejected() {
+        let other_set = inspect(&with_resource(op::TYPE_IMAGE, &TEXTURE_2D, 1, 0)).unwrap_err();
+        assert!(other_set.contains("descriptor set 1"), "{other_set}");
+        let other_binding = inspect(&with_resource(op::TYPE_SAMPLER, &[20], 0, 5)).unwrap_err();
+        assert!(other_binding.contains("binding 5"), "{other_binding}");
+        let swapped = inspect(&with_resource(op::TYPE_SAMPLER, &[20], 0, 0)).unwrap_err();
+        assert!(swapped.contains("Texture2D[]"), "{swapped}");
+        // A storage image (sampled = 2) is not a sampled texture.
+        let storage = [20, 10, 1, 0, 0, 0, 2, 0];
+        let storage = inspect(&with_resource(op::TYPE_IMAGE, &storage, 0, 0)).unwrap_err();
+        assert!(storage.contains("sampled 2D textures"), "{storage}");
+        let cube = [20, 10, 3, 0, 0, 0, 1, 0];
+        assert!(
+            inspect(&with_resource(op::TYPE_IMAGE, &cube, 0, 0)).is_err(),
+            "cube maps aren't 2D"
+        );
+    }
+
+    #[test]
+    fn fixed_size_descriptor_arrays_are_rejected() {
+        // Texture2D t[1000000] at binding 0: its length can exceed the device's set.
+        let words = Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, 0])
+            .op(op::DECORATE, &[40, decoration::BINDING, 0])
+            .op(op::TYPE_FLOAT, &[10, 32])
+            .op(op::TYPE_IMAGE, &TEXTURE_2D)
+            .op(op::TYPE_INT, &[11, 32, 0])
+            .op(op::CONSTANT, &[11, 12, 1_000_000])
+            .op(op::TYPE_ARRAY, &[30, 20, 12])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0;
+        let err = inspect(&words).unwrap_err();
+        assert!(err.contains("fixed-size array"), "{err}");
+    }
+
+    #[test]
+    fn textures_must_be_float_and_not_depth() {
+        // Texture2D<uint>: an integer texel type.
+        let words = Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, 0])
+            .op(op::DECORATE, &[40, decoration::BINDING, 0])
+            .op(op::TYPE_INT, &[10, 32, 0])
+            .op(op::TYPE_IMAGE, &TEXTURE_2D)
+            .op(op::TYPE_RUNTIME_ARRAY, &[30, 20])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0;
+        let err = inspect(&words).unwrap_err();
+        assert!(err.contains("32-bit floats"), "{err}");
+        // A depth image (depth operand 1).
+        let depth = [20, 10, 1, 1, 0, 0, 1, 0];
+        let err = inspect(&with_resource(op::TYPE_IMAGE, &depth, 0, 0)).unwrap_err();
+        assert!(err.contains("depth textures"), "{err}");
+        // Depth 2 ("unknown") is what Slang emits for Texture2D: accepted.
+        let unknown = [20, 10, 1, 2, 0, 0, 1, 0];
+        assert!(inspect(&with_resource(op::TYPE_IMAGE, &unknown, 0, 0)).is_ok());
+    }
+
+    #[test]
+    fn combined_image_samplers_get_a_clear_error() {
+        let words = Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, 0])
+            .op(op::DECORATE, &[40, decoration::BINDING, 0])
+            .op(op::TYPE_FLOAT, &[10, 32])
+            .op(op::TYPE_IMAGE, &[21, 10, 1, 0, 0, 0, 1, 0])
+            .op(op::TYPE_SAMPLED_IMAGE, &[20, 21])
+            .op(op::TYPE_RUNTIME_ARRAY, &[30, 20])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0;
+        let err = inspect(&words).unwrap_err();
+        assert!(err.contains("combined image sampler"), "{err}");
     }
 
     #[test]

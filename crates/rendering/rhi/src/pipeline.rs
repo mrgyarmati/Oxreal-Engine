@@ -41,10 +41,20 @@ impl<'a> ShaderCode<'a> {
     ///   given addresses of live buffers, read in bounds and aligned to the type they read. A
     ///   buffer is live for work recorded by an encoder created before the buffer was destroyed
     ///   (until that encoder's work completes), and never for an encoder created after.
-    /// - An address is a plain number: the device can't check what a shader does with it, and push
-    ///   constants that carry one are set through safe calls. So this is a **program-wide**
-    ///   obligation: whoever creates `ShaderCode` for an address-using shader also vouches that
-    ///   every address the program passes it is valid (ADR-0016 §2).
+    /// - Shaders that sample through bindless indices ([`crate::Device::texture_index`],
+    ///   [`crate::Device::sampler_index`]) must only be given indices those calls returned for
+    ///   live objects. A texture index goes to the texture array and a sampler index to the
+    ///   sampler array. "Live" means the same as for addresses: the object wasn't destroyed before
+    ///   the encoder that uses the index was created. Indices that can differ between invocations
+    ///   must be marked non-uniform (`NonUniformResourceIndex`; `Bindless.slang` does).
+    ///   `spirv-val` doesn't check this.
+    /// - A draw must not sample a texture that is a color attachment of the render pass it's in.
+    ///   During the pass the texture is being written, and isn't in a shader-readable state.
+    ///   Sample it in a later pass instead.
+    /// - Addresses and indices are plain numbers: the device can't check what a shader does with
+    ///   them, and push constants that carry them are set through safe calls. So these are
+    ///   **program-wide** obligations: whoever creates `ShaderCode` for such a shader also vouches
+    ///   that every address and index the program passes it is valid (ADR-0016 §2).
     #[must_use]
     pub const unsafe fn from_spirv_unchecked(words: &'a [u32]) -> Self {
         Self {

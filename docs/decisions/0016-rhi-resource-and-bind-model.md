@@ -140,6 +140,37 @@ Three questions shape everything above the RHI:
   lifetime. Freed indices are reused only after the deferred-destruction point.
 - Capacity is sized at device creation and must stay **within the Roadmap 2022 guaranteed
   limits** (≤ 500,000 sampled images). The chosen sizes are logged.
+- *Implementation note (2026-11-19, bindless textures and samplers):*
+  - Set 0 has two bindings: 0 holds `Texture2D[]` (sampled textures) and 1 holds
+    `SamplerState[]`. Storage images join when compute needs them. `oxreal_rhi::BINDLESS_SET`
+    and friends declare the layout, and `crates/rendering/rhi/shaders/Bindless.slang` declares
+    it for shaders. The backend rejects shaders that declare any other descriptor resource.
+  - Capacity is the smaller of 65,536 textures / 2,048 samplers and the device's
+    update-after-bind limits. Samplers also stay within `maxSamplerAllocationCount`: every
+    existing sampler holds an index, so that limit can't be exceeded.
+  - Indices are released only when their object is really destroyed (after the retire queue),
+    so a slot is never rewritten while the GPU may read it. A test proves this: releasing early
+    makes it fail.
+  - A sampled texture **rests** in `SHADER_READ_ONLY_OPTIMAL`. Creation, uploads, render passes
+    and readback each return it there in the same command buffer, so shaders can sample it at
+    any time. Index validity follows the address rule: a program-wide part of `ShaderCode`'s
+    contract.
+  - Not tool-verified: core validation skips layout checks for update-after-bind descriptors,
+    and GPU-assisted validation (layer 1.4.363) didn't report a removed return-to-rest
+    transition either. The transitions follow the spec, and the render-to-texture test checks
+    the result.
+  - *After the `unsafe` audit:* `ShaderCode`'s contract spells out the index rules:
+    - indices only from `texture_index` and `sampler_index`, of live objects, each in its own
+      array, marked non-uniform where they vary;
+    - never sample a texture that is a color attachment of the current pass (it isn't in a
+      readable layout during the pass).
+
+    The backend also rejects:
+    - fixed-size descriptor arrays (the set's size depends on the device);
+    - integer or depth textures;
+    - combined image samplers.
+
+    A GPU whose descriptor limits are too small is rejected at selection, with a reason.
 - Slang shaders access resources through shared engine modules (`common/Bindless.slang`). The
   shader compiler's capability allowlist (ADR-0013) permits exactly the capabilities this model
   needs: `RuntimeDescriptorArray`, `ShaderNonUniform`, the non-uniform indexing capabilities and

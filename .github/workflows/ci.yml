@@ -153,6 +153,9 @@ jobs:
       - name: triangle example (Lavapipe, X11 under Xvfb)
         timeout-minutes: 10
         run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example triangle --locked -- --frames 120
+      - name: textured example (Lavapipe, X11 under Xvfb)
+        timeout-minutes: 10
+        run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example textured --locked -- --frames 120
       # Misusing the frame loop (second begin_frame, dropped frame, tampered Frame, ...) is
       # refused or recovered, never undefined behaviour.
       - name: frame_protocol checks (Lavapipe, X11 under Xvfb)

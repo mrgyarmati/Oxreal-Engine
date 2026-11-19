@@ -13,16 +13,17 @@ use oxreal_diagnostics::{info, warn};
 use oxreal_rhi::{
     AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, BufferDesc, BufferHandle,
     CommandEncoder, DeviceDesc, Frame, GpuSelection, HandlePool, PipelineHandle,
-    RenderPipelineDesc, RhiError, SubmissionId, SurfaceDesc, SurfaceHandle, SurfaceTarget,
-    TextureDesc, TextureHandle, select_adapter,
+    RenderPipelineDesc, RhiError, SamplerDesc, SamplerHandle, SubmissionId, SurfaceDesc,
+    SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle, select_adapter,
 };
 
+use crate::bindless::{Bindless, BindlessSlots, DescriptorLimits, capacities};
 use crate::buffers::Buffer;
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
 use crate::instance::{VulkanInstance, format_version};
 use crate::present::{Surface, Texture};
-use crate::resources::{Pipeline, Retired, create_pipeline_layout};
+use crate::resources::{Pipeline, Retired, Sampler, create_pipeline_layout};
 use crate::retire::RetireQueue;
 
 /// Locks `mutex`, recovering it if a panic poisoned it.
@@ -142,9 +143,19 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
     // SAFETY: the device is alive and timelineSemaphore is enabled (a required feature).
     let timeline = unsafe { logical.device.create_semaphore(&timeline_info, None) }
         .map_err(|e| from_vk("vkCreateSemaphore (timeline)", e))?;
-    let pipeline_layout = match create_pipeline_layout(&logical.device) {
+    let (bindless, bindless_slots) = match Bindless::new(&logical.device, &probe.descriptor_limits)
+    {
+        Ok(created) => created,
+        Err(error) => {
+            // SAFETY: never used. Destroyed exactly once, before the device.
+            unsafe { logical.device.destroy_semaphore(timeline, None) };
+            return Err(error);
+        }
+    };
+    let pipeline_layout = match create_pipeline_layout(&logical.device, bindless.set_layout) {
         Ok(layout) => layout,
         Err(error) => {
+            bindless.destroy(&logical.device);
             // SAFETY: never used. Destroyed exactly once, before the device.
             unsafe { logical.device.destroy_semaphore(timeline, None) };
             return Err(error);
@@ -166,6 +177,9 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         textures: Mutex::new(HandlePool::new()),
         buffers: Mutex::new(HandlePool::new()),
         pipelines: Mutex::new(HandlePool::new()),
+        samplers: Mutex::new(HandlePool::new()),
+        bindless,
+        bindless_slots: Mutex::new(bindless_slots),
         retired: Mutex::new(RetireQueue::default()),
         queue: Mutex::new(QueueState {
             queue,
@@ -178,6 +192,7 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
             max_image_dimension_2d: probe.limits.max_image_dimension2_d,
             max_color_attachments: probe.limits.max_color_attachments,
             max_buffer_size: probe.max_buffer_size,
+            max_sampler_anisotropy: probe.limits.max_sampler_anisotropy,
         },
         queue_family,
         physical_device: probe.physical_device,
@@ -215,13 +230,15 @@ pub(crate) struct Limits {
     pub(crate) max_color_attachments: u32,
     /// Largest buffer `vkCreateBuffer` accepts (maintenance4 makes exceeding it invalid).
     pub(crate) max_buffer_size: u64,
+    /// `maxSamplerAnisotropy` (at least 16 with samplerAnisotropy).
+    pub(crate) max_sampler_anisotropy: f32,
 }
 
 /// The device state that encoders share with the device.
 ///
 /// **Lock order:** `surfaces` (on [`VulkanDevice`]) → `queue` → `retired` → `textures` →
-/// `buffers` → `pipelines` → `allocator`. A thread holding one of these locks only takes locks to
-/// its right.
+/// `buffers` → `samplers` → `pipelines` → `bindless_slots` → `allocator`. A thread holding one of
+/// these locks only takes locks to its right.
 /// `queue` → `retired` is what makes deferred destruction exact: "read the timeline value and
 /// queue an object" and "submit and record the submission" never interleave.
 ///
@@ -232,6 +249,11 @@ pub(crate) struct Shared {
     pub(crate) textures: Mutex<HandlePool<Texture>>,
     pub(crate) buffers: Mutex<HandlePool<Buffer>>,
     pub(crate) pipelines: Mutex<HandlePool<Pipeline>>,
+    pub(crate) samplers: Mutex<HandlePool<Sampler>>,
+    /// The global descriptor set (ADR-0016 §2). Its handles never change.
+    pub(crate) bindless: Bindless,
+    /// Bindless indices in use. Also serializes descriptor writes to the set.
+    pub(crate) bindless_slots: Mutex<BindlessSlots>,
     pub(crate) retired: Mutex<RetireQueue<Retired>>,
     pub(crate) queue: Mutex<QueueState>,
     pub(crate) timeline: vk::Semaphore,
@@ -287,6 +309,7 @@ impl Drop for Shared {
         let textures = lock(&self.textures).drain();
         let buffers = lock(&self.buffers).drain();
         let pipelines = lock(&self.pipelines).drain();
+        let samplers = lock(&self.samplers).drain();
         let leftovers = retired
             .into_iter()
             .chain(textures.into_iter().filter_map(|t| {
@@ -296,11 +319,16 @@ impl Drop for Shared {
                     image: t.image,
                     view: t.view,
                     allocation,
+                    bindless_index: t.bindless_index,
                 })
             }))
             .chain(buffers.into_iter().map(|b| Retired::Buffer {
                 buffer: b.buffer,
                 allocation: b.allocation,
+            }))
+            .chain(samplers.into_iter().map(|s| Retired::Sampler {
+                sampler: s.sampler,
+                index: s.index,
             }))
             .chain(pipelines.into_iter().map(|p| Retired::Pipeline(p.pipeline)));
         for object in leftovers {
@@ -312,6 +340,8 @@ impl Drop for Shared {
                 .device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
         }
+        // The pipeline layout that used it is gone, and the GPU is idle.
+        self.bindless.destroy(&self.logical.device);
         // SAFETY: the GPU is idle, so no submission still signals or waits on the timeline.
         unsafe { self.logical.device.destroy_semaphore(self.timeline, None) };
         // Free GPU memory before the logical device is destroyed (field order would do the
@@ -462,6 +492,26 @@ impl oxreal_rhi::Device for VulkanDevice {
     fn buffer_address(&self, buffer: BufferHandle) -> Result<u64, RhiError> {
         self.shared.buffer_address(buffer)
     }
+
+    fn write_texture(&self, texture: TextureHandle, data: &[u8]) -> Result<(), RhiError> {
+        Shared::write_texture(&self.shared, texture, data)
+    }
+
+    fn texture_index(&self, texture: TextureHandle) -> Result<u32, RhiError> {
+        self.shared.texture_index(texture)
+    }
+
+    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, RhiError> {
+        self.shared.create_sampler(desc)
+    }
+
+    fn destroy_sampler(&self, sampler: SamplerHandle) -> Result<(), RhiError> {
+        self.shared.destroy_sampler(sampler)
+    }
+
+    fn sampler_index(&self, sampler: SamplerHandle) -> Result<u32, RhiError> {
+        self.shared.sampler_index(sampler)
+    }
 }
 
 /// Owns the `VkDevice`, destroying it on drop.
@@ -486,6 +536,7 @@ struct Probe {
     limits: vk::PhysicalDeviceLimits,
     /// `maxBufferSize` (Vulkan 1.3 core, from maintenance4).
     max_buffer_size: u64,
+    descriptor_limits: DescriptorLimits,
 }
 
 fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe {
@@ -494,12 +545,23 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
     let api = props.api_version;
     let mut reasons = Vec::new();
 
+    let mut descriptor_limits = DescriptorLimits::default();
     let (driver_name, driver_info) = if api >= vk::API_VERSION_1_2 {
         let mut v12 = vk::PhysicalDeviceVulkan12Properties::default();
         let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut v12);
         // SAFETY: the device supports Vulkan 1.2, so Vulkan12Properties is a valid chain member.
         // Both structures are alive across the call.
         unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
+        descriptor_limits = DescriptorLimits {
+            set_sampled_images: v12.max_descriptor_set_update_after_bind_sampled_images,
+            stage_sampled_images: v12.max_per_stage_descriptor_update_after_bind_sampled_images,
+            set_samplers: v12.max_descriptor_set_update_after_bind_samplers,
+            stage_samplers: v12.max_per_stage_descriptor_update_after_bind_samplers,
+            stage_resources: v12.max_per_stage_update_after_bind_resources,
+            all_pools: v12.max_update_after_bind_descriptors_in_all_pools,
+            sampler_allocations: props.limits.max_sampler_allocation_count,
+            color_attachments: props.limits.max_color_attachments,
+        };
         (
             v12.driver_name_as_c_str()
                 .map_or_else(|_| String::new(), |s| s.to_string_lossy().into_owned()),
@@ -530,6 +592,10 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
                 .into_iter()
                 .map(|name| format!("missing feature {name}")),
         );
+        // Rejected here, with a reason, rather than failing in `create_device` after selection.
+        if let Err(problem) = capacities(&descriptor_limits) {
+            reasons.push(problem);
+        }
     }
 
     // SAFETY: `physical_device` belongs to the live `instance`.
@@ -580,6 +646,7 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         queue_family,
         limits: props.limits,
         max_buffer_size,
+        descriptor_limits,
     }
 }
 

@@ -52,6 +52,12 @@ pub(crate) struct Texture {
     pub(crate) user: Option<EncoderId>,
     /// For backbuffers: the frame encoder that acquired it. Only that encoder may use it.
     pub(crate) frame_owner: Option<EncoderId>,
+    /// For textures with `SAMPLED` usage: their index in the bindless texture array.
+    pub(crate) bindless_index: Option<u32>,
+    /// For `SAMPLED` textures: SHADER_READ_ONLY_OPTIMAL. Every operation that changes the
+    /// layout returns the texture to it in the same command buffer, so shaders can sample it
+    /// through its index at any time.
+    pub(crate) resting_layout: Option<vk::ImageLayout>,
 }
 
 /// A surface's Vulkan objects and window, destroyed together.
@@ -864,6 +870,8 @@ impl VulkanDevice {
                 allocation: None,
                 user: None,
                 frame_owner: None,
+                bindless_index: None,
+                resting_layout: None,
             });
             swapchain.images.push(raw);
             shared.name_object(image, &format!("{name} backbuffer {i}"));

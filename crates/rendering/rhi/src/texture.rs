@@ -41,6 +41,13 @@ impl TextureUsage {
     pub const RENDER_TARGET: Self = Self(1);
     /// Copied from, for example by [`crate::Device::read_texture`].
     pub const COPY_SOURCE: Self = Self(1 << 1);
+    /// Sampled by shaders through its bindless index ([`crate::Device::texture_index`]). Between
+    /// uses the texture rests in a shader-readable state, so any later work can sample it. Not
+    /// during a render pass that draws into it: see
+    /// [`ShaderCode::from_spirv_unchecked`](crate::ShaderCode::from_spirv_unchecked).
+    pub const SAMPLED: Self = Self(1 << 2);
+    /// Written by [`crate::Device::write_texture`].
+    pub const COPY_DESTINATION: Self = Self(1 << 3);
 
     /// Whether every flag in `other` is set.
     #[must_use]

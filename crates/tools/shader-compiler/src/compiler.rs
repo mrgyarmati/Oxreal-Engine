@@ -168,6 +168,14 @@ impl SlangCompiler {
             "spirv",
             "-profile",
             "spirv_1_6",
+            // Slang's texture functions declare these capability atoms, so without them every
+            // sampling shader warns "profile implicitly upgraded" (E41012). Declaring them only
+            // says the target *may* use them. A shader that actually does emits the SPIR-V
+            // capability, and the allowlist rejects it. Verified with Slang 2026.22: the SPIR-V
+            // is byte-identical with and without this flag.
+            "-capability",
+            "SPV_GOOGLE_user_type+spvDerivativeControl+spvImageQuery+spvImageGatherExtended+\
+             spvSparseResidency+spvMinLod+spvFragmentFullyCoveredEXT",
             "-matrix-layout-column-major",
             "-fvk-use-entrypoint-name",
         ]);
