@@ -27,6 +27,10 @@ You review changes. You do not write code.
    `docs/development/dependencies.md`), or `unwrap` on fallible runtime paths.
 7. **Docs**: does the change need an ADR or a TAD update that's missing?
 8. **Clean room**: anything that looks ported from Unreal source (ADR-0007).
+9. **Standards**: naming, API design and documentation per `docs/development/coding-standards.md`,
+   and terms per `docs/development/glossary.md`. Lints catch most of it; review what they can't
+   (names that say how instead of what, `bool` parameters that should be enums, missing
+   `#[non_exhaustive]` on growing types).
 
 ## Output
 A list of findings, ordered by severity (blocking / should fix / nit). Each finding gives

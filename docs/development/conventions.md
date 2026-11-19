@@ -1,6 +1,8 @@
 # Development Conventions
 
-Some conventions here are provisional and marked with the open decision that will settle them.
+Engine-wide conventions for errors, logging, profiling, `unsafe`, platform code, testing, and
+math and coordinates. Naming, API shape, documentation and shader style are in
+[coding-standards.md](coding-standards.md), and terms are defined in [glossary.md](glossary.md).
 
 ## Workspace and crates
 

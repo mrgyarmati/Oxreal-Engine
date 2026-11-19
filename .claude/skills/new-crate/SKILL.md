@@ -45,6 +45,7 @@ workspace = true
 ```
 
 ## 3. Source
+Follow `docs/development/coding-standards.md` (naming, docs, API design; CI enforces most of it).
 `src/lib.rs` (or `main.rs`) starts with a `//!` doc comment that states the responsibility, the
 layer, and its boundaries. Add real code and at least one test.
 

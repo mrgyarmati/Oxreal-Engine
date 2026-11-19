@@ -82,6 +82,8 @@ and this project is MIT/Apache-2.0.
   all CI checks pass (`rustfmt`, `clippy + test` on windows-2025, ubuntu-24.04 and ubuntu-26.04,
   `rustdoc`, `cargo-deny`).
 - Never use the admin bypass, push to `main` directly, or force-push shared branches.
+- Avoid stacked PRs. If one is unavoidable, retarget it to `main` before it is merged. Otherwise
+  it merges into its base branch instead (this happened with #16).
 - Work on a topic branch (`feat/…`, `fix/…`, `docs/…`, `ci/…`). Open a PR that fills in
   `.github/PULL_REQUEST_TEMPLATE.md`, then wait for green CI. The maintainer merges.
 - Record user-visible changes as a fragment `changelog.d/<slug>.<kind>.md` (ADR-0009). Never edit
@@ -116,6 +118,10 @@ report what was implemented, what was tested and what remains incomplete.
 Skills (`.claude/skills/`): `verify`, `new-adr`, `new-crate`.
 
 ## Code style quick reference
+
+Full rules: `docs/development/coding-standards.md` (naming, API design, docs, Slang style) and
+`docs/development/glossary.md` (Actor vs Entity, Level vs Scene and so on). Lints enforce most of
+it. Suppress a lint only with `#[expect(lint, reason = "...")]`.
 
 - Edition 2024, toolchain pinned in `rust-toolchain.toml`. Lints are configured in `[workspace.lints]`.
   Crates opt in with `[lints] workspace = true`.
