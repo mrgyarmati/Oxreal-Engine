@@ -1,0 +1,20 @@
+[package]
+name = "oxreal-shader-compiler"
+description = "Compiles Slang shaders to SPIR-V with the pinned slangc: reflection, dependencies, capability allowlist (ADR-0013). Tools and the editor only; never in shipped games."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "tool"
+
+[dependencies]
+oxreal-diagnostics.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

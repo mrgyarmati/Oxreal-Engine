@@ -1,4 +1,6 @@
 /target/
+# Pinned developer tools downloaded by `cargo xtask` (e.g. Slang, ADR-0013).
+/.tools/
 **/*.rs.bk
 *.pdb
 

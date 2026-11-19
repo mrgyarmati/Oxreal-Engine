@@ -24,7 +24,7 @@ that can be tested independently. Dependency boundaries are enforced mechanicall
 | `editor` | editor framework (docking, commands, selection, undo, gizmos) and panels | `crates/editor/*` |
 | `app-runtime` | shipped executables without the editor: player, dedicated server | `applications/{player,server}` |
 | `app-editor` | the editor executable | `applications/editor` |
-| `tool` | offline tools and dev tooling: asset-cooker, shader-tool, xtask | `applications/{asset-cooker,shader-tool}`, `tools/*` |
+| `tool` | offline tools, tool libraries and dev tooling: shader compiler, asset-cooker, shader-tool, xtask | `crates/tools/*`, `applications/{asset-cooker,shader-tool}`, `tools/*` |
 
 ## 3. Dependency direction
 
@@ -229,5 +229,6 @@ Create these only when M1 work starts, one at a time, each with real code:
 | `rendering/backends/vulkan` | rendering | **Created** (`oxreal-rhi-vulkan`): instance, validation, GPU selection, device, allocator, surfaces and swapchains with internal recreation, timeline-paced frame loop, dynamic rendering. (ADR-0012, ADR-0017) |
 | `rendering/renderer` | rendering | Basic mesh pass, camera |
 | `applications/player` | app-runtime | The vertical-slice app |
+| `tools/shader-compiler` | tool | **Created** (`oxreal-shader-compiler`): pinned `slangc`, reflection, depfile, SPIR-V capability allowlist, optional `spirv-val`. Never linked into games. (ADR-0013) |
 
 Crate names use the `oxreal-` prefix, for example `oxreal-math` and `oxreal-rhi` (D-15).

@@ -10,6 +10,7 @@
 
 mod changelog;
 mod layers;
+mod slang;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -20,13 +21,16 @@ Usage: cargo xtask <command>
 
 Commands:
   ci                           Run everything CI runs: fmt check; clippy (-D warnings) and tests
-                               with default and with all features; rustdoc; layer check;
+                               with default and with all features; shader compiler tests with
+                               the pinned Slang (installed if needed); rustdoc; layer check;
                                changelog fragment check
   layers                       Check workspace crate layering rules (docs/architecture/TAD.md section 4)
   changelog check              Validate changelog fragments in changelog.d/ (ADR-0009)
   changelog release <X.Y.Z> [--dry-run]
                                Write fragments into CHANGELOG.md as release X.Y.Z and delete them
                                (--dry-run: print the section only, change nothing)
+  slang install                Download, verify and unpack the pinned Slang compiler (ADR-0013)
+  slang path                   Print the path of the pinned slangc
   help                         Show this message";
 
 fn main() -> ExitCode {
@@ -35,6 +39,7 @@ fn main() -> ExitCode {
         Some("ci") => ci(),
         Some("layers") => layers::run(&cargo(), &workspace_root()),
         Some("changelog") => changelog::run(&workspace_root(), &args[1..]),
+        Some("slang") => slang::run(&workspace_root(), &args[1..]),
         Some("help" | "-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -106,6 +111,18 @@ fn ci() -> Result<(), String> {
         "warnings",
     ])?;
     run_cargo(&["test", "--workspace", "--all-features"])?;
+    // Shader compilation against the pinned Slang (ADR-0013), installed on demand.
+    println!("\n==> pinned Slang");
+    slang::ensure_installed(&workspace_root())?;
+    run_cargo(&[
+        "test",
+        "-p",
+        "oxreal-shader-compiler",
+        "--test",
+        "compile",
+        "--",
+        "--ignored",
+    ])?;
     // Same flags as the CI `rustdoc` job: broken intra-doc links and doc warnings fail the build.
     run_cargo_with_env(
         &[

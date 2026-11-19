@@ -108,7 +108,8 @@ listed here.
 | `OXREAL_LINUX_DISPLAY` | `oxreal-window` | Force `wayland` or `x11` | Implemented |
 | `OXREAL_GPU` | `oxreal-rhi` (all backends) | Choose a GPU by index or name (ADR-0012) | Implemented |
 | `OXREAL_VULKAN_VALIDATION` | `oxreal-rhi-vulkan` | Force validation layers on (`1`) or off (`0`) (ADR-0012) | Implemented |
-| `OXREAL_SLANGC` | Shader compiler | Use a different `slangc` (ADR-0013) | Planned |
+| `OXREAL_SLANGC` | `oxreal-shader-compiler` | Use a different `slangc` than the pinned one (logged as a warning) (ADR-0013) | Implemented |
+| `OXREAL_REQUIRE_SPIRV_VAL` | shader-compiler tests | `1` makes a missing `spirv-val` a test failure (set in CI on Linux) | Implemented |
 
 ### Tests
 
@@ -178,6 +179,10 @@ These follow the conventions Cordite validated, adapted to Oxreal:
 | Entry points | `<purpose><Stage>`, with Stage one of `Vertex`, `Pixel` or `Compute` | `meshVertex`, `meshPixel`, `cullLightsCompute` |
 
 - "Pixel", not "fragment", matching HLSL and Unreal terminology.
+- **Use `SV_VulkanVertexID` and `SV_VulkanInstanceID`, not `SV_VertexID` / `SV_InstanceID`.** The
+  HLSL semantics follow Direct3D rules (they exclude the base vertex and instance), so Slang
+  subtracts Vulkan's base values. That needs the `DrawParameters` capability, which Oxreal does
+  not require (Roadmap 2022 doesn't). The compiler's capability allowlist rejects such shaders.
 - Shared engine conventions (ADR-0011 depth and clip space, color space, bindless access) live
   in `common/` modules and are imported, never copied.
 - Binding layout follows the RHI bind-model ADR.

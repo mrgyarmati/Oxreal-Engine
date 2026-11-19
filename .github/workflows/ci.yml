@@ -60,6 +60,24 @@ jobs:
       - run: cargo test --workspace --all-features --locked
       - run: cargo xtask layers
       - run: cargo xtask changelog check
+      # Shader compilation with the pinned, hash-verified Slang (ADR-0013). The download is
+      # cached per manifest; `xtask slang install` re-verifies the hash either way.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/downloads
+          key: slang-${{ runner.os }}-${{ hashFiles('tools/slang.json') }}
+      - run: cargo xtask slang install
+      - name: spirv-val for shader validation (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends spirv-tools
+      - name: Shader compiler tests (pinned Slang)
+        shell: bash
+        run: |
+          # Linux has spirv-val installed above, so validation must not be skipped there.
+          if [ "$RUNNER_OS" = "Linux" ]; then export OXREAL_REQUIRE_SPIRV_VAL=1; fi
+          cargo test -p oxreal-shader-compiler --test compile --locked -- --ignored
       # Opens a real window and runs 120 frames (ADR-0015 §7). The build steps above ran with
       # no windowing dev packages; here only the runtime libraries and a virtual X server are
       # installed. The example fails (never hangs) if frames stop arriving.

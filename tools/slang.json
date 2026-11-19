@@ -1,0 +1,14 @@
+{
+  "_comment": "Pinned Slang shader compiler (ADR-0013). Updated only by a reviewed PR that also passes the shader test suite. Hashes are the SHA-256 that GitHub publishes for the release assets.",
+  "version": "2026.22",
+  "assets": {
+    "windows-x86_64": {
+      "url": "https://github.com/shader-slang/slang/releases/download/v2026.22/slang-2026.22-windows-x86_64.tar.gz",
+      "sha256": "1273f2ad5ba35f21f77053faa1ef6eb0e1b668d52ccf1b9449014f3acdec2fba"
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/shader-slang/slang/releases/download/v2026.22/slang-2026.22-linux-x86_64.tar.gz",
+      "sha256": "a877b75c6ec515f5d8bf66ea4bae4f0a5ba85050b9540c2046670285808347e6"
+    }
+  }
+}
