@@ -1,9 +1,12 @@
 # GPU and driver support
 
-Policy: [ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md). Oxreal requires
-**Vulkan 1.3** with dynamic rendering, synchronization2 and maintenance4. The full required
-feature list is finalized in the RHI bind-model ADR. A GPU without them is rejected at startup
-with an error naming what's missing.
+Policy: [ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md) and
+[ADR-0016](../decisions/0016-rhi-resource-and-bind-model.md). Oxreal requires **Vulkan 1.3** plus
+the bindless subset of Khronos's Roadmap 2022 profile. The exact list is
+[`tools/ci/required-vulkan-features.txt`](../../tools/ci/required-vulkan-features.txt). A GPU
+without them is rejected at startup with an error naming what's missing.
+
+Check your own GPU with `tools/ci/check-vulkan-features.sh` (needs `vulkaninfo`).
 
 **This page lists only what has actually been run and tested.** "It compiles" or "the vendor
 says Vulkan 1.3" doesn't qualify (ADR-0002).
@@ -21,7 +24,7 @@ tests on that hardware.
 
 | Runner | Device | Status |
 |---|---|---|
-| ubuntu-24.04, ubuntu-26.04 | Mesa Lavapipe (software, Vulkan 1.3 conformant) | Planned with the first GPU tests (D-19) |
+| ubuntu-24.04, ubuntu-26.04 | Mesa Lavapipe (software, Vulkan 1.3 conformant) | Required-feature check on every run (`vulkan features` job). Rendering tests come with the first GPU code (D-19). |
 | windows-2025 | none (no GPU) | Build and non-GPU tests only |
 
 ## Known unsupported

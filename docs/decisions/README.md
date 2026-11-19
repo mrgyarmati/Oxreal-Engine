@@ -30,6 +30,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0013](0013-shader-language-and-compiler-pipeline.md) | Shader language and compiler pipeline | Accepted |
 | [0014](0014-ecs-architecture-and-storage.md) | ECS architecture and storage | Accepted |
 | [0015](0015-windowing-and-platform-event-loop.md) | Windowing and the platform event loop | Accepted |
+| [0016](0016-rhi-resource-and-bind-model.md) | RHI resource model, bindless binding and required GPU features | Accepted |
 
 Open questions that still need ADRs are tracked in
 [`../development/open-decisions.md`](../development/open-decisions.md).
