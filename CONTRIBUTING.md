@@ -28,6 +28,8 @@ confidentially.
 
 ## Rules
 
+- Follow the [coding standards](docs/development/coding-standards.md) and use the
+  [glossary](docs/development/glossary.md)'s terms. CI enforces most of the standards.
 - No Bevy, Fyrox, Godot or Unreal as a foundation (ADR-0001).
 - **No Unreal Engine code, shaders or assets**, including paraphrased code (ADR-0007).
 - Keep changes small and coherent, and consider both Windows and Linux.

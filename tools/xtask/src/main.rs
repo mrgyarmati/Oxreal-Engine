@@ -2,8 +2,11 @@
 //!
 //! Dev tooling only. It is never shipped and must not depend on engine crates.
 
-// This is a CLI tool, so printing is its output.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "xtask is a CLI tool: printing progress and results is its output"
+)]
 
 mod changelog;
 mod layers;

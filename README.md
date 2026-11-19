@@ -26,6 +26,8 @@ tools. It has Unreal Engine-class ambitions and an editor that Unreal developers
 | [Decisions (ADRs)](docs/decisions/README.md) | Architecture decision records |
 | [Open decisions & risks](docs/development/open-decisions.md) | What still needs research |
 | [Development setup](docs/development/setup.md) | Toolchains, Vulkan SDK, Linux packages |
+| [Coding standards](docs/development/coding-standards.md) | Naming, API design, documentation, Slang style, what CI enforces |
+| [Glossary](docs/development/glossary.md) | One meaning per term: Actor vs Entity, Level vs Scene, and so on |
 | [Conventions](docs/development/conventions.md) | Errors, logging, unsafe, testing, coordinates |
 | [Prior art](docs/development/prior-art.md) | Lessons from earlier engines (Cordite) and how Oxreal applies them |
 | [GPU support](docs/development/gpu-support.md) | Vulkan baseline and the hardware actually tested |
