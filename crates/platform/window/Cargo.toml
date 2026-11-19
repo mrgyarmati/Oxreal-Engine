@@ -1,0 +1,24 @@
+[package]
+name = "oxreal-window"
+description = "Oxreal windows and the platform event loop: winit behind an engine-owned App trait and event model (ADR-0015)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "platform"
+
+[dependencies]
+oxreal-diagnostics.workspace = true
+raw-window-handle.workspace = true
+thiserror.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+oxreal-diagnostics = { workspace = true, features = ["application"] }
+
+[lints]
+workspace = true
