@@ -106,6 +106,11 @@ language, a compiler and a pipeline that:
 6. **Future backends:** DirectX 12 compiles the same Slang source to DXIL (Slang with DXC) and
    Metal compiles to Metal, both decided when those backends are built. No shader source forks
    per backend.
+   - *Implementation note (2026-11-19):* the manifest is `tools/slang.json`. It pins the
+     **`.tar.gz`** release assets for both platforms (Windows `1273f2ad…`, Linux `a877b75c…`),
+     not the Windows `.zip` mentioned above, so extraction is the same pure-Rust code everywhere
+     and doesn't depend on which `tar` is on `PATH`. The command is
+     `cargo xtask slang install`.
 7. **Licensing:** `slangc` is a build tool and is not linked into Oxreal binaries. If the editor
    distribution later bundles it for user shader compilation, its license notices ship with it.
 

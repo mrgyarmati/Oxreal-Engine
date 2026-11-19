@@ -29,6 +29,7 @@ scaffold empty placeholder crates. Use the `new-crate` skill.
 cargo xtask ci          # everything CI runs: fmt, clippy -D warnings, tests, rustdoc, layers, changelog
 cargo xtask changelog check   # validate changelog.d/ fragments
 cargo xtask layers      # enforce crate layer/dependency rules (docs/architecture/TAD.md §4)
+cargo xtask slang install   # download and verify the pinned Slang shader compiler (ADR-0013)
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

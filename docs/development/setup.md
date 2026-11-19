@@ -18,8 +18,9 @@
 - The GPU driver provides the Vulkan loader and ICD. The **LunarG Vulkan SDK** provides
   validation layers, `vulkaninfo` and `spirv-val`.
 - **Shaders are Slang** ([ADR-0013](../decisions/0013-shader-language-and-compiler-pipeline.md)).
-  The build uses a pinned `slangc`, downloaded and hash-verified by `cargo xtask` (coming with the
-  first shaders), not the copy in the Vulkan SDK, which may be a different version.
+  The build uses a pinned `slangc`, downloaded and hash-verified by `cargo xtask slang install` (run
+  automatically by `cargo xtask ci`; needs `curl`), not the copy in the Vulkan SDK, which may be
+  a different version. It lives in the git-ignored `.tools/` folder.
 - Minimum: a Vulkan 1.3 driver with dynamic rendering, synchronization2 and maintenance4
   ([ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md)). Tested hardware is listed
   in [gpu-support.md](gpu-support.md). Reference development setup: SDK 1.4.363.1.
