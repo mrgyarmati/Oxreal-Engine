@@ -27,6 +27,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0010](0010-errors-logging-and-profiling.md) | Errors, logging and profiling | Accepted |
 | [0011](0011-math-library-and-coordinate-conventions.md) | Math library and coordinate conventions | Accepted |
 | [0012](0012-vulkan-baseline-bindings-and-memory.md) | Vulkan baseline, bindings and GPU memory allocation | Accepted |
+| [0013](0013-shader-language-and-compiler-pipeline.md) | Shader language and compiler pipeline | Accepted |
 
 Open questions that still need ADRs are tracked in
 [`../development/open-decisions.md`](../development/open-decisions.md).

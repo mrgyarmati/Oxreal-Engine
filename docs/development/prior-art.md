@@ -22,7 +22,7 @@ MIT OR Apache-2.0.
 | Area | Cordite's choice | Oxreal |
 |---|---|---|
 | Spatial conventions | Right-handed, +Y up, metres, −Z forward. Column-major. Y-up clip space with depth [0, 1] on all backends. Reversed depth. | ADR-0011 |
-| Shaders | Slang to SPIR-V (and to DXIL through DXC) | Input to D-04 |
+| Shaders | Slang to SPIR-V (and to DXIL through DXC) | ADR-0013 |
 | ECS storage | Sparse sets (EnTT), wrapped by a `World` that adds permanent IDs, names, an ordered hierarchy and world transforms | Input to D-01 and ADR-0005 |
 | Reflection | Explicit per-type tables with ranges, units, descriptions and read-only and runtime flags. Input is parsed into a validated patch before anything changes. | Input to D-02 |
 | Editor architecture | Context → Actions (validated, undoable) → Commands (by name, JSON) → panels. Every UI action is a command. | TAD §5.7 |
