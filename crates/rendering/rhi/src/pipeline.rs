@@ -48,7 +48,8 @@ impl<'a> ShaderCode<'a> {
     ///   the encoder that uses the index was created. Indices that can differ between invocations
     ///   must be marked non-uniform (`NonUniformResourceIndex`; `Bindless.slang` does).
     ///   `spirv-val` doesn't check this.
-    /// - A draw must not sample a texture that is a color attachment of the render pass it's in.
+    /// - A draw must not sample a texture that is a color or depth attachment of the render pass
+    ///   it's in.
     ///   During the pass the texture is being written, and isn't in a shader-readable state.
     ///   Sample it in a later pass instead.
     /// - Addresses and indices are plain numbers: the device can't check what a shader does with
@@ -93,6 +94,52 @@ pub enum CullMode {
     Front,
 }
 
+/// How a depth test compares a fragment's depth with the stored depth. The test passes when
+/// `fragment <op> stored` holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompareOp {
+    /// Never passes.
+    Never,
+    /// Passes when the fragment is less than the stored value.
+    Less,
+    /// Passes when the values are equal.
+    Equal,
+    /// Passes when the fragment is less than or equal to the stored value.
+    LessOrEqual,
+    /// Passes when the fragment is greater than the stored value.
+    Greater,
+    /// Passes when the values differ.
+    NotEqual,
+    /// Passes when the fragment is greater than or equal to the stored value. With Oxreal's
+    /// reversed depth (near = 1, far = 0), this keeps the nearest surface (ADR-0011 §4).
+    GreaterOrEqual,
+    /// Always passes.
+    Always,
+}
+
+/// Depth testing and writing for a pipeline that renders with a depth attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DepthState {
+    /// The depth attachment's format. It must match the render pass's depth attachment.
+    pub format: TextureFormat,
+    /// How fragments are tested against the stored depth.
+    pub compare: CompareOp,
+    /// Whether fragments that pass the test write their depth.
+    pub write: bool,
+}
+
+impl DepthState {
+    /// Opaque scene geometry under Oxreal's convention (ADR-0011 §4): reversed depth in
+    /// [`TextureFormat::Depth32Float`], compared with [`CompareOp::GreaterOrEqual`] so the nearest
+    /// surface wins, and written. Clear the attachment to
+    /// [`oxreal_math::projection::REVERSED_DEPTH_CLEAR`].
+    pub const SCENE: Self = Self {
+        format: TextureFormat::Depth32Float,
+        compare: CompareOp::GreaterOrEqual,
+        write: true,
+    };
+}
+
 /// How to create a render pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderPipelineDesc<'a> {
@@ -102,8 +149,12 @@ pub struct RenderPipelineDesc<'a> {
     pub vertex: ShaderEntry<'a>,
     /// The pixel stage.
     pub pixel: ShaderEntry<'a>,
-    /// Formats of the color attachments it renders to, in order.
+    /// Formats of the color attachments it renders to, in order. May be empty for a depth-only
+    /// pipeline.
     pub color_formats: &'a [TextureFormat],
+    /// Depth testing, for pipelines that render with a depth attachment. `None` for passes
+    /// without one: the pipeline and the pass must agree.
+    pub depth: Option<DepthState>,
     /// Bytes of push constants the shaders read, at most [`MAX_PUSH_CONSTANT_BYTES`] and a
     /// multiple of 4. Zero for none.
     pub push_constant_bytes: u32,

@@ -130,6 +130,45 @@ Regression tests: `oxreal-rhi-vulkan` `tests/triangle.rs` and `examples/frame_pr
 runs them with synchronization validation on (`OXREAL_VULKAN_SYNC_VALIDATION=1`, requested through
 `VkValidationFeaturesEXT`; device creation fails if the layer can't provide it).
 
+### Implementation notes (2026-11-19, depth attachments)
+
+Render passes take an optional depth attachment (`RenderPassDesc::depth_attachment`), and
+pipelines declare matching depth testing (`RenderPipelineDesc::depth`). The scene convention is
+ADR-0011 §4's: `DepthState::SCENE`, cleared to `REVERSED_DEPTH_CLEAR`.
+
+- **Formats and usage:** `TextureFormat::Depth32Float` with `TextureUsage::DEPTH_TARGET` only.
+  Sampling or copying depth comes when a feature needs it (shadow maps, depth readback). The spec
+  doesn't guarantee D32_SFLOAT depth attachments, so adapter selection requires them.
+- **Matching:** a pipeline's depth format must equal the pass's (both `None`, or the same
+  format), as dynamic rendering requires without `dynamicRenderingUnusedAttachments`. Mismatches,
+  wrong usage and depth clears outside [0, 1] are misuse, reported at submit.
+- **Depth-only passes** (no color attachments) and **depth-only pipelines** (no color formats)
+  are allowed, for prepasses and later shadow maps. A pipeline still has a pixel stage. Use one
+  without color outputs.
+- **Layouts and barriers:** the attachment uses DEPTH_STENCIL_ATTACHMENT_OPTIMAL, valid for
+  depth-only formats without `separateDepthStencilLayouts`. It stays in that layout after the
+  pass. The begin barrier waits for all earlier work (ALL_COMMANDS) before the early and late
+  fragment tests, like color attachments, and `Clear` or `DontCare` start from UNDEFINED.
+- **The render area** is the smallest extent of all attachments, color and depth.
+- **Frames** report the backbuffer's size (`Frame::backbuffer_size`), for sizing depth buffers
+  and the camera's aspect ratio.
+
+Tested by `tests/depth.rs`: occlusion in either draw order, camera placement, a depth prepass
+loaded within one encoder and across submissions, and misuse. Deliberately broken versions
+showed:
+- switching the depth test off, or making the cube's winding inside out, fails the tests;
+- starting a `Load` from UNDEFINED instead of the tracked layout doesn't. The validation layers
+  accept it, and this GPU kept the contents anyway. The same gap exists for color `Load`.
+
+*After the `unsafe` audit:*
+- `write_texture` and `read_texture` refuse depth textures themselves, because their copies use
+  the color aspect. Today the usage rules already keep depth textures out.
+- Attachment textures are checked against `maxFramebufferWidth` and `maxFramebufferHeight`,
+  which may be lower than `maxImageDimension2D`. Backbuffers take the surface's size.
+- A pass changes tracked layouts only once all of its barriers are built.
+- A test drops an encoder after a depth pass and then loads the depth in a new one. Breaking the
+  layout revert for abandoned encoders makes the validation layers fail it.
+
 ## Consequences
 
 - One renderer code path for every backend, runtime backend choice, and a straightforward C ABI

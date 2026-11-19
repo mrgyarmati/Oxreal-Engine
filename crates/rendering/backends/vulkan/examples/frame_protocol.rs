@@ -81,6 +81,7 @@ impl ProtocolApp {
         let _pass = frame.encoder().begin_render_pass(&RenderPassDesc {
             label: "clear",
             color_attachments: &attachments,
+            depth_attachment: None,
         });
     }
 
@@ -113,6 +114,7 @@ impl ProtocolApp {
             let _pass = other.begin_render_pass(&RenderPassDesc {
                 label: "steal the backbuffer",
                 color_attachments: &attachments,
+                depth_attachment: None,
             });
         }
         expect_invalid(
@@ -133,7 +135,13 @@ impl ProtocolApp {
             })
             .map_err(|e| e.to_string())?;
         let (surface_of_frame, _, encoder) = frame.into_parts();
-        let tampered = Frame::new(surface_of_frame, decoy, TextureFormat::Rgba8Unorm, encoder);
+        let tampered = Frame::new(
+            surface_of_frame,
+            decoy,
+            TextureFormat::Rgba8Unorm,
+            (16, 16),
+            encoder,
+        );
         device
             .end_frame(tampered)
             .map_err(|e| format!("end_frame of a tampered frame: {e}"))?;

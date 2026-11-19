@@ -27,6 +27,29 @@ pub enum StoreOp {
     DontCare,
 }
 
+/// What happens to a depth attachment's contents when a render pass begins.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DepthLoadOp {
+    /// Fill with this depth, in [0, 1]. Scene depth is reversed, so clear it to
+    /// [`oxreal_math::projection::REVERSED_DEPTH_CLEAR`] (ADR-0011 §4).
+    Clear(f32),
+    /// Keep the existing contents, for example from a depth prepass.
+    Load,
+    /// The contents are undefined.
+    DontCare,
+}
+
+/// The depth target of a render pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthAttachment {
+    /// A texture with a depth format and [`crate::TextureUsage::DEPTH_TARGET`].
+    pub texture: TextureHandle,
+    /// How to start.
+    pub load: DepthLoadOp,
+    /// How to finish. [`StoreOp::DontCare`] suits depth only this pass reads.
+    pub store: StoreOp,
+}
+
 /// A color target of a render pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorAttachment {
@@ -43,8 +66,13 @@ pub struct ColorAttachment {
 pub struct RenderPassDesc<'a> {
     /// A name shown in GPU debuggers and profilers.
     pub label: &'a str,
-    /// Color targets, in shader output order.
+    /// Color targets, in shader output order. May be empty when there is a depth attachment.
+    ///
+    /// The pass renders to the area every attachment covers: the smallest width and height.
     pub color_attachments: &'a [ColorAttachment],
+    /// The depth target, if any. Pipelines used in the pass must declare the same depth format
+    /// ([`crate::RenderPipelineDesc::depth`]).
+    pub depth_attachment: Option<DepthAttachment>,
 }
 
 /// Records GPU commands. Backends implement it. Renderer code records through
@@ -148,6 +176,7 @@ pub struct Frame {
     surface: SurfaceHandle,
     backbuffer: TextureHandle,
     backbuffer_format: TextureFormat,
+    backbuffer_size: (u32, u32),
     encoder: Box<dyn CommandEncoder>,
 }
 
@@ -157,12 +186,14 @@ impl Frame {
         surface: SurfaceHandle,
         backbuffer: TextureHandle,
         backbuffer_format: TextureFormat,
+        backbuffer_size: (u32, u32),
         encoder: Box<dyn CommandEncoder>,
     ) -> Self {
         Self {
             surface,
             backbuffer,
             backbuffer_format,
+            backbuffer_size,
             encoder,
         }
     }
@@ -172,6 +203,14 @@ impl Frame {
     #[must_use]
     pub fn backbuffer_format(&self) -> TextureFormat {
         self.backbuffer_format
+    }
+
+    /// The backbuffer's width and height in pixels. It can differ from the window's size (the
+    /// platform may fix the swapchain size) and change between frames, so size other render
+    /// targets, such as a depth buffer, and the camera's aspect ratio from it.
+    #[must_use]
+    pub fn backbuffer_size(&self) -> (u32, u32) {
+        self.backbuffer_size
     }
 
     /// The surface this frame presents to.
@@ -236,6 +275,7 @@ mod tests {
             let mut pass = encoder.begin_render_pass(&RenderPassDesc {
                 label: "draws",
                 color_attachments: &[],
+                depth_attachment: None,
             });
             pass.set_pipeline(PipelineHandle::from_raw(1));
             pass.set_push_constants(&[0; 4]);
@@ -254,6 +294,7 @@ mod tests {
         let desc = RenderPassDesc {
             label: "test",
             color_attachments: &[],
+            depth_attachment: None,
         };
         {
             let _pass = encoder.begin_render_pass(&desc);

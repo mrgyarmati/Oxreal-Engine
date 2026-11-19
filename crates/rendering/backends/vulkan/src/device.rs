@@ -191,6 +191,8 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         limits: Limits {
             max_image_dimension_2d: probe.limits.max_image_dimension2_d,
             max_color_attachments: probe.limits.max_color_attachments,
+            max_framebuffer_width: probe.limits.max_framebuffer_width,
+            max_framebuffer_height: probe.limits.max_framebuffer_height,
             max_buffer_size: probe.max_buffer_size,
             max_sampler_anisotropy: probe.limits.max_sampler_anisotropy,
         },
@@ -228,6 +230,10 @@ pub(crate) struct QueueState {
 pub(crate) struct Limits {
     pub(crate) max_image_dimension_2d: u32,
     pub(crate) max_color_attachments: u32,
+    /// `maxFramebufferWidth` and `maxFramebufferHeight`: a render area, so every attachment it
+    /// covers, must fit within them.
+    pub(crate) max_framebuffer_width: u32,
+    pub(crate) max_framebuffer_height: u32,
     /// Largest buffer `vkCreateBuffer` accepts (maintenance4 makes exceeding it invalid).
     pub(crate) max_buffer_size: u64,
     /// `maxSamplerAnisotropy` (at least 16 with samplerAnisotropy).
@@ -595,6 +601,20 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         // Rejected here, with a reason, rather than failing in `create_device` after selection.
         if let Err(problem) = capacities(&descriptor_limits) {
             reasons.push(problem);
+        }
+        // Scene depth is D32_SFLOAT (ADR-0011 §4). The spec only guarantees D16_UNORM and one of
+        // X8_D24_UNORM_PACK32 or D32_SFLOAT as depth attachments, so check for it.
+        // SAFETY: `physical_device` belongs to the live `instance`.
+        let depth = unsafe {
+            instance.get_physical_device_format_properties(physical_device, vk::Format::D32_SFLOAT)
+        };
+        if !depth
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            reasons.push(
+                "D32_SFLOAT can't be a depth attachment (Oxreal's scene depth format)".to_owned(),
+            );
         }
     }
 

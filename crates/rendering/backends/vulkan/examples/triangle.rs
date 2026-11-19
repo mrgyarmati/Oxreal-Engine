@@ -90,6 +90,7 @@ impl TriangleApp {
                     entry_point: "pulledPixel",
                 },
                 color_formats: &[format],
+                depth: None,
                 push_constant_bytes: 16,
                 cull: CullMode::Back,
             })
@@ -136,6 +137,7 @@ impl TriangleApp {
             let mut pass = frame.encoder().begin_render_pass(&RenderPassDesc {
                 label: "triangle",
                 color_attachments: &attachments,
+                depth_attachment: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_push_constants(&constants);

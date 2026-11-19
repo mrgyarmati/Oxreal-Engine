@@ -14,6 +14,11 @@ pub enum TextureFormat {
     Bgra8Unorm,
     /// 8-bit RGBA, linear.
     Rgba8Unorm,
+    /// 32-bit float depth: Oxreal's scene depth format. Scene depth is **reversed** (near = 1,
+    /// far = 0): clear it to [`oxreal_math::projection::REVERSED_DEPTH_CLEAR`] and compare with
+    /// [`crate::CompareOp::GreaterOrEqual`] ([`crate::DepthState::SCENE`], ADR-0011 §4). Only
+    /// [`TextureUsage::DEPTH_TARGET`] is supported for it so far.
+    Depth32Float,
 }
 
 impl TextureFormat {
@@ -21,7 +26,11 @@ impl TextureFormat {
     #[must_use]
     pub const fn bytes_per_pixel(self) -> u32 {
         match self {
-            Self::Bgra8UnormSrgb | Self::Rgba8UnormSrgb | Self::Bgra8Unorm | Self::Rgba8Unorm => 4,
+            Self::Bgra8UnormSrgb
+            | Self::Rgba8UnormSrgb
+            | Self::Bgra8Unorm
+            | Self::Rgba8Unorm
+            | Self::Depth32Float => 4,
         }
     }
 
@@ -29,6 +38,13 @@ impl TextureFormat {
     #[must_use]
     pub const fn is_srgb(self) -> bool {
         matches!(self, Self::Bgra8UnormSrgb | Self::Rgba8UnormSrgb)
+    }
+
+    /// Whether this is a depth format, used with [`TextureUsage::DEPTH_TARGET`] rather than as a
+    /// color.
+    #[must_use]
+    pub const fn is_depth(self) -> bool {
+        matches!(self, Self::Depth32Float)
     }
 }
 
@@ -48,6 +64,9 @@ impl TextureUsage {
     pub const SAMPLED: Self = Self(1 << 2);
     /// Written by [`crate::Device::write_texture`].
     pub const COPY_DESTINATION: Self = Self(1 << 3);
+    /// Rendered into as the depth attachment of a render pass ([`crate::DepthAttachment`]). Only
+    /// for depth formats, which support no other usage yet.
+    pub const DEPTH_TARGET: Self = Self(1 << 4);
 
     /// Whether every flag in `other` is set.
     #[must_use]
@@ -97,5 +116,9 @@ mod tests {
         assert_eq!(TextureFormat::Rgba8Unorm.bytes_per_pixel(), 4);
         assert!(TextureFormat::Bgra8UnormSrgb.is_srgb());
         assert!(!TextureFormat::Rgba8Unorm.is_srgb());
+        assert!(TextureFormat::Depth32Float.is_depth());
+        assert!(!TextureFormat::Depth32Float.is_srgb());
+        assert!(!TextureFormat::Bgra8UnormSrgb.is_depth());
+        assert_eq!(TextureFormat::Depth32Float.bytes_per_pixel(), 4);
     }
 }

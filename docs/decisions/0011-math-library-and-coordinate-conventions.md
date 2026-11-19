@@ -96,7 +96,9 @@ were used in production code with pixel-asserting renderer tests across Vulkan a
      `oxreal-rhi-vulkan` checks both orientation and culling on real pixels.)*
    - **Reversed depth** (near = 1, far = 0) with an **infinite far plane** is the default
      perspective for scene rendering. Depth is `D32_SFLOAT`, cleared to 0, with a
-     `GREATER_OR_EQUAL` comparison.
+     `GREATER_OR_EQUAL` comparison. *(Implemented 2026-11-19 as `TextureFormat::Depth32Float`,
+     `DepthState::SCENE` and `REVERSED_DEPTH_CLEAR`. `tests/depth.rs` in `oxreal-rhi-vulkan`
+     checks occlusion and camera placement on real pixels.)*
    - `oxreal-math` provides the projection functions (perspective, infinite reverse and
      orthographic), each with unit tests that check known points against the convention.
 5. **Color:** all math happens in linear RGB. sRGB exists only at storage and display boundaries

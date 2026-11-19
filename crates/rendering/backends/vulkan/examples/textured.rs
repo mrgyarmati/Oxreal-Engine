@@ -98,6 +98,7 @@ impl TexturedApp {
                     entry_point: "quadPixel",
                 },
                 color_formats: &[format],
+                depth: None,
                 push_constant_bytes: 12,
                 cull: CullMode::None,
             })
@@ -145,6 +146,7 @@ impl TexturedApp {
             let mut pass = frame.encoder().begin_render_pass(&RenderPassDesc {
                 label: "textured",
                 color_attachments: &attachments,
+                depth_attachment: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_push_constants(&constants);
