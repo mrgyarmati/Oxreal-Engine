@@ -5,7 +5,7 @@ use std::fmt;
 
 use oxreal_math::LinearRgba;
 
-use crate::{SurfaceHandle, TextureHandle};
+use crate::{PipelineHandle, SurfaceHandle, TextureFormat, TextureHandle};
 
 /// What happens to an attachment's contents when a render pass begins.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,6 +63,22 @@ pub trait CommandEncoder: Send + fmt::Debug {
     /// Backend hook: end the current render pass. Called only by [`RenderPass`].
     fn end_render_pass_raw(&mut self);
 
+    /// Backend hook: bind a render pipeline. Called only by [`RenderPass::set_pipeline`].
+    fn set_pipeline_raw(&mut self, pipeline: PipelineHandle);
+
+    /// Backend hook: write push constants at offset 0. Called only by
+    /// [`RenderPass::set_push_constants`].
+    fn set_push_constants_raw(&mut self, bytes: &[u8]);
+
+    /// Backend hook: issue a non-indexed draw. Called only by [`RenderPass::draw`].
+    fn draw_raw(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    );
+
     /// Backend hook: converts the encoder back to its concrete type at the end of the frame.
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
 }
@@ -84,6 +100,25 @@ pub struct RenderPass<'p, 'e> {
     encoder: &'p mut (dyn CommandEncoder + 'e),
 }
 
+impl RenderPass<'_, '_> {
+    /// Binds the pipeline used by the following draws.
+    pub fn set_pipeline(&mut self, pipeline: PipelineHandle) {
+        self.encoder.set_pipeline_raw(pipeline);
+    }
+
+    /// Writes the bound pipeline's push constants, starting at offset 0. `bytes` must fit the
+    /// pipeline's declared size (at most [`crate::MAX_PUSH_CONSTANT_BYTES`]) and be a multiple
+    /// of 4. Misuse is reported when the frame ends.
+    pub fn set_push_constants(&mut self, bytes: &[u8]) {
+        self.encoder.set_push_constants_raw(bytes);
+    }
+
+    /// Draws `vertex_count` vertices, `instance_count` times, with the bound pipeline.
+    pub fn draw(&mut self, vertex_count: u32, instance_count: u32) {
+        self.encoder.draw_raw(vertex_count, instance_count, 0, 0);
+    }
+}
+
 impl Drop for RenderPass<'_, '_> {
     fn drop(&mut self) {
         self.encoder.end_render_pass_raw();
@@ -93,27 +128,38 @@ impl Drop for RenderPass<'_, '_> {
 /// One frame of a surface, returned by [`crate::Device::begin_frame`].
 ///
 /// Record into [`Frame::encoder`] and render to [`Frame::backbuffer`], then pass the frame to
-/// [`crate::Device::end_frame`].
+/// [`crate::Device::end_frame`]. **Every frame must be ended:** a dropped frame leaves the
+/// swapchain image acquired.
 #[derive(Debug)]
+#[must_use = "a frame must be passed to Device::end_frame"]
 pub struct Frame {
     surface: SurfaceHandle,
     backbuffer: TextureHandle,
+    backbuffer_format: TextureFormat,
     encoder: Box<dyn CommandEncoder>,
 }
 
 impl Frame {
     /// For backends: assembles a frame.
-    #[must_use]
     pub fn new(
         surface: SurfaceHandle,
         backbuffer: TextureHandle,
+        backbuffer_format: TextureFormat,
         encoder: Box<dyn CommandEncoder>,
     ) -> Self {
         Self {
             surface,
             backbuffer,
+            backbuffer_format,
             encoder,
         }
+    }
+
+    /// The backbuffer's format. Pipelines that render to it must be created for this format,
+    /// which can change when the swapchain is recreated.
+    #[must_use]
+    pub fn backbuffer_format(&self) -> TextureFormat {
+        self.backbuffer_format
     }
 
     /// The surface this frame presents to.
@@ -157,9 +203,37 @@ mod tests {
         fn end_render_pass_raw(&mut self) {
             self.calls.push("end");
         }
+        fn set_pipeline_raw(&mut self, _pipeline: PipelineHandle) {
+            self.calls.push("pipeline");
+        }
+        fn set_push_constants_raw(&mut self, _bytes: &[u8]) {
+            self.calls.push("push");
+        }
+        fn draw_raw(&mut self, _: u32, _: u32, _: u32, _: u32) {
+            self.calls.push("draw");
+        }
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
             self
         }
+    }
+
+    #[test]
+    fn draw_commands_go_through_the_pass_in_order() {
+        let mut encoder: Box<dyn CommandEncoder> = Box::new(Recorder::default());
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDesc {
+                label: "draws",
+                color_attachments: &[],
+            });
+            pass.set_pipeline(PipelineHandle::from_raw(1));
+            pass.set_push_constants(&[0; 4]);
+            pass.draw(3, 1);
+        }
+        let recorder = encoder.into_any().downcast::<Recorder>().unwrap();
+        assert_eq!(
+            recorder.calls,
+            vec!["begin", "pipeline", "push", "draw", "end"]
+        );
     }
 
     #[test]

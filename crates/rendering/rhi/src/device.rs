@@ -4,7 +4,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::{
-    AdapterInfo, Frame, GpuSelection, RhiError, SurfaceDesc, SurfaceHandle, SurfaceTarget,
+    AdapterInfo, CommandEncoder, Frame, GpuSelection, PipelineHandle, RenderPipelineDesc, RhiError,
+    SubmissionId, SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle,
 };
 
 /// Whether to enable the graphics API's validation layers.
@@ -105,6 +106,72 @@ pub trait Device: fmt::Debug + Send + Sync {
     /// [`RhiError::DeviceLost`], [`RhiError::InvalidUsage`] for a stale handle, or another
     /// [`RhiError`] from the backend.
     fn begin_frame(&self, surface: SurfaceHandle) -> Result<Option<Frame>, RhiError>;
+
+    /// Creates a texture in GPU memory. Its contents are undefined until rendered to.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] for a zero size or an empty
+    /// usage.
+    fn create_texture(&self, desc: &TextureDesc<'_>) -> Result<TextureHandle, RhiError>;
+
+    /// Destroys a texture once the GPU has finished every submission that may use it
+    /// (deferred destruction, ADR-0016 §1). The handle is invalid immediately.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle or a swapchain backbuffer.
+    fn destroy_texture(&self, texture: TextureHandle) -> Result<(), RhiError>;
+
+    /// Creates a render pipeline.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for invalid descriptions (for example too many push-constant
+    /// bytes), or [`RhiError::Backend`] if the driver rejects the shaders.
+    fn create_render_pipeline(
+        &self,
+        desc: &RenderPipelineDesc<'_>,
+    ) -> Result<PipelineHandle, RhiError>;
+
+    /// Destroys a pipeline once the GPU has finished every submission that may use it.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle.
+    fn destroy_render_pipeline(&self, pipeline: PipelineHandle) -> Result<(), RhiError>;
+
+    /// Starts recording commands outside the frame loop, for offscreen work such as tests,
+    /// thumbnails and captures. Hand the encoder to [`Device::submit`].
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::OutOfMemory`] or another backend error.
+    fn create_encoder(&self, label: &str) -> Result<Box<dyn CommandEncoder>, RhiError>;
+
+    /// Submits commands recorded by an encoder from [`Device::create_encoder`].
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::DeviceLost`] / [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] if
+    /// misuse was detected while recording (the commands are still submitted).
+    fn submit(&self, encoder: Box<dyn CommandEncoder>) -> Result<SubmissionId, RhiError>;
+
+    /// Blocks until the GPU has finished `submission`.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::DeviceLost`].
+    fn wait_for_submission(&self, submission: SubmissionId) -> Result<(), RhiError>;
+
+    /// Copies a texture's pixels to the CPU: tightly packed rows, top row first, in the
+    /// texture's format. Blocks until done. Meant for tests, tools and screenshots, not
+    /// per-frame use. The texture needs [`crate::TextureUsage::COPY_SOURCE`].
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle or missing usage, or a device error.
+    fn read_texture(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError>;
 
     /// Submits the frame's commands and presents its backbuffer.
     ///

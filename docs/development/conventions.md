@@ -91,6 +91,8 @@ These rules follow [ADR-0011](../decisions/0011-math-library-and-coordinate-conv
 - Column-major matrices and column vectors, with `world = parent * local`.
 - Clip space is **Y up, depth [0, 1]** on every backend. Vulkan flips with a negative viewport
   height.
+- Front faces wind **counter-clockwise** as seen by the camera (glTF does the same).
+  `CullMode::Back` removes clockwise triangles.
 - Scene depth is **reversed** with an infinite far plane: `D32_SFLOAT`, cleared to 0, compared
   with `GREATER_OR_EQUAL`. Use the `oxreal_math` projection functions. Never build projection
   matrices by hand.

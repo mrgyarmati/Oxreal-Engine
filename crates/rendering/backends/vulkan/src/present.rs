@@ -15,18 +15,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use ash::vk;
 use oxreal_diagnostics::{debug, info, warn};
 use oxreal_rhi::{
-    Frame, PresentMode, RhiError, SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureHandle,
+    Frame, PresentMode, RhiError, SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureFormat,
+    TextureHandle,
 };
 
 use crate::device::VulkanDevice;
 use crate::encoder::VulkanEncoder;
 use crate::error::from_vk;
+use crate::resources::rhi_format;
 
 /// Frames the CPU may record ahead of the GPU (ADR-0016 §4).
 pub(crate) const FRAMES_IN_FLIGHT: usize = 2;
 
-/// A texture known to the device. For now only swapchain backbuffers exist, and their images
-/// and views belong to the surface's swapchain.
+/// A texture known to the device: a swapchain backbuffer (image owned by the swapchain, no
+/// allocation) or a texture from `create_texture` (owns its memory).
 #[derive(Debug)]
 pub(crate) struct Texture {
     pub(crate) image: vk::Image,
@@ -34,6 +36,10 @@ pub(crate) struct Texture {
     pub(crate) extent: vk::Extent2D,
     /// The layout the image is in after all recorded commands so far.
     pub(crate) layout: vk::ImageLayout,
+    pub(crate) format: TextureFormat,
+    pub(crate) usage: vk::ImageUsageFlags,
+    /// `None` for swapchain backbuffers.
+    pub(crate) allocation: Option<gpu_allocator::vulkan::Allocation>,
 }
 
 pub(crate) struct Surface {
@@ -66,7 +72,10 @@ struct FrameSlot {
     last_submission: u64,
 }
 
-fn lock<'a, T>(mutex: &'a Mutex<T>, what: &'static str) -> Result<MutexGuard<'a, T>, RhiError> {
+pub(crate) fn lock<'a, T>(
+    mutex: &'a Mutex<T>,
+    what: &'static str,
+) -> Result<MutexGuard<'a, T>, RhiError> {
     mutex.lock().map_err(|_| RhiError::Backend {
         api: "Vulkan",
         operation: what,
@@ -295,11 +304,17 @@ impl VulkanDevice {
         unsafe { self.raw().begin_command_buffer(slot.cmd, &begin) }
             .map_err(|e| from_vk("vkBeginCommandBuffer", e))?;
 
-        let encoder = VulkanEncoder::new(
-            self.raw().clone(),
+        let format = lock(&self.textures, "texture table")?
+            .get(backbuffer)
+            .map(|t| t.format)
+            .ok_or_else(|| RhiError::Backend {
+                api: "Vulkan",
+                operation: "begin_frame",
+                details: "the acquired backbuffer is missing from the texture table".to_owned(),
+            })?;
+        let encoder = VulkanEncoder::frame(
+            self.encoder_context(),
             slot.cmd,
-            Arc::clone(&self.textures),
-            self.loaders.debug.clone(),
             surface,
             image_index,
             slot_index,
@@ -307,6 +322,7 @@ impl VulkanDevice {
         Ok(Some(Frame::new(
             surface,
             TextureHandle::from_raw(backbuffer),
+            format,
             Box::new(encoder),
         )))
     }
@@ -320,6 +336,13 @@ impl VulkanDevice {
                 details: "frame was created by a different RHI backend".to_owned(),
             })?;
         let mut encoder = *encoder;
+        encoder.mark_ended();
+        let Some((image_index, slot_index)) = encoder.frame_info() else {
+            return Err(RhiError::InvalidUsage {
+                details: "end_frame was given an encoder from create_encoder; use submit"
+                    .to_owned(),
+            });
+        };
         let mut surfaces = lock(&self.surfaces, "surface table")?;
         let entry = surfaces
             .get_mut(surface.to_raw())
@@ -339,8 +362,8 @@ impl VulkanDevice {
         unsafe { self.raw().end_command_buffer(cmd) }
             .map_err(|e| from_vk("vkEndCommandBuffer", e))?;
 
-        let slot = &mut entry.frames[encoder.slot_index()];
-        let render_finished = swapchain.render_finished[encoder.image_index() as usize];
+        let slot = &mut entry.frames[slot_index];
+        let render_finished = swapchain.render_finished[image_index as usize];
         let mut queue = lock(&self.queue, "queue")?;
         let value = queue.timeline_value + 1;
         let waits = [vk::SemaphoreSubmitInfo::default()
@@ -372,10 +395,11 @@ impl VulkanDevice {
         .map_err(|e| from_vk("vkQueueSubmit2", e))?;
         queue.timeline_value = value;
         slot.last_submission = value;
+        encoder.mark_submitted(value);
 
         let wait_present = [render_finished];
         let swapchains = [swapchain.handle];
-        let indices = [encoder.image_index()];
+        let indices = [image_index];
         let present = vk::PresentInfoKHR::default()
             .wait_semaphores(&wait_present)
             .swapchains(&swapchains)
@@ -416,7 +440,7 @@ impl VulkanDevice {
         }
     }
 
-    fn wait_timeline(&self, value: u64) -> Result<(), RhiError> {
+    pub(crate) fn wait_timeline(&self, value: u64) -> Result<(), RhiError> {
         if value == 0 {
             return Ok(());
         }
@@ -516,7 +540,8 @@ impl VulkanDevice {
         let format = choose_format(&formats).ok_or_else(|| RhiError::Backend {
             api: "Vulkan",
             operation: "choosing a swapchain format",
-            details: "the surface reports no formats".to_owned(),
+            details: "the surface offers no 8-bit BGRA or RGBA format in the sRGB color space"
+                .to_owned(),
         })?;
         if !is_srgb(format.format) {
             warn!(format = ?format.format, "no sRGB swapchain format available; colors will be too dark");
@@ -588,6 +613,12 @@ impl VulkanDevice {
         let Some(swapchain_loader) = &self.loaders.swapchain else {
             return Ok(());
         };
+        // `choose_format` only picks formats the RHI can name.
+        let texture_format = rhi_format(format).ok_or_else(|| RhiError::Backend {
+            api: "Vulkan",
+            operation: "creating a swapchain",
+            details: format!("swapchain format {format:?} has no RHI equivalent"),
+        })?;
         self.name_object(swapchain.handle, &format!("{name} swapchain"));
         // SAFETY: the swapchain was just created.
         let images = unsafe { swapchain_loader.get_swapchain_images(swapchain.handle) }
@@ -606,6 +637,9 @@ impl VulkanDevice {
                 view,
                 extent,
                 layout: vk::ImageLayout::UNDEFINED,
+                format: texture_format,
+                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                allocation: None,
             });
             swapchain.images.push(raw);
             self.name_object(image, &format!("{name} backbuffer {i}"));
@@ -670,18 +704,22 @@ fn choose_extent(caps: &vk::SurfaceCapabilitiesKHR, desired: vk::Extent2D) -> vk
     }
 }
 
-/// Prefers 8-bit BGRA, then RGBA, in sRGB with the standard color space (ADR-0017 §6).
+/// Prefers 8-bit BGRA, then RGBA, in sRGB with the standard color space (ADR-0017 §6), then
+/// their linear variants. Formats the RHI can't name are never chosen, so pipelines can always
+/// be created for the backbuffer's format.
 fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> Option<vk::SurfaceFormatKHR> {
-    let preferred = [vk::Format::B8G8R8A8_SRGB, vk::Format::R8G8B8A8_SRGB];
-    preferred
-        .iter()
-        .find_map(|&wanted| {
-            formats
-                .iter()
-                .copied()
-                .find(|f| f.format == wanted && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-        })
-        .or_else(|| formats.first().copied())
+    let preferred = [
+        vk::Format::B8G8R8A8_SRGB,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::Format::B8G8R8A8_UNORM,
+        vk::Format::R8G8B8A8_UNORM,
+    ];
+    preferred.iter().find_map(|&wanted| {
+        formats
+            .iter()
+            .copied()
+            .find(|f| f.format == wanted && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+    })
 }
 
 fn is_srgb(format: vk::Format) -> bool {
@@ -815,6 +853,12 @@ mod tests {
         );
         assert!(!is_srgb(vk::Format::B8G8R8A8_UNORM));
         assert_eq!(choose_format(&[]), None);
+        let exotic = [f(vk::Format::A2B10G10R10_UNORM_PACK32, nl)];
+        assert_eq!(
+            choose_format(&exotic),
+            None,
+            "formats the RHI cannot name are never chosen"
+        );
     }
 
     #[test]

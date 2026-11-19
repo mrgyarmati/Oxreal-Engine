@@ -15,7 +15,11 @@
 //!   the frame loop: two frames in flight paced by one timeline semaphore, per-image present
 //!   semaphores, synchronization2 barriers and dynamic rendering (ADR-0017).
 //!
-//! See `examples/clear.rs` for the whole loop in about 200 lines.
+//! - Textures in GPU memory, render pipelines sharing one push-constant layout, draws with a
+//!   Y-up viewport (ADR-0011), standalone submissions and texture readback. Destruction is
+//!   deferred until the GPU and every encoder still recording are done with the object.
+//!
+//! See `examples/clear.rs` for the frame loop, and `examples/triangle.rs` for a first draw.
 //!
 //! # Environment variables
 //!
@@ -32,6 +36,8 @@ mod error;
 mod features;
 mod instance;
 mod present;
+mod resources;
+mod retire;
 
 pub use device::{VulkanDevice, create_device};
 pub use instance::VALIDATION_ENV_VAR;

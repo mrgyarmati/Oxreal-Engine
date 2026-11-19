@@ -89,6 +89,11 @@ were used in production code with pixel-asserting renderer tests across Vulkan a
    - The engine convention is **Y up and depth [0, 1]** for all backends. The Vulkan backend
      applies a negative viewport height. glam's Vulkan-specific (Y-down) projections are not
      used.
+   - **Front faces wind counter-clockwise** as seen by the camera, the usual right-handed
+     convention and the one glTF uses, so imported meshes need no flipping. *(Added 2026-11-19,
+     when the first pipelines needed it. The Vulkan backend's negative viewport mirrors winding
+     too, so it uses `VK_FRONT_FACE_COUNTER_CLOCKWISE`. `tests/triangle.rs` in
+     `oxreal-rhi-vulkan` checks both orientation and culling on real pixels.)*
    - **Reversed depth** (near = 1, far = 0) with an **infinite far plane** is the default
      perspective for scene rendering. Depth is `D32_SFLOAT`, cleared to 0, with a
      `GREATER_OR_EQUAL` comparison.

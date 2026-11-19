@@ -13,6 +13,8 @@
 //! - Surfaces, frames, command encoders and scoped render passes ([`Device::begin_frame`],
 //!   [`RenderPass`]), as decided in ADR-0017.
 //! - [`HandlePool`]: typed generational handles for backend objects (ADR-0016 §1).
+//! - Textures, render pipelines (push constants up to [`MAX_PUSH_CONSTANT_BYTES`]), draws,
+//!   standalone submissions and [`Device::read_texture`] for tests and tools.
 //!
 //! Buffers, pipelines and the bindless table arrive in the following slices.
 //!
@@ -24,7 +26,9 @@ mod command;
 mod device;
 mod error;
 mod handle;
+mod pipeline;
 mod surface;
+mod texture;
 
 pub use adapter::{
     AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, GPU_ENV_VAR, GpuSelection,
@@ -35,8 +39,12 @@ pub use command::{
 };
 pub use device::{Device, DeviceDesc, Validation};
 pub use error::{AdapterRejection, RhiError};
-pub use handle::{HandlePool, SurfaceHandle, TextureHandle};
+pub use handle::{HandlePool, PipelineHandle, SubmissionId, SurfaceHandle, TextureHandle};
+pub use pipeline::{
+    CullMode, MAX_PUSH_CONSTANT_BYTES, RenderPipelineDesc, ShaderCode, ShaderEntry,
+};
 pub use surface::{PresentMode, SurfaceDesc, SurfaceTarget};
+pub use texture::{TextureDesc, TextureFormat, TextureUsage};
 
 /// Re-export of the interop crate behind [`SurfaceTarget`].
 pub use raw_window_handle;

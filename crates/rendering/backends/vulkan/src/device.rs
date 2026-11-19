@@ -7,14 +7,18 @@ use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use oxreal_diagnostics::{info, warn};
 use oxreal_rhi::{
-    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, DeviceDesc, Frame, GpuSelection,
-    HandlePool, RhiError, SurfaceDesc, SurfaceHandle, SurfaceTarget, select_adapter,
+    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, CommandEncoder, DeviceDesc, Frame,
+    GpuSelection, HandlePool, PipelineHandle, RenderPipelineDesc, RhiError, SubmissionId,
+    SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle, select_adapter,
 };
 
+use crate::encoder::EncoderContext;
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
 use crate::instance::{VulkanInstance, format_version};
 use crate::present::{Surface, Texture};
+use crate::resources::{Pipeline, Retired, create_pipeline_layout};
+use crate::retire::RetireQueue;
 
 /// Creates a Vulkan device according to `desc`.
 ///
@@ -90,15 +94,6 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
     // SAFETY: queue family `queue_family`, index 0, was requested in `create_logical_device`.
     let queue = unsafe { logical.device.get_device_queue(queue_family, 0) };
 
-    // One timeline semaphore paces every submission on the queue (ADR-0016 §4).
-    let mut timeline_type = vk::SemaphoreTypeCreateInfo::default()
-        .semaphore_type(vk::SemaphoreType::TIMELINE)
-        .initial_value(0);
-    let timeline_info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_type);
-    // SAFETY: the device is alive and timelineSemaphore is enabled (a required feature).
-    let timeline = unsafe { logical.device.create_semaphore(&timeline_info, None) }
-        .map_err(|e| from_vk("vkCreateSemaphore (timeline)", e))?;
-
     let loaders = Loaders {
         surface: instance
             .surface_support()
@@ -124,6 +119,25 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         details: e.to_string(),
     })?;
 
+    // Raw objects are created last, so an earlier failure leaks nothing (the allocator and the
+    // logical device clean up on drop).
+    // One timeline semaphore paces every submission on the queue (ADR-0016 §4).
+    let mut timeline_type = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let timeline_info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_type);
+    // SAFETY: the device is alive and timelineSemaphore is enabled (a required feature).
+    let timeline = unsafe { logical.device.create_semaphore(&timeline_info, None) }
+        .map_err(|e| from_vk("vkCreateSemaphore (timeline)", e))?;
+    let pipeline_layout = match create_pipeline_layout(&logical.device) {
+        Ok(layout) => layout,
+        Err(error) => {
+            // SAFETY: never used. Destroyed exactly once, before the device.
+            unsafe { logical.device.destroy_semaphore(timeline, None) };
+            return Err(error);
+        }
+    };
+
     let adapter_info = probe.candidate.info.clone();
     info!(
         name = %adapter_info.name,
@@ -138,6 +152,9 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
     let device = VulkanDevice {
         surfaces: Mutex::new(HandlePool::new()),
         textures: Arc::new(Mutex::new(HandlePool::new())),
+        pipelines: Arc::new(Mutex::new(HandlePool::new())),
+        retired: Arc::new(Mutex::new(RetireQueue::default())),
+        pipeline_layout,
         queue: Mutex::new(QueueState {
             queue,
             timeline_value: 0,
@@ -179,10 +196,14 @@ pub(crate) struct QueueState {
 pub struct VulkanDevice {
     pub(crate) surfaces: Mutex<HandlePool<Surface>>,
     pub(crate) textures: Arc<Mutex<HandlePool<Texture>>>,
+    pub(crate) pipelines: Arc<Mutex<HandlePool<Pipeline>>>,
+    pub(crate) retired: Arc<Mutex<RetireQueue<Retired>>>,
+    /// The layout every pipeline shares (ADR-0016 §2).
+    pub(crate) pipeline_layout: vk::PipelineLayout,
     pub(crate) queue: Mutex<QueueState>,
     pub(crate) timeline: vk::Semaphore,
     pub(crate) loaders: Loaders,
-    allocator: Mutex<Option<Allocator>>,
+    pub(crate) allocator: Mutex<Option<Allocator>>,
     pub(crate) queue_family: u32,
     pub(crate) physical_device: vk::PhysicalDevice,
     adapter_info: AdapterInfo,
@@ -244,6 +265,41 @@ impl Drop for VulkanDevice {
         for surface in surfaces {
             self.destroy_surface_objects(surface);
         }
+        // Retired objects, then live ones the application didn't destroy. The GPU is idle, so
+        // none of them is in use. An encoder that outlives the device can't use them either: it
+        // only records into its own command buffer, which is never submitted.
+        let retired = match self.retired.lock() {
+            Ok(mut queue) => queue.drain(),
+            Err(poisoned) => poisoned.into_inner().drain(),
+        };
+        let textures = match self.textures.lock() {
+            Ok(mut pool) => pool.drain(),
+            Err(poisoned) => poisoned.into_inner().drain(),
+        };
+        let pipelines = match self.pipelines.lock() {
+            Ok(mut pool) => pool.drain(),
+            Err(poisoned) => poisoned.into_inner().drain(),
+        };
+        let leftovers = retired
+            .into_iter()
+            .chain(textures.into_iter().filter_map(|t| {
+                // Backbuffers left the table with their surfaces, so these are all owned.
+                t.allocation.map(|allocation| Retired::Texture {
+                    image: t.image,
+                    view: t.view,
+                    allocation,
+                })
+            }))
+            .chain(pipelines.into_iter().map(|p| Retired::Pipeline(p.pipeline)));
+        for object in leftovers {
+            self.destroy_retired(object);
+        }
+        // SAFETY: the GPU is idle and every pipeline using the layout was destroyed above.
+        unsafe {
+            self.logical
+                .device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+        }
         // SAFETY: the GPU is idle, so no submission still signals or waits on the timeline.
         unsafe { self.logical.device.destroy_semaphore(self.timeline, None) };
         // Free GPU memory explicitly, before the logical device is destroyed. Field order
@@ -302,6 +358,55 @@ impl oxreal_rhi::Device for VulkanDevice {
 
     fn end_frame(&self, frame: Frame) -> Result<(), RhiError> {
         self.end_frame_impl(frame)
+    }
+
+    fn create_texture(&self, desc: &TextureDesc<'_>) -> Result<TextureHandle, RhiError> {
+        self.create_texture_impl(desc)
+    }
+
+    fn destroy_texture(&self, texture: TextureHandle) -> Result<(), RhiError> {
+        self.destroy_texture_impl(texture)
+    }
+
+    fn create_render_pipeline(
+        &self,
+        desc: &RenderPipelineDesc<'_>,
+    ) -> Result<PipelineHandle, RhiError> {
+        self.create_render_pipeline_impl(desc)
+    }
+
+    fn destroy_render_pipeline(&self, pipeline: PipelineHandle) -> Result<(), RhiError> {
+        self.destroy_render_pipeline_impl(pipeline)
+    }
+
+    fn create_encoder(&self, label: &str) -> Result<Box<dyn CommandEncoder>, RhiError> {
+        self.create_encoder_impl(label)
+    }
+
+    fn submit(&self, encoder: Box<dyn CommandEncoder>) -> Result<SubmissionId, RhiError> {
+        self.submit_impl(encoder)
+    }
+
+    fn wait_for_submission(&self, submission: SubmissionId) -> Result<(), RhiError> {
+        self.wait_for_submission_impl(submission)
+    }
+
+    fn read_texture(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError> {
+        self.read_texture_impl(texture)
+    }
+}
+
+impl VulkanDevice {
+    /// What a new encoder needs from this device.
+    pub(crate) fn encoder_context(&self) -> EncoderContext {
+        EncoderContext {
+            device: self.raw().clone(),
+            textures: Arc::clone(&self.textures),
+            pipelines: Arc::clone(&self.pipelines),
+            retired: Arc::clone(&self.retired),
+            debug: self.loaders.debug.clone(),
+            pipeline_layout: self.pipeline_layout,
+        }
     }
 }
 

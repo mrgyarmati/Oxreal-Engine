@@ -1084,6 +1084,7 @@ dependencies = [
  "oxreal-diagnostics",
  "oxreal-math",
  "oxreal-rhi",
+ "oxreal-shader-compiler",
  "oxreal-window",
  "raw-window-handle",
 ]

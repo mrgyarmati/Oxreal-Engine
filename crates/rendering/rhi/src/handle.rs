@@ -50,6 +50,15 @@ define_handle!(
     /// A texture, including swapchain backbuffers.
     TextureHandle
 );
+define_handle!(
+    /// A render pipeline.
+    PipelineHandle
+);
+
+/// Identifies a submission made with [`crate::Device::submit`]. Pass it to
+/// [`crate::Device::wait_for_submission`] to wait for the GPU to finish it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubmissionId(pub u64);
 
 /// Storage for backend objects, addressed by generational handles.
 ///
