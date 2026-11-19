@@ -7,6 +7,9 @@ name: CI
 #   Dependabot (.github/dependabot.yml) proposes updates.
 # - Runner images are pinned explicitly (no *-latest) so image migrations are deliberate changes.
 # - The Rust toolchain is pinned by rust-toolchain.toml.
+#
+# Job names are required status checks in the `main` branch ruleset (matched by exact name).
+# Renaming a job means updating the ruleset in the same change (docs/development/coding-standards.md).
 
 on:
   push:
