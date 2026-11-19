@@ -97,18 +97,24 @@ xvfb-run -a cargo run -p oxreal-window --example smoke -- --frames 120   # headl
 
 ### Known upstream issues
 
-- **Vulkan loader crash with several instances on parallel threads (Linux).** Seen with loader
-  1.4.341 (Ubuntu 26.04), and still present on upstream `main` as of 2026-11-19.
-  - `vkEnumeratePhysicalDevices` unloads drivers that found no GPU, and frees their entries while
-    holding only `loader_lock`.
-  - Meanwhile, `vkSetDebugUtilsObjectNameEXT` on *any other* instance walks those entries, through
-    `loader_get_icd_and_device`, holding only `loader_global_instance_list_lock`.
+- **Vulkan loader crash with several instances on parallel threads (Linux), loaders older
+  than 1.4.350.** Reported upstream as
+  [Vulkan-Loader #1863](https://github.com/KhronosGroup/Vulkan-Loader/issues/1863) and fixed by
+  [#1866](https://github.com/KhronosGroup/Vulkan-Loader/pull/1866) (merged 2026-02-20, in SDK
+  1.4.350 and later). Ubuntu 26.04 ships loader 1.4.341, which predates the fix.
+  - Two mutexes guard one global structure, the list of instances and their drivers.
+  - `vkEnumeratePhysicalDevices` unloads drivers that found no GPU, and frees their entries under
+    `loader_lock`.
+  - Meanwhile, `vkSetDebugUtilsObjectNameEXT` on *any other* instance walks those entries, in
+    `loader_get_icd_and_device`, under `loader_global_instance_list_lock`.
 
   It needs driver manifests for GPUs that aren't present, which `mesa-vulkan-drivers` installs. It
   also needs more than one `VkInstance` in the process at once, which in Oxreal only the GPU test
   suites do: each test creates its own device. If `cargo test -p oxreal-rhi-vulkan -- --ignored`
-  segfaults, choose your driver explicitly, for example `VK_LOADER_DRIVERS_SELECT='*lvp*'` for
-  Lavapipe, as CI does. Your GPU's manifest name is in `/usr/share/vulkan/icd.d/`.
+  segfaults on such a loader, choose your driver explicitly, for example
+  `VK_LOADER_DRIVERS_SELECT='*lvp*'` for Lavapipe, as CI does. Your GPU's manifest name is in
+  `/usr/share/vulkan/icd.d/`. The setting can go from CI once every runner image ships loader
+  1.4.350 or later. It still documents which driver the job tests.
 
 ## Unreal Engine source (UX reference, optional)
 

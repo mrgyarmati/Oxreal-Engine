@@ -105,12 +105,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       # Load only Lavapipe, the driver this job tests. mesa-vulkan-drivers also installs manifests
-      # for GPUs the runner doesn't have. The loader loads them, then unloads them inside
-      # vkEnumeratePhysicalDevices without the lock that loader_get_icd_and_device (reached from
-      # vkSetDebugUtilsObjectNameEXT on any other instance) holds while walking them. Parallel
-      # GPU tests, one instance each, then crash: 11 of 100 runs on Ubuntu 26.04 (loader
-      # 1.4.341) with every driver, 0 of 100 with this. Oxreal's code is not involved. See
-      # docs/development/setup.md, "Known upstream issues".
+      # for GPUs the runner doesn't have. Loaders before 1.4.350 unload those inside
+      # vkEnumeratePhysicalDevices under a different lock than the one
+      # vkSetDebugUtilsObjectNameEXT (on any other instance) holds while walking them, so parallel
+      # GPU tests, one instance each, crash. On Ubuntu 26.04 (loader 1.4.341) that was 11 of 100
+      # runs with every driver, and 0 of 100 with this setting. Fixed upstream in
+      # KhronosGroup/Vulkan-Loader#1866 (issue #1863). See docs/development/setup.md,
+      # "Known upstream issues".
       VK_LOADER_DRIVERS_SELECT: "*lvp*"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
