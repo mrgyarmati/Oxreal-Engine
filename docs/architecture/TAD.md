@@ -119,6 +119,13 @@ same extraction path.
     samplers; buffers by device address; per-draw data in at most 128 bytes of push constants
   - two frames in flight, paced by timeline semaphores
   - the required features are listed in `tools/ci/required-vulkan-features.txt`
+- **Command API and frames (ADR-0017):**
+  - trait-object dispatch (`Arc<dyn Device>`, `&mut dyn CommandEncoder`)
+  - `Device` is `Send + Sync`, encoders are recorded by one thread at a time
+  - recording is infallible, and errors surface at submit
+  - render passes are scoped guards
+  - `begin_frame(surface)` returns `Option<Frame>` (`None` when minimized); swapchain
+    recreation happens inside the backend
 
 ### 5.4 Reflection (foundation, early)
 

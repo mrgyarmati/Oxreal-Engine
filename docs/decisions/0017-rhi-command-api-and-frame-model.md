@@ -1,0 +1,100 @@
+# ADR-0017: RHI command API, dispatch and frame model
+
+- **Status:** Accepted
+- **Date:** 2026-11-19
+- **Related:** ADR-0003 (engine-owned RHI, future DirectX 12 and Metal), ADR-0016 (handles, bindless, two frames in flight), ADR-0015 (windows), TAD §5.3 and §5.8 (C ABI), D-06 (frame graph); prior art: [Cordite](../development/prior-art.md) (R7)
+
+## Context
+
+ADR-0016 fixed the RHI's resource and binding model. Before the first frame is drawn, the RHI's
+**call interface** must be fixed too. Every renderer pass, the editor viewport, and later
+plugins and the C ABI are written against it:
+
+1. **Dispatch:** how renderer code reaches the backend (Vulkan now, DirectX 12 and Metal later).
+2. **Recording:** how commands are recorded and when errors surface.
+3. **Frames and presentation:** how a frame begins and ends, and what happens on resize,
+   minimize and swapchain invalidation.
+4. **Threading:** what may be called from where.
+
+Bindless (ADR-0016) keeps calls per draw low: no descriptor binding, and per-draw data in push
+constants. Per-call dispatch overhead is therefore small relative to GPU work, and recording
+cost is dominated by the backend's own work.
+
+Unreal's RHI uses virtual dispatch (`FDynamicRHI`, command lists). Cordite exposed a
+third-party RHI's concrete types (R7), which made adding a backend a rewrite.
+
+## Options considered
+
+### Dispatch
+- **A. Trait objects** (`dyn Device`, `dyn CommandEncoder`). The backend is chosen at runtime,
+  which allows falling back from one backend to another at startup and selecting with a
+  command-line flag. Renderer code is not generic, compiles once, and maps cleanly to a C ABI
+  (handles plus function tables). Costs one indirect call per RHI call, and traits must be
+  object-safe (no generic methods).
+- **B. Static generics** (`Renderer<B: Backend>` with associated types). Zero dispatch cost.
+  But backend generics spread through every renderer and editor type, the backend is fixed at
+  compile time, compile times grow, and it's hostile to plugins and a C ABI.
+- **C. Enum dispatch over known backends.** One `match` per call. It's a closed set, so plugin
+  or out-of-tree backends are impossible, and every new backend edits every call site's enum.
+
+### Recording errors
+- **Fallible recording:** every call returns `Result`. Noisy, and most recording "errors" are
+  programming errors anyway.
+- **Infallible recording with validation:** recording calls return nothing. Misuse is caught by
+  debug-build validation (the engine's own checks plus the API's validation layers), and real
+  failures (device loss, out of memory) surface at **submit**.
+
+## Decision
+
+1. **Dispatch through trait objects (option A).** `oxreal-rhi` defines object-safe traits, and
+   backends implement them. Renderer code holds `Arc<dyn Device>` and records through
+   `&mut dyn CommandEncoder`. No generic `Backend` parameter appears in renderer, editor or
+   gameplay types. If profiling ever shows dispatch overhead mattering, batching APIs (multi-draw,
+   indirect) are added. Dispatch is not made static.
+2. **Threading:**
+   - `Device` is `Send + Sync`, and its methods take `&self`. Backends synchronize internally:
+     queue submission is serialized, and pools are internally locked.
+   - Command encoders are `Send` but **not** shared. Each is recorded by one thread at a time,
+     which allows parallel recording later.
+3. **Recording is infallible.** Encoder methods don't return `Result`. In debug builds, misuse
+   such as an invalid handle or a render pass left open is caught by engine validation and
+   reported with the call site. Device loss and out-of-memory surface as `RhiError` from
+   **submit / end of frame** (ADR-0012 §7).
+4. **Render passes are scoped.** Beginning a pass returns a guard borrowing the encoder, and
+   the pass ends when the guard is dropped. Commands that only make sense inside a pass (draws)
+   exist only on the guard, so "draw outside a pass" can't compile. Passes use dynamic
+   rendering (ADR-0012) and describe attachments with load and store operations and clear
+   values.
+5. **Frame model:**
+   - A window's presentation target is a **surface**, created from `oxreal-window`'s raw handles
+     and owned by the device as a handle (ADR-0016 §1).
+   - `begin_frame(surface)` returns **`Option<Frame>`**. It's `None` when nothing should be
+     drawn: minimized (zero size), or the swapchain is being recreated. Callers skip the frame
+     rather than handle an error.
+   - A `Frame` carries the backbuffer's texture handle and the encoder for the frame.
+     `end_frame(frame)` submits and presents.
+   - **Swapchain recreation is internal:** on resize, out-of-date or suboptimal results the
+     backend recreates the swapchain at the next `begin_frame`. Applications only report the new
+     size from `WindowEvent::Resized`.
+   - Two frames in flight, paced by a timeline semaphore (ADR-0016 §4). Per-frame resources are
+     reused only after the GPU has finished that frame.
+6. **Presentation settings:** present mode `Fifo` (vsync, the default and always available),
+   `Mailbox` (low latency, falls back to `Fifo` if unsupported, with the fallback logged) or
+   `Immediate`. The swapchain format is an **sRGB** 8-bit BGRA/RGBA format, so shaders write
+   linear color and the hardware encodes (ADR-0011 §5).
+7. **Clear values and colors are linear** (`LinearRgba` from `oxreal-math`).
+
+## Consequences
+
+- One renderer code path for every backend, runtime backend choice, and a straightforward C ABI
+  later.
+- Renderer code reads like Unreal's RHI usage: get a frame, record passes, end the frame.
+- Recording stays ergonomic. Errors appear where they're actionable (submit), and validation
+  catches misuse in development.
+- Minimize, resize and swapchain invalidation are handled once in the backend, not in every
+  application.
+- Costs: one indirect call per RHI call, and object-safe traits only (generic conveniences
+  become helper functions over the traits).
+- Revisit triggers: profiling showing RHI dispatch as a measurable share of frame CPU time in
+  the benchmark projects (add batching first), or parallel recording needing a different
+  encoder ownership model.

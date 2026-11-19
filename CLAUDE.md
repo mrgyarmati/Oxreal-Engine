@@ -82,6 +82,9 @@ and this project is MIT/Apache-2.0.
   all CI checks pass (`rustfmt`, `clippy + test` on windows-2025, ubuntu-24.04 and ubuntu-26.04,
   `rustdoc`, `cargo-deny`).
 - Never use the admin bypass, push to `main` directly, or force-push shared branches.
+- The ruleset requires 8 checks **by job name**: `rustfmt`, `clippy + test (…)` ×3, `rustdoc`,
+  `cargo-deny`, `vulkan (lavapipe, …)` ×2. When renaming or adding a required CI job, update the
+  ruleset too (Settings → Rules), or PRs block on a check that will never report.
 - Avoid stacked PRs. If one is unavoidable, retarget it to `main` before it is merged. Otherwise
   it merges into its base branch instead (this happened with #16).
 - Work on a topic branch (`feat/…`, `fix/…`, `docs/…`, `ci/…`). Open a PR that fills in

@@ -126,6 +126,9 @@ listed here.
   description.
 - Commit titles: imperative mood, about 72 characters at most ("Add oxreal-math", not "Added" or
   "Adds"). The body explains **why** and what was verified.
+- **Renaming a CI job changes its check name.** The branch ruleset requires checks by exact name
+  (currently: `rustfmt`, `clippy + test (…)` ×3, `rustdoc`, `cargo-deny`, `vulkan (lavapipe, …)` ×2).
+  Update the ruleset in the same change, or every PR waits forever for "Expected" checks.
 - Avoid stacked PRs. If one is unavoidable, retarget it to `main` (or delete the base branch)
   **before** merging it. Otherwise it merges into the base branch, not `main`. This happened with
   #16 and needed a follow-up PR (#17).
