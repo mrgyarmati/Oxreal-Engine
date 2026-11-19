@@ -119,8 +119,11 @@ Skills (`.claude/skills/`): `verify`, `new-adr`, `new-crate`.
 
 - Edition 2024, toolchain pinned in `rust-toolchain.toml`. Lints are configured in `[workspace.lints]`.
   Crates opt in with `[lints] workspace = true`.
-- Libraries use typed errors (`thiserror`-style enums once adopted). Applications may use
-  `anyhow`-style context. Never `unwrap()` in library code paths that can fail at runtime.
-- Use `tracing` for diagnostics once adopted. No `println!` in library crates.
+- Errors (ADR-0010): libraries use `thiserror` enums (`#[non_exhaustive]` when public, causes
+  chained with `#[source]`). Only `app-*` and `tool` crates use `anyhow`. Panics are for bugs
+  only. Never `unwrap()` in library code paths that can fail at runtime.
+- Diagnostics (ADR-0010): log through the macros re-exported by `oxreal-diagnostics`, never
+  `tracing` directly. Profile with its `profile_*` macros. No `println!` in library crates, and
+  only applications install a subscriber.
 - Coordinate system, units and handedness: see `docs/development/conventions.md`.
   Don't assume them anywhere else.

@@ -24,7 +24,7 @@ decision and consequences (use the `adr-author` agent). Update the status here w
 | D-15 | Working title and crate name prefix | before first engine crate | **Resolved 2026-11-18**: Oxreal, crate prefix `oxreal-`. Checked against crates.io, GitHub and the web. A formal trademark search is still pending before the public launch | n/a |
 | D-16 | Reference hardware for performance targets | M1 | Open | |
 | D-17 | Math library and engine conventions: glam vs own, coordinate system, handedness, units | M1 | Open | |
-| D-18 | Error-handling crates (thiserror / anyhow) and diagnostics stack (tracing, profiling: tracy / puffin) | M0 | Open | |
+| D-18 | Error-handling crates (thiserror / anyhow) and diagnostics stack (tracing, profiling: tracy / puffin) | M0 | **Resolved**: thiserror (libraries), anyhow (apps and tools), tracing through `oxreal-diagnostics`, Tracy behind `profile-tracy` | [ADR-0010](../decisions/0010-errors-logging-and-profiling.md) |
 | D-19 | GPU testing in CI (lavapipe / SwiftShader software Vulkan, self-hosted GPU runners) | M1 | Open | |
 | D-20 | Gameplay framework model: Actor/Pawn/Controller/GameMode concepts on ECS, behaviours, templates | before M4 (shapes M1 ECS) | Proposed | [ADR-0008](../decisions/0008-unreal-style-gameplay-framework-on-ecs.md) |
 | D-21 | Additional languages: C++ and C# via a stable C ABI and generated bindings (.NET hosting model, header generation, ownership and threading rules, layer placement). Constraints already apply to D-02, D-11 and D-13 (TAD §5.8) | constraints now, ADR after the Rust gameplay API stabilizes | Open | |
