@@ -21,7 +21,7 @@ Columns:
 | tracing-subscriber | 0.3.23 (`std`, `fmt`, `ansi`, `env-filter`, `smallvec`, `tracing-log`) | MIT | `oxreal-diagnostics` (`application` feature only) | Global subscriber, `OXREAL_LOG` filter, forwards `log` records | No (types boxed inside `InitError`) | Released 2026-03. ~762M downloads. | Win + Linux (pure Rust) | 2026-11-19 |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | `oxreal-diagnostics` (`application` feature) | Derives `Error`/`Display` for library error enums (ADR-0010) | No (generates standard trait impls only) | Released 2026-09. ~1.89B downloads. | Win + Linux (proc macro) | 2026-11-19 |
 | glam | 0.34.3 (`std`, `f64`, `i32`, `u32`; no defaults) | MIT OR Apache-2.0 | `oxreal-math` | Vector, matrix and quaternion math (ADR-0011) | **Yes, deliberately** (ADR-0011 §1): types re-exported through `oxreal-math`. Callers never name `glam`. A breaking glam upgrade is a breaking Oxreal change. | Very active, 0.34.3 released 2026-11-08. ~194M downloads. | Win + Linux (pure Rust, no dependencies with these features) | 2026-11-19 |
-| winit | 0.30.13 (`rwh_06`, `x11`, `wayland`, `wayland-dlopen`, `wayland-csd-adwaita`; no defaults) | Apache-2.0 | `oxreal-window` | Windows and event loop on Win32, Wayland and X11 (ADR-0015) | No (wrapped. Engine `App` trait and event enum.) | Very active, 0.30.13 stable (2026-03), 0.31 in beta. ~68M downloads. | Win + Linux. Linux libraries loaded at runtime (dlopen), no build-time system packages. | 2026-11-19 |
+| winit | 0.30.13 (`rwh_06`, `x11`, `wayland`, `wayland-dlopen`, `wayland-csd-adwaita-notitle`; no defaults) | Apache-2.0 | `oxreal-window` | Windows and event loop on Win32, Wayland and X11 (ADR-0015) | No (wrapped. Engine `App` trait and event enum.) | Very active, 0.30.13 stable (2026-03), 0.31 in beta. ~68M downloads. | Win + Linux. Linux libraries loaded at runtime (dlopen), no build-time system packages. | 2026-11-19 |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | `oxreal-window` (and the Vulkan backend later) | Native window and display handles for surface creation | **Yes, deliberately** (ADR-0015 §2): `Window` implements its traits | Stable 0.6 line since 2024-05. ~139M downloads. Ecosystem standard. | Win + Linux (pure Rust) | 2026-11-19 |
 | tracy-client | 0.19.0 (`enable`, `ondemand`, `only-localhost`; no defaults) | MIT/Apache-2.0. Bundled Tracy C++ client (`tracy-client-sys` 0.30.1) is BSD-3-Clause. | `oxreal-diagnostics` (`profile-tracy` feature only) | Tracy profiler zones and frame marks | No (wrapped by `profile_*` macros) | Released 2026-08. ~14M downloads. | Win + Linux. Builds C++ with `cc` (MSVC / gcc / clang). | 2026-11-19 |
 
@@ -39,9 +39,9 @@ Columns:
   crash handler. All are disabled deliberately (ADR-0010 §3).
 
 **Audit notes, 2026-11-19 (`oxreal-window`):**
-- Transitive tree (normal and build dependencies): **39 crates on Windows, 91 on Linux**. Linux
+- Transitive tree (normal and build dependencies): **39 crates on Windows, 87 on Linux**. Linux
   adds the Wayland protocols, xkbcommon bindings, X11 bindings, and `sctk-adwaita` with
-  `tiny-skia` and `ab_glyph` for client-side decorations. All licenses are within `deny.toml`'s
+  `tiny-skia` for client-side decorations. All licenses are within `deny.toml`'s
   allow-list:
   - MIT, Apache-2.0, Zlib, ISC (`libloading`)
   - BSD-2-Clause (`arrayref`), BSD-3-Clause (`tiny-skia`)
@@ -50,6 +50,14 @@ Columns:
   not fail). This is expected to resolve with upstream updates.
 - Linux builds need no windowing development packages. CI builds before installing anything and
   then installs only the runtime libraries for the smoke test.
+- **RUSTSEC-2026-0192** (`ttf-parser` unmaintained, no fixed version): winit's default
+  `wayland-csd-adwaita` feature pulled it in through `ab_glyph`, and `cargo-deny` failed on it.
+  It was resolved by using `wayland-csd-adwaita-notitle` (ADR-0015 §1), not by ignoring the
+  advisory. The tree was rechecked: `ttf-parser`, `owned_ttf_parser` and both `ab_glyph` crates
+  are gone.
+- `deny.toml` now checks only the supported targets (`x86_64-pc-windows-msvc`,
+  `x86_64-unknown-linux-gnu`), so crates that only macOS, Android or Redox would build no longer
+  raise findings (ADR-0002).
 
 ## Candidates under evaluation (not yet adopted)
 
