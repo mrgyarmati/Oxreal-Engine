@@ -66,6 +66,7 @@ impl ClearApp {
             let _pass = frame.encoder().begin_render_pass(&RenderPassDesc {
                 label: "clear",
                 color_attachments: &attachments,
+                depth_attachment: None,
             });
         } // The pass ends here.
         window.pre_present_notify();

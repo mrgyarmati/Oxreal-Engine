@@ -101,6 +101,7 @@ fn quad_pipeline(device: &VulkanDevice) -> PipelineHandle {
                 entry_point: "quadPixel",
             },
             color_formats: &[FORMAT],
+            depth: None,
             push_constant_bytes: 12,
             cull: CullMode::None,
         })
@@ -177,6 +178,7 @@ fn record_quad(
     let mut pass = encoder.begin_render_pass(&RenderPassDesc {
         label: "quad",
         color_attachments: &attachments,
+        depth_attachment: None,
     });
     pass.set_pipeline(pipeline);
     pass.set_push_constants(&constants(texture, sampler, scale));
@@ -309,6 +311,7 @@ fn render_to_texture_then_sample_it() {
         let _pass = encoder.begin_render_pass(&RenderPassDesc {
             label: "fill the canvas",
             color_attachments: &attachments,
+            depth_attachment: None,
         });
     }
     record_quad(

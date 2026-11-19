@@ -8,8 +8,9 @@ use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use oxreal_rhi::{
-    CommandEncoder, CullMode, MAX_PUSH_CONSTANT_BYTES, PipelineHandle, RenderPipelineDesc,
-    RhiError, ShaderEntry, SubmissionId, TextureDesc, TextureFormat, TextureHandle, TextureUsage,
+    CommandEncoder, CompareOp, CullMode, MAX_PUSH_CONSTANT_BYTES, PipelineHandle,
+    RenderPipelineDesc, RhiError, ShaderEntry, SubmissionId, TextureDesc, TextureFormat,
+    TextureHandle, TextureUsage,
 };
 
 use crate::device::{QueueState, Shared, lock};
@@ -30,6 +31,8 @@ pub(crate) struct Pipeline {
     pub(crate) pipeline: vk::Pipeline,
     pub(crate) push_constant_bytes: u32,
     pub(crate) color_formats: Vec<TextureFormat>,
+    /// The depth attachment format it renders with, if any.
+    pub(crate) depth_format: Option<TextureFormat>,
 }
 
 /// A sampler and its bindless index.
@@ -117,6 +120,7 @@ pub(crate) fn vk_format(format: TextureFormat) -> Result<vk::Format, RhiError> {
         TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
         TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
         TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+        TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
         other => {
             return Err(invalid(format!(
                 "{other:?} is not supported by the Vulkan backend yet"
@@ -149,7 +153,55 @@ fn vk_usage(usage: TextureUsage) -> vk::ImageUsageFlags {
     if usage.contains(TextureUsage::COPY_DESTINATION) {
         flags |= vk::ImageUsageFlags::TRANSFER_DST;
     }
+    if usage.contains(TextureUsage::DEPTH_TARGET) {
+        flags |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+    }
     flags
+}
+
+fn vk_compare_op(op: CompareOp) -> vk::CompareOp {
+    match op {
+        CompareOp::Never => vk::CompareOp::NEVER,
+        CompareOp::Less => vk::CompareOp::LESS,
+        CompareOp::Equal => vk::CompareOp::EQUAL,
+        CompareOp::LessOrEqual => vk::CompareOp::LESS_OR_EQUAL,
+        CompareOp::Greater => vk::CompareOp::GREATER,
+        CompareOp::NotEqual => vk::CompareOp::NOT_EQUAL,
+        CompareOp::GreaterOrEqual => vk::CompareOp::GREATER_OR_EQUAL,
+        CompareOp::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
+/// Rejects usages a format doesn't support. Depth formats are only depth targets so far: they
+/// can't be sampled (the bindless set holds color textures), copied or rendered as color.
+fn check_format_usage(desc: &TextureDesc<'_>) -> Result<(), RhiError> {
+    let (format, usage) = (desc.format, desc.usage);
+    if format.is_depth() && usage != TextureUsage::DEPTH_TARGET {
+        return Err(invalid(format!(
+            "texture {:?}: {format:?} supports only TextureUsage::DEPTH_TARGET so far (no sampling, copies or color rendering)",
+            desc.label
+        )));
+    }
+    if !format.is_depth() && usage.contains(TextureUsage::DEPTH_TARGET) {
+        return Err(invalid(format!(
+            "texture {:?}: DEPTH_TARGET needs a depth format such as Depth32Float, not {format:?}",
+            desc.label
+        )));
+    }
+    Ok(())
+}
+
+/// The subresource of a texture in `format`: its depth aspect for depth formats, its color
+/// aspect otherwise.
+pub(crate) fn subresource_range(format: TextureFormat) -> vk::ImageSubresourceRange {
+    if format.is_depth() {
+        vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+            .level_count(1)
+            .layer_count(1)
+    } else {
+        color_subresource()
+    }
 }
 
 pub(crate) fn invalid(details: impl Into<String>) -> RhiError {
@@ -195,6 +247,7 @@ impl Shared {
         if usage.is_empty() {
             return Err(invalid(format!("texture {:?} has no usage", desc.label)));
         }
+        check_format_usage(desc)?;
         let format = vk_format(desc.format)?;
         let extent = vk::Extent2D {
             width: desc.width,
@@ -216,9 +269,12 @@ impl Shared {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: the device is alive. The size is non-zero and within maxImageDimension2D
-        // (checked above). The format is one of the 8-bit RGBA/BGRA formats (UNORM or sRGB) for
-        // which the Vulkan spec makes these optimal-tiling features mandatory:
-        // COLOR_ATTACHMENT, TRANSFER_SRC and TRANSFER_DST, and SAMPLED_IMAGE with linear filtering.
+        // (checked above). The usage suits the format (`check_format_usage`), which is either:
+        // - one of the 8-bit RGBA/BGRA formats (UNORM or sRGB), for which the Vulkan spec makes
+        //   these optimal-tiling features mandatory: COLOR_ATTACHMENT, TRANSFER_SRC and
+        //   TRANSFER_DST, and SAMPLED_IMAGE with linear filtering; or
+        // - D32_SFLOAT with only DEPTH_STENCIL_ATTACHMENT. The spec doesn't guarantee that, so
+        //   adapter selection requires it (`device::probe`).
         let image = unsafe { self.raw().create_image(&info, None) }
             .map_err(|e| from_vk("vkCreateImage", e))?;
         // SAFETY: `image` was just created.
@@ -244,8 +300,8 @@ impl Shared {
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
                     .format(format)
-                    .subresource_range(color_subresource());
-                // SAFETY: `image` is bound to memory and the view matches its format.
+                    .subresource_range(subresource_range(desc.format));
+                // SAFETY: `image` is bound to memory, and the view matches its format and aspect.
                 unsafe { self.raw().create_image_view(&view_info, None) }
                     .map_err(|e| from_vk("vkCreateImageView", e))
             });
@@ -408,13 +464,35 @@ impl Shared {
             )));
         }
         let max_attachments = self.limits.max_color_attachments as usize;
-        if desc.color_formats.is_empty() || desc.color_formats.len() > max_attachments {
+        if desc.color_formats.len() > max_attachments {
             return Err(invalid(format!(
-                "pipeline {:?} has {} color formats; 1 to {max_attachments} are allowed",
+                "pipeline {:?} has {} color formats; this device allows {max_attachments}",
                 desc.label,
                 desc.color_formats.len()
             )));
         }
+        if desc.color_formats.is_empty() && desc.depth.is_none() {
+            return Err(invalid(format!(
+                "pipeline {:?} renders to nothing: it needs a color format or a depth state",
+                desc.label
+            )));
+        }
+        if let Some(format) = desc.color_formats.iter().find(|f| f.is_depth()) {
+            return Err(invalid(format!(
+                "pipeline {:?}: {format:?} is a depth format; declare it in `depth`, not `color_formats`",
+                desc.label
+            )));
+        }
+        let depth_format = match desc.depth {
+            Some(depth) if !depth.format.is_depth() => {
+                return Err(invalid(format!(
+                    "pipeline {:?}: depth format {:?} is not a depth format",
+                    desc.label, depth.format
+                )));
+            }
+            Some(depth) => Some(vk_format(depth.format)?),
+            None => None,
+        };
         let formats = desc
             .color_formats
             .iter()
@@ -429,7 +507,7 @@ impl Shared {
                 return Err(error);
             }
         };
-        let result = self.build_pipeline(desc, &formats, vertex_module, pixel_module);
+        let result = self.build_pipeline(desc, &formats, depth_format, vertex_module, pixel_module);
         // SAFETY: modules may be destroyed once pipeline creation has returned.
         unsafe {
             self.raw().destroy_shader_module(vertex_module, None);
@@ -441,6 +519,7 @@ impl Shared {
             pipeline,
             push_constant_bytes: desc.push_constant_bytes,
             color_formats: desc.color_formats.to_vec(),
+            depth_format: desc.depth.map(|depth| depth.format),
         });
         Ok(PipelineHandle::from_raw(raw))
     }
@@ -490,6 +569,7 @@ impl Shared {
         &self,
         desc: &RenderPipelineDesc<'_>,
         formats: &[vk::Format],
+        depth_format: Option<vk::Format>,
         vertex: vk::ShaderModule,
         pixel: vk::ShaderModule,
     ) -> Result<vk::Pipeline, RhiError> {
@@ -544,10 +624,20 @@ impl Shared {
             .collect();
         let blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+        // Without a depth state the pipeline has no depth attachment, and Vulkan ignores this.
+        let depth =
+            desc.depth
+                .map_or_else(vk::PipelineDepthStencilStateCreateInfo::default, |depth| {
+                    vk::PipelineDepthStencilStateCreateInfo::default()
+                        .depth_test_enable(true)
+                        .depth_write_enable(depth.write)
+                        .depth_compare_op(vk_compare_op(depth.compare))
+                });
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let mut rendering =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(formats);
+        let mut rendering = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(formats)
+            .depth_attachment_format(depth_format.unwrap_or(vk::Format::UNDEFINED));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
@@ -556,6 +646,7 @@ impl Shared {
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
             .color_blend_state(&blend)
+            .depth_stencil_state(&depth)
             .dynamic_state(&dynamic)
             .layout(self.pipeline_layout)
             .push_next(&mut rendering);
@@ -563,8 +654,9 @@ impl Shared {
         // formats) is alive across the call. The modules and layout belong to this device, the
         // entry points exist for their stages, and the shaders' push constants fit the layout's
         // range (checked in `shader_module`). Dynamic rendering is enabled (a required feature),
-        // so a null render pass with PipelineRenderingCreateInfo is valid, and the attachment
-        // count is within maxColorAttachments.
+        // so a null render pass with PipelineRenderingCreateInfo is valid. The color attachment
+        // count is within maxColorAttachments. The depth format, if any, is D32_SFLOAT, which
+        // adapter selection requires to support depth attachments. Stencil tests stay disabled.
         let pipelines = unsafe {
             self.raw()
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
@@ -1132,6 +1224,44 @@ mod tests {
             )
         );
         assert!(vk_usage(TextureUsage::default()).is_empty());
+        assert_eq!(
+            vk_usage(TextureUsage::DEPTH_TARGET),
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+        );
+    }
+
+    #[test]
+    fn depth_formats_are_depth_targets_only() {
+        let desc = |format, usage| TextureDesc {
+            label: "t",
+            width: 1,
+            height: 1,
+            format,
+            usage,
+        };
+        let depth = TextureFormat::Depth32Float;
+        assert!(check_format_usage(&desc(depth, TextureUsage::DEPTH_TARGET)).is_ok());
+        for usage in [
+            TextureUsage::SAMPLED,
+            TextureUsage::DEPTH_TARGET | TextureUsage::COPY_SOURCE,
+            TextureUsage::RENDER_TARGET,
+        ] {
+            assert!(
+                check_format_usage(&desc(depth, usage)).is_err(),
+                "{usage:?}"
+            );
+        }
+        let color = TextureFormat::Rgba8Unorm;
+        assert!(check_format_usage(&desc(color, TextureUsage::DEPTH_TARGET)).is_err());
+        assert!(check_format_usage(&desc(color, TextureUsage::RENDER_TARGET)).is_ok());
+        assert_eq!(
+            subresource_range(depth).aspect_mask,
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            subresource_range(color).aspect_mask,
+            vk::ImageAspectFlags::COLOR
+        );
     }
 
     #[test]

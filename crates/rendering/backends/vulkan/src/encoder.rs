@@ -18,13 +18,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use ash::vk;
 use oxreal_diagnostics::error;
 use oxreal_rhi::{
-    BINDLESS_SET, CommandEncoder, HandlePool, LoadOp, PipelineHandle, RenderPassDesc, StoreOp,
-    SurfaceHandle, TextureFormat,
+    BINDLESS_SET, CommandEncoder, DepthAttachment, DepthLoadOp, HandlePool, LoadOp, PipelineHandle,
+    RenderPassDesc, StoreOp, SurfaceHandle, TextureFormat,
 };
 
 use crate::device::{Shared, lock};
 use crate::present::{Texture, color_subresource};
-use crate::resources::{PUSH_CONSTANT_STAGES, Retired};
+use crate::resources::{PUSH_CONSTANT_STAGES, Retired, subresource_range};
 use crate::retire::EncoderId;
 
 /// An encoder's entry in the device's bookkeeping.
@@ -193,6 +193,7 @@ struct Pass {
     labeled: bool,
     extent: vk::Extent2D,
     formats: Vec<TextureFormat>,
+    depth_format: Option<TextureFormat>,
     /// Push-constant bytes of the pipeline bound in this pass.
     pipeline_push_bytes: Option<u32>,
     /// Attachments with a resting layout (sampled textures), returned to it when the pass ends.
@@ -421,8 +422,11 @@ impl VulkanEncoder {
     ) -> Vec<String> {
         let mut problems = Vec::new();
         let max = self.shared.limits.max_color_attachments as usize;
-        if desc.color_attachments.is_empty() {
+        if desc.color_attachments.is_empty() && desc.depth_attachment.is_none() {
             problems.push(format!("render pass {:?} has no attachments", desc.label));
+        }
+        if let Some(depth) = desc.depth_attachment {
+            self.check_depth_attachment(desc.label, &depth, textures, &mut problems);
         }
         if desc.color_attachments.len() > max {
             problems.push(format!(
@@ -478,6 +482,49 @@ impl VulkanEncoder {
         problems
     }
 
+    /// Checks a pass's depth attachment. Depth textures can't be color attachments (they lack
+    /// RENDER_TARGET usage), so the two never alias.
+    fn check_depth_attachment(
+        &self,
+        label: &str,
+        depth: &DepthAttachment,
+        textures: &HandlePool<Texture>,
+        problems: &mut Vec<String>,
+    ) {
+        if let DepthLoadOp::Clear(value) = depth.load
+            && !(0.0..=1.0).contains(&value)
+        {
+            problems.push(format!(
+                "render pass {label:?} clears depth to {value}; depth clears must be in [0, 1] (reversed depth clears to 0)"
+            ));
+        }
+        let Some(texture) = textures.get(depth.texture.to_raw()) else {
+            problems.push(format!(
+                "render pass {label:?} uses depth {:?}, which does not exist",
+                depth.texture
+            ));
+            return;
+        };
+        if !texture
+            .usage
+            .contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            problems.push(format!(
+                "render pass {label:?} uses {:?} as depth, but it was not created with TextureUsage::DEPTH_TARGET",
+                depth.texture
+            ));
+        }
+        if texture
+            .user
+            .is_some_and(|user| user != self.registration.id)
+        {
+            problems.push(format!(
+                "render pass {label:?} uses depth {:?}, which another unsubmitted encoder uses",
+                depth.texture
+            ));
+        }
+    }
+
     /// The open pass, if it's rendering. Records `what` as misuse when no pass is open; a
     /// non-rendering pass already reported its problem.
     fn rendering_pass(&mut self, what: &str) -> Option<&mut Pass> {
@@ -531,6 +578,7 @@ impl CommandEncoder for VulkanEncoder {
             labeled,
             extent: vk::Extent2D::default(),
             formats: Vec::with_capacity(desc.color_attachments.len()),
+            depth_format: None,
             pipeline_push_bytes: None,
             restore: Vec::new(),
         };
@@ -549,11 +597,17 @@ impl CommandEncoder for VulkanEncoder {
         // failure can't leave a layout updated without its barrier. `check_attachments` checked
         // the same conditions under this lock, so this only fails if they ever diverge.
         let mut claim_failed = false;
-        for attachment in desc.color_attachments {
-            let raw = attachment.texture.to_raw();
+        let depth_texture = desc.depth_attachment.map(|depth| depth.texture);
+        for texture in desc
+            .color_attachments
+            .iter()
+            .map(|attachment| attachment.texture)
+            .chain(depth_texture)
+        {
+            let raw = texture.to_raw();
             let claimed = match textures.get_mut(raw) {
                 Some(texture) => self.registration.claim(raw, texture),
-                None => Err(format!("{:?} vanished", attachment.texture)),
+                None => Err(format!("{texture:?} vanished")),
             };
             if let Err(problem) = claimed {
                 self.misuse.push(problem);
@@ -628,28 +682,91 @@ impl CommandEncoder for VulkanEncoder {
                     }),
             );
         }
+        let mut depth_info = None;
+        if let Some(depth) = desc.depth_attachment
+            && let Some(texture) = textures.get_mut(depth.texture.to_raw())
+        {
+            // As for color: contents are only preserved for `Load`.
+            let old_layout = match depth.load {
+                DepthLoadOp::Load => texture.layout,
+                DepthLoadOp::Clear(_) | DepthLoadOp::DontCare => vk::ImageLayout::UNDEFINED,
+            };
+            barriers.push(
+                vk::ImageMemoryBarrier2::default()
+                    // Waits for any earlier use, such as the previous frame's depth tests.
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    )
+                    .dst_access_mask(
+                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    )
+                    .old_layout(old_layout)
+                    .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .image(texture.image)
+                    .subresource_range(subresource_range(texture.format)),
+            );
+            texture.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            area = Some(area.map_or(texture.extent, |a| vk::Extent2D {
+                width: a.width.min(texture.extent.width),
+                height: a.height.min(texture.extent.height),
+            }));
+            pass.depth_format = Some(texture.format);
+            let (load_op, clear) = match depth.load {
+                DepthLoadOp::Clear(value) => (vk::AttachmentLoadOp::CLEAR, value),
+                DepthLoadOp::Load => (vk::AttachmentLoadOp::LOAD, 0.0),
+                DepthLoadOp::DontCare => (vk::AttachmentLoadOp::DONT_CARE, 0.0),
+            };
+            let store_op = match depth.store {
+                StoreOp::Store => vk::AttachmentStoreOp::STORE,
+                StoreOp::DontCare => vk::AttachmentStoreOp::DONT_CARE,
+            };
+            depth_info = Some(
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(texture.view)
+                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .load_op(load_op)
+                    .store_op(store_op)
+                    .clear_value(vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: clear,
+                            stencil: 0,
+                        },
+                    }),
+            );
+        }
         drop(textures);
 
-        let complete = attachments.len() == desc.color_attachments.len();
+        let complete = attachments.len() == desc.color_attachments.len()
+            && depth_info.is_some() == desc.depth_attachment.is_some();
         let Some(area) = area.filter(|_| complete) else {
             self.pass = Some(pass);
             return;
         };
         let dependency = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-        let rendering = vk::RenderingInfo::default()
+        let mut rendering = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: area,
             })
             .layer_count(1)
             .color_attachments(&attachments);
+        if let Some(depth_info) = &depth_info {
+            rendering = rendering.depth_attachment(depth_info);
+        }
         // SAFETY: `cmd` is recording and no pass is open. Every attachment is a live texture of
-        // this device with COLOR_ATTACHMENT usage, used once. It outlives this encoder's
-        // submission because destroying it is deferred past every encoder open at that time (the
-        // retire queue), and its tracked layout is current because this encoder claimed it.
-        // There are at most maxColorAttachments of them. dynamicRendering and synchronization2
-        // are enabled (required features). `barriers`, `attachments` and the infos are alive
-        // across the calls.
+        // this device, used once: color attachments have COLOR_ATTACHMENT usage, and the depth
+        // attachment has DEPTH_STENCIL_ATTACHMENT usage and a depth format (D32_SFLOAT, which
+        // adapter selection requires to support it), so they can't alias. Each outlives this
+        // encoder's submission because destroying it is deferred past every encoder open at that
+        // time (the retire queue), and its tracked layout is current because this encoder
+        // claimed it. There are at most maxColorAttachments color attachments. A depth clear
+        // value is in [0, 1] (`check_depth_attachment`). dynamicRendering and synchronization2
+        // are enabled (required features). `barriers`, `attachments`, `depth_info` and the infos
+        // are alive across the calls.
         unsafe {
             shared.raw().cmd_pipeline_barrier2(self.cmd, &dependency);
             shared.raw().cmd_begin_rendering(self.cmd, &rendering);
@@ -683,28 +800,39 @@ impl CommandEncoder for VulkanEncoder {
     fn set_pipeline_raw(&mut self, pipeline: PipelineHandle) {
         let shared = Arc::clone(&self.shared);
         let cmd = self.cmd;
-        let found = lock(&shared.pipelines)
-            .get(pipeline.to_raw())
-            .map(|p| (p.pipeline, p.push_constant_bytes, p.color_formats.clone()));
+        let found = lock(&shared.pipelines).get(pipeline.to_raw()).map(|p| {
+            (
+                p.pipeline,
+                p.push_constant_bytes,
+                p.color_formats.clone(),
+                p.depth_format,
+            )
+        });
         let mut problem = None;
         if let Some(pass) = self.rendering_pass("set_pipeline") {
             pass.pipeline_push_bytes = None;
             match found {
                 None => problem = Some(format!("set_pipeline: {pipeline:?} does not exist")),
-                Some((_, _, formats)) if formats != pass.formats => {
+                Some((_, _, formats, _)) if formats != pass.formats => {
                     problem = Some(format!(
                         "set_pipeline: {pipeline:?} renders to {formats:?}, but render pass {:?} has {:?}",
                         pass.label, pass.formats
                     ));
                 }
-                Some((raw, push_bytes, _)) => {
+                Some((_, _, _, depth)) if depth != pass.depth_format => {
+                    problem = Some(format!(
+                        "set_pipeline: {pipeline:?} has depth format {depth:?}, but render pass {:?} has {:?} (pipeline and pass must agree on depth)",
+                        pass.label, pass.depth_format
+                    ));
+                }
+                Some((raw, push_bytes, _, _)) => {
                     let viewports = [y_up_viewport(pass.extent)];
                     let scissors = [vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: pass.extent,
                     }];
                     // SAFETY: `cmd` is recording inside a dynamic rendering pass whose
-                    // attachment formats match the pipeline's. The pipeline stays alive until
+                    // color and depth formats match the pipeline's. The pipeline stays alive until
                     // this encoder is done, because destroying it is deferred past this encoder
                     // (ADR-0016 §1). Viewport and scissor are its dynamic states. The bindless set
                     // is set 0 of the shared pipeline layout every pipeline uses; it lives as long as

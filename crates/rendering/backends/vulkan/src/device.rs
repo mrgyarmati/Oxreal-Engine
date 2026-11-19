@@ -596,6 +596,20 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         if let Err(problem) = capacities(&descriptor_limits) {
             reasons.push(problem);
         }
+        // Scene depth is D32_SFLOAT (ADR-0011 §4). The spec only guarantees D16_UNORM and one of
+        // X8_D24_UNORM_PACK32 or D32_SFLOAT as depth attachments, so check for it.
+        // SAFETY: `physical_device` belongs to the live `instance`.
+        let depth = unsafe {
+            instance.get_physical_device_format_properties(physical_device, vk::Format::D32_SFLOAT)
+        };
+        if !depth
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            reasons.push(
+                "D32_SFLOAT can't be a depth attachment (Oxreal's scene depth format)".to_owned(),
+            );
+        }
     }
 
     // SAFETY: `physical_device` belongs to the live `instance`.

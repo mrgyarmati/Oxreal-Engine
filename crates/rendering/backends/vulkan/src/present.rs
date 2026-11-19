@@ -386,7 +386,7 @@ impl VulkanDevice {
         // From here on, an image is acquired and `slot.acquire` will be signalled. Any failure
         // must consume that signal and recreate the swapchain, which releases the image.
         let prepared = self.prepare_frame(slot, &images, image_index);
-        let (registration, backbuffer, format) = match prepared {
+        let (registration, backbuffer, format, extent) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.release_acquire(slot);
@@ -415,6 +415,7 @@ impl VulkanDevice {
             surface,
             TextureHandle::from_raw(backbuffer),
             format,
+            (extent.width, extent.height),
             Box::new(encoder),
         )))
     }
@@ -426,7 +427,7 @@ impl VulkanDevice {
         slot: &FrameSlot,
         images: &[u64],
         image_index: u32,
-    ) -> Result<(Registration, u64, TextureFormat), RhiError> {
+    ) -> Result<(Registration, u64, TextureFormat, vk::Extent2D), RhiError> {
         let backbuffer =
             images
                 .get(image_index as usize)
@@ -460,7 +461,7 @@ impl VulkanDevice {
                 details: "the acquired backbuffer is missing from the texture table".to_owned(),
             })?;
         texture.frame_owner = Some(registration.id());
-        Ok((registration, backbuffer, texture.format))
+        Ok((registration, backbuffer, texture.format, texture.extent))
     }
 
     /// Cleans up after a frame whose encoder was dropped without `end_frame`.

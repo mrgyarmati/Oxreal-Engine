@@ -101,6 +101,7 @@ fn pulled_pipeline(device: &VulkanDevice) -> PipelineHandle {
                 entry_point: "pulledPixel",
             },
             color_formats: &[FORMAT],
+            depth: None,
             push_constant_bytes: 16,
             cull: CullMode::None,
         })
@@ -161,6 +162,7 @@ fn record_draw(
     let mut pass = encoder.begin_render_pass(&RenderPassDesc {
         label: "pulled",
         color_attachments: &attachments,
+        depth_attachment: None,
     });
     pass.set_pipeline(pipeline);
     pass.set_push_constants(&constants(address));

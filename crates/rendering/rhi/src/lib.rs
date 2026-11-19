@@ -42,7 +42,8 @@ pub use bindless::{
 };
 pub use buffer::{BufferDesc, BufferUsage};
 pub use command::{
-    ColorAttachment, CommandEncoder, Frame, LoadOp, RenderPass, RenderPassDesc, StoreOp,
+    ColorAttachment, CommandEncoder, DepthAttachment, DepthLoadOp, Frame, LoadOp, RenderPass,
+    RenderPassDesc, StoreOp,
 };
 pub use device::{Device, DeviceDesc, Validation};
 pub use error::{AdapterRejection, RhiError};
@@ -51,7 +52,8 @@ pub use handle::{
     TextureHandle,
 };
 pub use pipeline::{
-    CullMode, MAX_PUSH_CONSTANT_BYTES, RenderPipelineDesc, ShaderCode, ShaderEntry,
+    CompareOp, CullMode, DepthState, MAX_PUSH_CONSTANT_BYTES, RenderPipelineDesc, ShaderCode,
+    ShaderEntry,
 };
 pub use surface::{PresentMode, SurfaceDesc, SurfaceTarget};
 pub use texture::{TextureDesc, TextureFormat, TextureUsage};

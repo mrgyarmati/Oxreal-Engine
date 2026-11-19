@@ -94,6 +94,7 @@ fn pipeline_desc<'a>(
             entry_point: "trianglePixel",
         },
         color_formats: formats,
+        depth: None,
         push_constant_bytes: 8,
         cull,
     }
@@ -147,6 +148,7 @@ fn record_triangle(
     let mut pass = encoder.begin_render_pass(&RenderPassDesc {
         label: "triangle",
         color_attachments: &attachments,
+        depth_attachment: None,
     });
     pass.set_pipeline(pipeline);
     pass.set_push_constants(&constants(0.0, 1.0));
@@ -310,6 +312,7 @@ fn misuse_is_reported_at_submit_without_validation_errors() {
         let mut pass = encoder.begin_render_pass(&RenderPassDesc {
             label: "misuse",
             color_attachments: &attachments,
+            depth_attachment: None,
         });
         pass.draw(3, 1); // No pipeline bound.
     }
@@ -340,6 +343,7 @@ fn a_leaked_render_pass_is_closed_at_submission() {
     let mut pass = encoder.begin_render_pass(&RenderPassDesc {
         label: "never ended",
         color_attachments: &attachments,
+        depth_attachment: None,
     });
     pass.set_pipeline(pipeline);
     pass.set_push_constants(&constants(0.0, 1.0));
@@ -437,6 +441,7 @@ fn draws_check_pipeline_formats_and_push_constants() {
         let mut pass = encoder.begin_render_pass(&RenderPassDesc {
             label: "no push constants",
             color_attachments: &attachments,
+            depth_attachment: None,
         });
         pass.set_pipeline(pipeline);
         pass.draw(3, 1);
@@ -455,6 +460,7 @@ fn draws_check_pipeline_formats_and_push_constants() {
         let _pass = encoder.begin_render_pass(&RenderPassDesc {
             label: "duplicate",
             color_attachments: &[attachment, attachment],
+            depth_attachment: None,
         });
     }
     let details = misuse(device.submit(encoder));
@@ -624,6 +630,7 @@ fn a_loading_pass_keeps_the_previous_passes_pixels() {
         let mut pass = encoder.begin_render_pass(&RenderPassDesc {
             label: "second pass",
             color_attachments: &attachments,
+            depth_attachment: None,
         });
         // Draws the triangle again, rotated half a turn: the two overlap in the middle.
         pass.set_pipeline(pipeline);
@@ -667,6 +674,7 @@ fn encoders_of_another_device_are_refused() {
         let _pass = encoder.begin_render_pass(&RenderPassDesc {
             label: "wrong device",
             color_attachments: &attachments,
+            depth_attachment: None,
         });
     }
     let details = misuse(first.submit(encoder));
