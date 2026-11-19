@@ -18,7 +18,9 @@
 - The GPU driver provides the Vulkan loader and ICD. The **LunarG Vulkan SDK** provides
   validation layers, `vulkaninfo`, and shader tools (`glslc`, `dxc` and `slangc`; which one we use
   is decided in D-04).
-- Minimum: a Vulkan 1.3-capable driver (ADR-0003). Reference development setup: SDK 1.4.363.1.
+- Minimum: a Vulkan 1.3 driver with dynamic rendering, synchronization2 and maintenance4
+  ([ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md)). Tested hardware is listed
+  in [gpu-support.md](gpu-support.md). Reference development setup: SDK 1.4.363.1.
 - Debug builds enable `VK_LAYER_KHRONOS_validation` when it's present. Develop with it installed.
 
 ### Verify your setup

@@ -107,7 +107,8 @@ same extraction path.
 - `rendering/backends/vulkan` is the first implementation. No Vulkan types appear in the RHI API.
 - The window surface is created from raw window and display handles that `platform` provides, so
   the renderer stays independent of the windowing layer.
-- The memory allocator, shader language and bind model are open (D-03, D-04).
+- Vulkan 1.3 baseline, `ash` bindings and `gpu-allocator` are decided in ADR-0012, all confined to
+  `oxreal-rhi-vulkan`. The shader language (D-04) and the bind model (its own ADR) are still open.
 
 ### 5.4 Reflection (foundation, early)
 

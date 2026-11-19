@@ -9,7 +9,7 @@ decision and consequences (use the `adr-author` agent). Update the status here w
 |---|---|---|---|---|
 | D-01 | ECS storage (archetype / sparse set / hybrid), change detection, parallel scheduling. Must meet ADR-0008 §3 (relations, hooks, deferred commands, stages) | M1 | Open | (ADR-0005 partial) |
 | D-02 | Reflection design: derive macro, type registry, attributes, stable type IDs. Metadata must be language-neutral (TAD §5.8) | before M2 | Open | |
-| D-03 | Vulkan bindings (ash?) and GPU memory allocation strategy | M1 | Open | |
+| D-03 | Vulkan bindings (ash?) and GPU memory allocation strategy | M1 | **Resolved**: `ash` 0.38 (runtime-loaded), `ash-window`, `gpu-allocator` 0.28 behind the RHI memory module | [ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md) |
 | D-04 | Shader language and compiler pipeline (HLSL via DXC, Slang, WGSL via naga, GLSL), reflection, hot reload | M1 | Open | |
 | D-05 | Editor UI framework (egui prototype) and long-term custom widget needs | M2 | Open | |
 | D-06 | Render graph / frame graph design | M1 to M5 | Open | |
@@ -20,7 +20,7 @@ decision and consequences (use the `adr-author` agent). Update the status here w
 | D-11 | Rust gameplay module hot reload (dylib + stable ABI subset, WASM, or restart-based). Must be compatible with the D-21 C ABI boundary | M4 | Open | |
 | D-12 | Visual scripting IR and execution model (interpreter first, later compilation) | M6 | Open | |
 | D-13 | Plugin ABI and compatibility strategy (Rust has no stable ABI). The C ABI is the stable boundary (TAD §5.8, D-21) | M7 | Open | |
-| D-14 | Linux packaging (tarball, Flatpak, AppImage) and graphics driver support matrix (Vulkan baseline version) | M1 / M7 | Open | |
+| D-14 | Linux packaging (tarball, Flatpak, AppImage) and graphics driver support matrix (Vulkan baseline version) | M1 / M7 | **Driver part resolved**: Vulkan 1.3 baseline, tested matrix in `gpu-support.md`. Packaging still open | [ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md) (driver part) |
 | D-15 | Working title and crate name prefix | before first engine crate | **Resolved 2026-11-18**: Oxreal, crate prefix `oxreal-`. Checked against crates.io, GitHub and the web. A formal trademark search is still pending before the public launch | n/a |
 | D-16 | Reference hardware for performance targets | M1 | Open | |
 | D-17 | Math library and engine conventions: glam vs own, coordinate system, handedness, units | M1 | **Resolved**: glam re-exported by `oxreal-math`; right-handed +Y up, metres, −Z forward; Y-up [0, 1] clip space; reversed infinite depth | [ADR-0011](../decisions/0011-math-library-and-coordinate-conventions.md) |
