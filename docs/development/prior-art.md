@@ -23,7 +23,7 @@ MIT OR Apache-2.0.
 |---|---|---|
 | Spatial conventions | Right-handed, +Y up, metres, −Z forward. Column-major. Y-up clip space with depth [0, 1] on all backends. Reversed depth. | ADR-0011 |
 | Shaders | Slang to SPIR-V (and to DXIL through DXC) | ADR-0013 |
-| ECS storage | Sparse sets (EnTT), wrapped by a `World` that adds permanent IDs, names, an ordered hierarchy and world transforms | Input to D-01 and ADR-0005 |
+| ECS | Sparse sets (EnTT), wrapped by a `World` that adds permanent IDs, names, an ordered hierarchy and world transforms. The `World` has a stable address. Children are despawned first, and an entity keeps its identity during destruction. | ADR-0014 adopts the `World` behaviours. Storage differs (archetype tables), and unlike Cordite's exposed registry, storage stays private. |
 | Reflection | Explicit per-type tables with ranges, units, descriptions and read-only and runtime flags. Input is parsed into a validated patch before anything changes. | Input to D-02 |
 | Editor architecture | Context → Actions (validated, undoable) → Commands (by name, JSON) → panels. Every UI action is a command. | TAD §5.7 |
 | Identity | Assets and entities identified by UUIDs, never paths | ADR-0006 |

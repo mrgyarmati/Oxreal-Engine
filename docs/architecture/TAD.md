@@ -80,12 +80,16 @@ Changing this table requires an ADR.
 
 ## 5. Key boundaries
 
-### 5.1 ECS vs authoring hierarchy (ADR-0005)
+### 5.1 ECS vs authoring hierarchy (ADR-0005, ADR-0014)
 
-- The **ECS** (`runtime/ecs`) holds runtime entities, components, queries and systems. Its storage
-  strategy is open (D-01).
-- The **hierarchy** (`runtime/hierarchy`) holds authoring parent/child relationships, local and
-  world transforms, and propagation.
+- The **ECS** (`runtime/ecs`) holds runtime entities, components, queries and systems. The public
+  API exposes no storage types. Storage is archetype tables, with sparse sets as an
+  evidence-gated opt-in. Entities are 64-bit generational handles, and relations are components
+  with automatically maintained inverses. The ECS also provides lifecycle hooks, deferred
+  commands applied at stage sync points, change detection, and static plus dynamic (by
+  `ComponentId`) queries (ADR-0014).
+- The **hierarchy** (`runtime/hierarchy`) holds authoring parent/child relationships (the ordered
+  `ChildOf`/`Children` relation), local and world transforms, and propagation.
 - Sync rules: the hierarchy is authoritative for parentage. Transform propagation runs as an
   explicit scheduled system at a defined stage (after gameplay and physics write-back, before
   render extraction). World transforms are derived data and are never authored directly.
@@ -136,8 +140,9 @@ The design is open (D-02) but must be decided before M2.
   scripts implement the same Behaviour contract.
 - **Actor templates** (prefabs) play the role of Blueprint classes. Instance overrides reuse the
   ADR-0006 mechanism.
-- Unreal tick groups map to schedule stages:
-  `PrePhysics → DuringPhysics → PostPhysics → PostUpdate → Extract`.
+- Unreal tick groups map to schedule stages (ADR-0014 §5):
+  `Input → PrePhysics → DuringPhysics → PostPhysics → PostUpdate → Extract`.
+  Gameplay runs in `PrePhysics` by default, like Unreal's default actor tick group.
 
 ### 5.7 Editor
 
@@ -195,7 +200,7 @@ pub trait Device {
 // runtime
 pub struct World { /* entities, components, resources */ }
 pub trait System { fn run(&mut self, world: &mut World); }
-pub struct Schedule { /* ordered stages: Input, FixedUpdate, Update, PostUpdate(transform propagation), Extract */ }
+pub struct Schedule { /* ordered stages (ADR-0014): Input, PrePhysics, DuringPhysics (fixed-step), PostPhysics, PostUpdate (transform propagation), Extract */ }
 ```
 
 ## 7. Minimal workspace proposal for M1
