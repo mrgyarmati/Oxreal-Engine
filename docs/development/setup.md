@@ -47,30 +47,50 @@ official installer rather than pointing environment variables at a copied folder
 
 ## Linux
 
-Packages needed for windowing (Wayland and X11) and Vulkan:
+### Building
 
-**Ubuntu / Debian**
+Only a C toolchain is needed, for crates with small C parts (for example the optional Tracy
+profiler). **Windowing needs no development packages**, because Oxreal loads the Wayland and X11
+libraries at runtime ([ADR-0015](../decisions/0015-windowing-and-platform-event-loop.md)).
+
+| Distro | Command |
+|---|---|
+| Ubuntu / Debian | `sudo apt install build-essential` |
+| Fedora | `sudo dnf install gcc gcc-c++` |
+| Arch | `sudo pacman -S base-devel` |
+
+### Running
+
+These libraries are loaded at runtime and are already present on any desktop install:
+libwayland-client, libxkbcommon and libxkbcommon-x11, plus the X11 libraries libX11,
+libX11-xcb, libXcursor, libXrandr and libXi. On a minimal or headless system, install them
+explicitly:
+
+| Distro | Command | Verified |
+|---|---|---|
+| Ubuntu / Debian | `sudo apt install libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6` | CI: Ubuntu 24.04 and 26.04, X11 path under Xvfb (Wayland not yet in CI) |
+| Fedora | `sudo dnf install libwayland-client libxkbcommon libxkbcommon-x11 libX11 libX11-xcb libXcursor libXrandr libXi` | Not yet |
+| Arch | `sudo pacman -S wayland libxkbcommon libxkbcommon-x11 libx11 libxcursor libxrandr libxi` | Not yet |
+
+Vulkan runtime and tools (needed from the first rendering code):
+
+| Distro | Command |
+|---|---|
+| Ubuntu / Debian | `sudo apt install libvulkan1 vulkan-tools vulkan-validationlayers mesa-vulkan-drivers` |
+| Fedora | `sudo dnf install vulkan-loader vulkan-tools vulkan-validation-layers mesa-vulkan-drivers` |
+| Arch | `sudo pacman -S vulkan-icd-loader vulkan-tools vulkan-validation-layers` |
+
+### Choosing Wayland or X11
+
+Oxreal uses Wayland when `WAYLAND_DISPLAY` is set, and X11 otherwise. Force either one with
+`OXREAL_LINUX_DISPLAY=wayland` or `OXREAL_LINUX_DISPLAY=x11`. Test both before claiming
+windowing support for a change:
+
 ```sh
-sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev \
-  libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-  libvulkan-dev vulkan-tools vulkan-validationlayers mesa-vulkan-drivers
+OXREAL_LINUX_DISPLAY=wayland cargo run -p oxreal-window --example smoke -- --frames 120
+OXREAL_LINUX_DISPLAY=x11     cargo run -p oxreal-window --example smoke -- --frames 120
+xvfb-run -a cargo run -p oxreal-window --example smoke -- --frames 120   # headless (X11)
 ```
-
-**Fedora**
-```sh
-sudo dnf install gcc pkgconf-pkg-config libxkbcommon-devel wayland-devel \
-  libX11-devel libXcursor-devel libXrandr-devel libXi-devel \
-  vulkan-loader-devel vulkan-tools vulkan-validation-layers mesa-vulkan-drivers
-```
-
-**Arch**
-```sh
-sudo pacman -S base-devel pkgconf libxkbcommon wayland libx11 libxcursor libxrandr libxi \
-  vulkan-icd-loader vulkan-tools vulkan-validation-layers
-```
-
-Test under both a Wayland session and X11 (or Xwayland) before claiming windowing support.
-This list will be finalized when the platform crates land.
 
 ## Unreal Engine source (UX reference, optional)
 

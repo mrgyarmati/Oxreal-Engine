@@ -211,7 +211,7 @@ Create these only when M1 work starts, one at a time, each with real code:
 |---|---|---|
 | `foundation/math` | foundation | **Created** (`oxreal-math`): re-exported glam types plus owned `Transform`, projections and color. Bounds and frustum come with culling. (ADR-0011) |
 | `foundation/diagnostics` | foundation | **Created** (`oxreal-diagnostics`): re-exported log macros, `profile_*` macros, `init_application_logging` (ADR-0010) |
-| `platform/window` | platform | `oxreal-window`: windows and the event loop, winit 0.30 behind an engine-owned `App` trait and event enum. Raw handles via `raw-window-handle` 0.6 (ADR-0015). |
+| `platform/window` | platform | **Created** (`oxreal-window`): windows and the event loop, winit 0.30 behind an engine-owned `App` trait and event enum. Raw handles via `raw-window-handle` 0.6 (ADR-0015). |
 | `runtime/ecs` | runtime | Minimal ECS |
 | `rendering/rhi` | rendering | RHI traits |
 | `rendering/backends/vulkan` | rendering | Vulkan backend |
