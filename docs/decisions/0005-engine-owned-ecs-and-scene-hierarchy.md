@@ -1,6 +1,6 @@
 # ADR-0005: Engine-owned ECS and separate authoring hierarchy
 
-- **Status:** Proposed. The storage strategy is pending D-01.
+- **Status:** Accepted (2026-11-19, together with ADR-0014, which decides storage, change detection and scheduling)
 - **Date:** 2026-11-18
 - **Related:** TAD §5.1, brief §5; open decisions D-01, D-02
 
