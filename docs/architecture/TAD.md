@@ -210,7 +210,7 @@ Create these only when M1 work starts, one at a time, each with real code:
 | Crate | Layer | Purpose |
 |---|---|---|
 | `foundation/math` | foundation | Engine math: re-exported glam types plus owned `Transform`, projections, bounds and color (ADR-0011) |
-| `foundation/diagnostics` | foundation | Logging and tracing setup, error helpers, profiling scopes |
+| `foundation/diagnostics` | foundation | **Created** (`oxreal-diagnostics`): re-exported log macros, `profile_*` macros, `init_application_logging` (ADR-0010) |
 | `platform/window` | platform | Window/event-loop traits and the winit-backed impl, hidden behind the trait |
 | `runtime/ecs` | runtime | Minimal ECS |
 | `rendering/rhi` | rendering | RHI traits |

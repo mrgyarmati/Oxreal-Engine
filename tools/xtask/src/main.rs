@@ -16,8 +16,9 @@ const USAGE: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  ci                           Run everything CI runs: fmt check, clippy (-D warnings), tests,
-                               rustdoc, layer check, changelog fragment check
+  ci                           Run everything CI runs: fmt check; clippy (-D warnings) and tests
+                               with default and with all features; rustdoc; layer check;
+                               changelog fragment check
   layers                       Check workspace crate layering rules (docs/architecture/TAD.md section 4)
   changelog check              Validate changelog fragments in changelog.d/ (ADR-0009)
   changelog release <X.Y.Z> [--dry-run]
@@ -90,6 +91,18 @@ fn ci() -> Result<(), String> {
         "warnings",
     ])?;
     run_cargo(&["test", "--workspace"])?;
+    // Optional features (application logging, profiling backends) must build and pass too,
+    // exactly as in the CI matrix.
+    run_cargo(&[
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings",
+    ])?;
+    run_cargo(&["test", "--workspace", "--all-features"])?;
     // Same flags as the CI `rustdoc` job: broken intra-doc links and doc warnings fail the build.
     run_cargo_with_env(
         &[
@@ -97,6 +110,7 @@ fn ci() -> Result<(), String> {
             "--workspace",
             "--no-deps",
             "--document-private-items",
+            "--all-features",
         ],
         &[("RUSTDOCFLAGS", "-D warnings")],
     )?;

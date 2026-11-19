@@ -3,6 +3,9 @@ resolver = "3"
 # Explicit member list: crates are added only when they have real code
 # (docs/architecture/TAD.md §7). Use the `new-crate` skill, which also records the layer.
 members = [
+    # foundation
+    "crates/foundation/diagnostics",
+    # tools
     "tools/xtask",
 ]
 
@@ -21,6 +24,25 @@ publish = false
 # Third-party versions are centralized here. Every entry must be listed in
 # docs/development/dependencies.md with an audit result.
 serde_json = "1"
+
+# Errors and diagnostics (ADR-0010).
+thiserror = "2.0.21"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "std",
+    "fmt",
+    "ansi",
+    "env-filter",
+    "smallvec",
+    "tracing-log",
+] }
+# Tracy client: no default features, so no network broadcast, system tracing or crash handler.
+# Collects only while a viewer is connected, and listens on localhost only.
+tracy-client = { version = "0.19.0", default-features = false, features = [
+    "enable",
+    "ondemand",
+    "only-localhost",
+] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
