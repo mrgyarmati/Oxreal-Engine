@@ -27,6 +27,9 @@ const SIZE: u32 = 64;
 const FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 fn device() -> VulkanDevice {
+    // Validation messages go to the log; with a subscriber, a failing test shows them. Only the
+    // first call installs it (the rest return an error, which is fine).
+    let _ = oxreal_diagnostics::init_application_logging();
     let device = oxreal_rhi_vulkan::create_device(&DeviceDesc {
         app_name: "oxreal triangle tests".to_owned(),
         validation: Validation::Enabled,
