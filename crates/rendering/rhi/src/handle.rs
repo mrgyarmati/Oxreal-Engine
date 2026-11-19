@@ -51,6 +51,10 @@ define_handle!(
     TextureHandle
 );
 define_handle!(
+    /// A GPU buffer.
+    BufferHandle
+);
+define_handle!(
     /// A render pipeline.
     PipelineHandle
 );

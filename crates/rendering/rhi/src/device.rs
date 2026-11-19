@@ -4,8 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::{
-    AdapterInfo, CommandEncoder, Frame, GpuSelection, PipelineHandle, RenderPipelineDesc, RhiError,
-    SubmissionId, SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle,
+    AdapterInfo, BufferDesc, BufferHandle, CommandEncoder, Frame, GpuSelection, PipelineHandle,
+    RenderPipelineDesc, RhiError, SubmissionId, SurfaceDesc, SurfaceHandle, SurfaceTarget,
+    TextureDesc, TextureHandle,
 };
 
 /// Whether to enable the graphics API's validation layers.
@@ -177,6 +178,58 @@ pub trait Device: fmt::Debug + Send + Sync {
     /// [`RhiError::InvalidUsage`] for a stale handle, missing usage, or a texture an unsubmitted
     /// encoder still uses; or a device error.
     fn read_texture(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError>;
+
+    /// Creates a buffer in GPU memory. Its contents are undefined until written.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] for a zero size, a size above the
+    /// device's maximum, or an empty usage.
+    fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<BufferHandle, RhiError>;
+
+    /// Destroys a buffer once the GPU has finished every submission that may use it, and every
+    /// encoder that was recording when it was destroyed (ADR-0016 §1). The handle is invalid
+    /// immediately. Its address stays valid for encoders created before this call (destruction
+    /// waits for them), and must not be used by encoders created after it.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle.
+    fn destroy_buffer(&self, buffer: BufferHandle) -> Result<(), RhiError>;
+
+    /// Writes `data` into `buffer` at byte `offset`. The write is copied on the GPU queue, so it
+    /// **takes effect in submission order**: work submitted after this call sees the new data,
+    /// and work submitted before it sees the old. Doesn't wait for the GPU. The buffer needs
+    /// [`crate::BufferUsage::COPY_DESTINATION`].
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle, missing usage, empty data or a range past
+    /// the end; or a device error.
+    fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), RhiError>;
+
+    /// Copies a buffer's contents to the CPU, after all work submitted before this call. Blocks
+    /// until done. Meant for tests and tools. The buffer needs
+    /// [`crate::BufferUsage::COPY_SOURCE`].
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle, missing usage, or a buffer too large to fit
+    /// in memory on this platform (`usize`); or a device error.
+    fn read_buffer(&self, buffer: BufferHandle) -> Result<Vec<u8>, RhiError>;
+
+    /// The buffer's 64-bit GPU address, for shaders to read and write it through (pass it in
+    /// push constants or another buffer). It stays the same for the buffer's lifetime. The
+    /// buffer needs [`crate::BufferUsage::SHADER_ADDRESS`].
+    ///
+    /// Shaders that use an address are bound by
+    /// [`ShaderCode::from_spirv_unchecked`](crate::ShaderCode::from_spirv_unchecked)'s contract:
+    /// only addresses of live buffers, only in bounds.
+    ///
+    /// # Errors
+    ///
+    /// [`RhiError::InvalidUsage`] for a stale handle or missing usage.
+    fn buffer_address(&self, buffer: BufferHandle) -> Result<u64, RhiError>;
 
     /// Submits the frame's commands and presents its backbuffer.
     ///

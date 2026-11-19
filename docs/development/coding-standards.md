@@ -184,6 +184,11 @@ These follow the conventions Cordite validated, adapted to Oxreal:
   HLSL semantics follow Direct3D rules (they exclude the base vertex and instance), so Slang
   subtracts Vulkan's base values. That needs the `DrawParameters` capability, which Oxreal does
   not require (Roadmap 2022 doesn't). The compiler's capability allowlist rejects such shaders.
+- **Read buffers through pointers** (`Vertex* vertices` in the push constants) whose address
+  comes from `Device::buffer_address`. Buffer data uses scalar block layout, so a Slang struct
+  matches the Rust `#[repr(C)]` struct with the same fields in the same order. For example,
+  `float2` + `float4` is 24 bytes with the `float4` at offset 8, with no std140/std430
+  padding.
 - Shared engine conventions (ADR-0011 depth and clip space, color space, bindless access) live
   in `common/` modules and are imported, never copied.
 - Binding layout follows the RHI bind-model ADR.

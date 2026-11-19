@@ -6,10 +6,11 @@
 //! cargo run -p oxreal-rhi-vulkan --example triangle -- --frames 300  # exit after 300 frames (CI)
 //! ```
 //!
-//! Compiles `examples/shaders/Triangle.slang` with the pinned Slang, creates a pipeline for the
-//! backbuffer's format (recreated if the format changes), and draws three vertices without a
-//! vertex buffer. The rotation and aspect ratio are push constants. Like `clear`, it fails on any
-//! validation error or if frames stop arriving before `--timeout-secs` (default 60).
+//! Compiles `examples/shaders/PulledTriangle.slang` with the pinned Slang, writes three vertices
+//! into a GPU buffer, and creates a pipeline for the backbuffer's format (recreated if the
+//! format changes). The vertex shader reads ("pulls") the vertices through the buffer's address,
+//! which travels in the push constants with the rotation and aspect ratio (ADR-0016 §2). Like
+//! `clear`, it fails on any validation error or if frames stop arriving before `--timeout-secs` (default 60).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,9 +19,9 @@ use std::time::{Duration, Instant};
 use oxreal_diagnostics::{info, warn};
 use oxreal_math::LinearRgba;
 use oxreal_rhi::{
-    ColorAttachment, CullMode, Device as _, DeviceDesc, LoadOp, PipelineHandle, PresentMode,
-    RenderPassDesc, RenderPipelineDesc, ShaderCode, ShaderEntry, StoreOp, SurfaceDesc,
-    SurfaceHandle, TextureFormat, Validation,
+    BufferDesc, BufferHandle, BufferUsage, ColorAttachment, CullMode, Device as _, DeviceDesc,
+    LoadOp, PipelineHandle, PresentMode, RenderPassDesc, RenderPipelineDesc, RhiError, ShaderCode,
+    ShaderEntry, StoreOp, SurfaceDesc, SurfaceHandle, TextureFormat, Validation,
 };
 use oxreal_rhi_vulkan::VulkanDevice;
 use oxreal_shader_compiler::{CompileRequest, Optimization, SlangCompiler, validate_spirv};
@@ -38,6 +39,9 @@ struct TriangleApp {
     device: VulkanDevice,
     options: Options,
     spirv: Vec<u32>,
+    /// The vertex buffer, and its GPU address passed to the shader in the push constants.
+    vertex_buffer: BufferHandle,
+    vertices: u64,
     /// The pipeline and the backbuffer format it was created for.
     pipeline: Option<(PipelineHandle, TextureFormat)>,
     window: Option<Arc<Window>>,
@@ -69,7 +73,9 @@ impl TriangleApp {
             self.pipeline = None;
         }
         // SAFETY: produced by the pinned `slangc` through oxreal-shader-compiler and checked
-        // with `spirv-val` in `compile_shader` when it's installed (always in CI).
+        // with `spirv-val` in `compile_shader` when it's installed (always in CI). The only
+        // address it's given is the vertex buffer's, which holds its three vertices and lives
+        // until `exiting`, after the last frame.
         let code = unsafe { ShaderCode::from_spirv_unchecked(&self.spirv) };
         let pipeline = self
             .device
@@ -77,14 +83,14 @@ impl TriangleApp {
                 label: "triangle",
                 vertex: ShaderEntry {
                     code,
-                    entry_point: "triangleVertex",
+                    entry_point: "pulledVertex",
                 },
                 pixel: ShaderEntry {
                     code,
-                    entry_point: "trianglePixel",
+                    entry_point: "pulledPixel",
                 },
                 color_formats: &[format],
-                push_constant_bytes: 8,
+                push_constant_bytes: 16,
                 cull: CullMode::Back,
             })
             .map_err(|e| e.to_string())?;
@@ -114,9 +120,11 @@ impl TriangleApp {
         };
         let rotation = self.started.elapsed().as_secs_f32() * SPIN_SPEED;
         let aspect = self.size.0.max(1) as f32 / self.size.1.max(1) as f32;
-        let mut constants = [0_u8; 8];
-        constants[..4].copy_from_slice(&rotation.to_le_bytes());
-        constants[4..].copy_from_slice(&aspect.to_le_bytes());
+        // PulledConstants: vertex buffer address, rotation, aspect.
+        let mut constants = [0_u8; 16];
+        constants[..8].copy_from_slice(&self.vertices.to_le_bytes());
+        constants[8..12].copy_from_slice(&rotation.to_le_bytes());
+        constants[12..].copy_from_slice(&aspect.to_le_bytes());
 
         let backbuffer = frame.backbuffer();
         {
@@ -211,6 +219,9 @@ impl App for TriangleApp {
         {
             warn!(error = %e, "destroying the pipeline failed");
         }
+        if let Err(e) = self.device.destroy_buffer(self.vertex_buffer) {
+            warn!(error = %e, "destroying the vertex buffer failed");
+        }
         // The surface goes before the window it presents to.
         if let Some(surface) = self.surface.take()
             && let Err(e) = self.device.destroy_surface(surface)
@@ -255,11 +266,12 @@ fn parse_options() -> Result<Options, String> {
 }
 
 fn compile_shader() -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/shaders/Triangle.slang");
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/shaders/PulledTriangle.slang");
     let compiler = SlangCompiler::locate()?;
     let shader = compiler.compile(&CompileRequest {
         source: &source,
-        entry_points: &["triangleVertex", "trianglePixel"],
+        entry_points: &["pulledVertex", "pulledPixel"],
         include_dirs: &[],
         optimization: Optimization::Release,
     })?;
@@ -276,6 +288,31 @@ fn compile_shader() -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     Ok(shader.spirv)
 }
 
+/// Writes the triangle's three vertices into a GPU buffer, in `PulledTriangle.slang`'s layout:
+/// position `[f32; 2]` and color `[f32; 4]` per vertex. Returns the buffer and its address.
+fn create_vertices(device: &VulkanDevice) -> Result<(BufferHandle, u64), RhiError> {
+    // Counter-clockwise in Y-up clip space (ADR-0011): red apex, green bottom-left, blue
+    // bottom-right.
+    let corners: [([f32; 2], [f32; 4]); 3] = [
+        ([0.0, 0.5], [1.0, 0.0, 0.0, 1.0]),
+        ([-0.5, -0.5], [0.0, 1.0, 0.0, 1.0]),
+        ([0.5, -0.5], [0.0, 0.0, 1.0, 1.0]),
+    ];
+    let bytes: Vec<u8> = corners
+        .iter()
+        .flat_map(|(position, color)| position.iter().chain(color.iter()))
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    let buffer = device.create_buffer(&BufferDesc {
+        label: "triangle vertices",
+        size: bytes.len() as u64,
+        usage: BufferUsage::SHADER_ADDRESS | BufferUsage::COPY_DESTINATION,
+    })?;
+    device.write_buffer(buffer, 0, &bytes)?;
+    let address = device.buffer_address(buffer)?;
+    Ok((buffer, address))
+}
+
 fn main() -> std::process::ExitCode {
     oxreal_diagnostics::run_application(run)
 }
@@ -288,10 +325,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         validation: Validation::Enabled,
         ..DeviceDesc::default()
     })?;
+    let (vertex_buffer, vertices) = create_vertices(&device)?;
     let app = TriangleApp {
         device,
         options,
         spirv,
+        vertex_buffer,
+        vertices,
         pipeline: None,
         window: None,
         surface: None,

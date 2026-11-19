@@ -5,8 +5,11 @@ use std::process::Command;
 
 use crate::ShaderError;
 
-/// Validates `spirv` with `spirv-val --target-env vulkan1.3`, if `spirv-val` is available (from
-/// the Vulkan SDK or `PATH`).
+/// Validates `spirv` with `spirv-val --target-env vulkan1.3 --scalar-block-layout`, if `spirv-val`
+/// is available (from the Vulkan SDK or `PATH`).
+///
+/// The flags describe the device Oxreal requires: Vulkan 1.3 with `scalarBlockLayout` (ADR-0016
+/// §3), which lets buffer data use the same C-like layout as Rust `#[repr(C)]` structs.
 ///
 /// Returns `Ok(false)` when `spirv-val` isn't installed, so callers can log that validation was
 /// skipped, and `Ok(true)` when the module is valid.
@@ -29,7 +32,7 @@ pub fn validate_spirv(spirv: &[u32], source_file: &Path) -> Result<bool, ShaderE
         })
         .and_then(|()| {
             Command::new(&validator)
-                .args(["--target-env", "vulkan1.3"])
+                .args(["--target-env", "vulkan1.3", "--scalar-block-layout"])
                 .arg(&module)
                 .output()
                 .map_err(|source| ShaderError::Io {

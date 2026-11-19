@@ -11,11 +11,13 @@ use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use oxreal_diagnostics::{info, warn};
 use oxreal_rhi::{
-    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, CommandEncoder, DeviceDesc, Frame,
-    GpuSelection, HandlePool, PipelineHandle, RenderPipelineDesc, RhiError, SubmissionId,
-    SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle, select_adapter,
+    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, BufferDesc, BufferHandle,
+    CommandEncoder, DeviceDesc, Frame, GpuSelection, HandlePool, PipelineHandle,
+    RenderPipelineDesc, RhiError, SubmissionId, SurfaceDesc, SurfaceHandle, SurfaceTarget,
+    TextureDesc, TextureHandle, select_adapter,
 };
 
+use crate::buffers::Buffer;
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
 use crate::instance::{VulkanInstance, format_version};
@@ -162,6 +164,7 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
 
     let shared = Shared {
         textures: Mutex::new(HandlePool::new()),
+        buffers: Mutex::new(HandlePool::new()),
         pipelines: Mutex::new(HandlePool::new()),
         retired: Mutex::new(RetireQueue::default()),
         queue: Mutex::new(QueueState {
@@ -174,6 +177,7 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         limits: Limits {
             max_image_dimension_2d: probe.limits.max_image_dimension2_d,
             max_color_attachments: probe.limits.max_color_attachments,
+            max_buffer_size: probe.max_buffer_size,
         },
         queue_family,
         physical_device: probe.physical_device,
@@ -209,12 +213,15 @@ pub(crate) struct QueueState {
 pub(crate) struct Limits {
     pub(crate) max_image_dimension_2d: u32,
     pub(crate) max_color_attachments: u32,
+    /// Largest buffer `vkCreateBuffer` accepts (maintenance4 makes exceeding it invalid).
+    pub(crate) max_buffer_size: u64,
 }
 
 /// The device state that encoders share with the device.
 ///
 /// **Lock order:** `surfaces` (on [`VulkanDevice`]) → `queue` → `retired` → `textures` →
-/// `pipelines` → `allocator`. A thread holding one of these locks only takes locks to its right.
+/// `buffers` → `pipelines` → `allocator`. A thread holding one of these locks only takes locks to
+/// its right.
 /// `queue` → `retired` is what makes deferred destruction exact: "read the timeline value and
 /// queue an object" and "submit and record the submission" never interleave.
 ///
@@ -223,6 +230,7 @@ pub(crate) struct Limits {
 /// the fields drop in declaration order: the logical device, then the instance.
 pub(crate) struct Shared {
     pub(crate) textures: Mutex<HandlePool<Texture>>,
+    pub(crate) buffers: Mutex<HandlePool<Buffer>>,
     pub(crate) pipelines: Mutex<HandlePool<Pipeline>>,
     pub(crate) retired: Mutex<RetireQueue<Retired>>,
     pub(crate) queue: Mutex<QueueState>,
@@ -277,6 +285,7 @@ impl Drop for Shared {
         // Retired objects (surfaces included), then live ones the application didn't destroy.
         let retired = lock(&self.retired).drain();
         let textures = lock(&self.textures).drain();
+        let buffers = lock(&self.buffers).drain();
         let pipelines = lock(&self.pipelines).drain();
         let leftovers = retired
             .into_iter()
@@ -288,6 +297,10 @@ impl Drop for Shared {
                     view: t.view,
                     allocation,
                 })
+            }))
+            .chain(buffers.into_iter().map(|b| Retired::Buffer {
+                buffer: b.buffer,
+                allocation: b.allocation,
             }))
             .chain(pipelines.into_iter().map(|p| Retired::Pipeline(p.pipeline)));
         for object in leftovers {
@@ -429,6 +442,26 @@ impl oxreal_rhi::Device for VulkanDevice {
     fn read_texture(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError> {
         Shared::read_texture(&self.shared, texture)
     }
+
+    fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<BufferHandle, RhiError> {
+        self.shared.create_buffer(desc)
+    }
+
+    fn destroy_buffer(&self, buffer: BufferHandle) -> Result<(), RhiError> {
+        self.shared.destroy_buffer(buffer)
+    }
+
+    fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), RhiError> {
+        Shared::write_buffer(&self.shared, buffer, offset, data)
+    }
+
+    fn read_buffer(&self, buffer: BufferHandle) -> Result<Vec<u8>, RhiError> {
+        Shared::read_buffer(&self.shared, buffer)
+    }
+
+    fn buffer_address(&self, buffer: BufferHandle) -> Result<u64, RhiError> {
+        self.shared.buffer_address(buffer)
+    }
 }
 
 /// Owns the `VkDevice`, destroying it on drop.
@@ -451,6 +484,8 @@ struct Probe {
     candidate: AdapterCandidate,
     queue_family: Option<u32>,
     limits: vk::PhysicalDeviceLimits,
+    /// `maxBufferSize` (Vulkan 1.3 core, from maintenance4).
+    max_buffer_size: u64,
 }
 
 fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe {
@@ -475,12 +510,20 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         (String::new(), String::new())
     };
 
+    // 0 for devices below Vulkan 1.3, which are rejected.
+    let mut max_buffer_size = 0;
     if api < vk::API_VERSION_1_3 {
         reasons.push(format!(
             "supports Vulkan {} (1.3 required)",
             format_version(api)
         ));
     } else {
+        let mut v13 = vk::PhysicalDeviceVulkan13Properties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut v13);
+        // SAFETY: the device supports Vulkan 1.3, so Vulkan13Properties is a valid chain member.
+        // Both structures are alive across the call.
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
+        max_buffer_size = v13.max_buffer_size;
         let available = query_features(instance, physical_device);
         reasons.extend(
             features::missing(&available)
@@ -536,6 +579,7 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         },
         queue_family,
         limits: props.limits,
+        max_buffer_size,
     }
 }
 

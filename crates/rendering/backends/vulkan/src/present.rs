@@ -295,12 +295,8 @@ impl VulkanDevice {
         if let Err(e) = self.shared.wait_idle() {
             warn!(error = %e, "waiting before destroying a surface failed");
         }
-        if let Err(e) = self
-            .shared
-            .retire(Retired::Surface(Box::new(surface.objects)))
-        {
-            warn!(error = %e, "collecting destroyed objects failed");
-        }
+        self.shared
+            .retire(Retired::Surface(Box::new(surface.objects)));
     }
 
     pub(crate) fn begin_frame_impl(
