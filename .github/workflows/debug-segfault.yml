@@ -22,24 +22,36 @@ jobs:
         run: |
           bin=$(cargo test -p oxreal-rhi-vulkan --test triangle --no-run --locked --message-format=json | jq -r 'select(.executable != null) | .executable' | tail -1)
           echo "binary: $bin"; echo "bin=$bin" >> "$GITHUB_ENV"
-      - name: each test alone
+      - name: parallel suite 60x at full speed, core dumps on
         shell: bash
         run: |
           set +e +o pipefail
-          for t in invalid_descriptions_are_rejected_with_reasons misuse_is_reported_at_submit_without_validation_errors objects_destroyed_while_recording_outlive_the_submission triangle_points_up_and_has_its_corner_colors counter_clockwise_triangles_are_front_faces; do
-            echo "=== $t"; "$bin" --ignored --exact "$t" --test-threads=1 2>&1 | tail -4; echo "exit=${PIPESTATUS[0]}"
+          ulimit -c unlimited
+          sudo sysctl -w kernel.core_pattern=/tmp/core.%p >/dev/null
+          crashes=0
+          for i in $(seq 1 60); do
+            "$bin" --ignored > /tmp/run.log 2>&1; code=$?
+            if [ $code -ne 0 ]; then
+              crashes=$((crashes+1)); echo "=== run $i: exit $code"; tail -15 /tmp/run.log
+            fi
           done
-      - name: all tests, single thread
+          echo "crashes: $crashes / 60"
+          ls -la /tmp/core.* 2>/dev/null | head
+      - name: backtraces from core dumps
         shell: bash
         run: |
-          set +e +o pipefail
-          "$bin" --ignored --test-threads=1 2>&1 | tail -8; echo "exit=${PIPESTATUS[0]}"
-      - name: all tests in parallel under gdb
-        shell: bash
-        run: |
-          set +e +o pipefail
-          for i in 1 2 3; do
-            echo "=== attempt $i"
-            gdb -q -batch -ex "set pagination off" -ex run -ex "thread apply all bt 25" --args "$bin" --ignored 2>&1 \
-              | grep -vE "^\[(New|Thread .* exited)" | tail -120
+          set +e
+          for core in $(ls /tmp/core.* 2>/dev/null | head -3); do
+            echo "=== $core"
+            gdb -q -batch -ex "set pagination off" -ex "info threads" -ex "thread apply all bt 30" "$bin" "$core" 2>&1 \
+              | grep -vE "^warning: |auto-load|libthread_db" | head -250
           done
+      - name: again with validation layers off (layer or driver?)
+        shell: bash
+        run: |
+          set +e +o pipefail
+          crashes=0
+          for i in $(seq 1 60); do
+            OXREAL_VULKAN_VALIDATION=0 "$bin" --ignored > /tmp/run.log 2>&1 || { crashes=$((crashes+1)); tail -3 /tmp/run.log; }
+          done
+          echo "crashes without validation (assertions may fail by design): $crashes / 60"
