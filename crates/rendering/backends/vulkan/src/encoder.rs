@@ -333,7 +333,12 @@ impl VulkanEncoder {
             // never rendered to the image, and covers rendering when it did.
             .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
             .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+            // The render-finished semaphore is signalled at ALL_COMMANDS, so a destination of
+            // ALL_COMMANDS orders the layout transition before that signal, and so before the
+            // present that waits on it. (A destination of NONE leaves that ordering to how a
+            // reader interprets the semaphore's scope; older validation layers report it.)
+            // No access is needed: presentation makes the image visible itself.
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             .dst_access_mask(vk::AccessFlags2::NONE)
             .old_layout(texture.layout)
             .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
