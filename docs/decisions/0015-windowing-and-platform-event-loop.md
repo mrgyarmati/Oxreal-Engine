@@ -46,9 +46,17 @@ Facts checked on 2026-11-19:
 
 1. **`winit` 0.30 (the current stable line)** provides windows and the event loop. It's wrapped
    by `oxreal-window` (layer `platform`). **No `winit` type appears in the crate's public API.**
-   - Features: `rwh_06`, `x11`, `wayland`, `wayland-dlopen` and `wayland-csd-adwaita`, so Linux
-     gets runtime-loaded Wayland and X11 plus client-side decorations on compositors that need
-     them.
+   - Features: `rwh_06`, `x11`, `wayland`, `wayland-dlopen` and
+     **`wayland-csd-adwaita-notitle`**. Linux gets runtime-loaded Wayland and X11, plus
+     client-side decorations (buttons, borders, resizing) on compositors that need them, such as
+     GNOME.
+   - The default `wayland-csd-adwaita` feature is **not** used. It renders title text through
+     `ab_glyph` → `ttf-parser`, which **RUSTSEC-2026-0192** (found by `cargo-deny` in this
+     ADR's implementation PR) declares unmaintained, with no fixed version. We don't silence
+     unmaintained-parser advisories.
+   - Cost: on compositors that rely on client-side decorations, the title bar has no text. KDE,
+     Sway and other compositors that draw their own decorations are unaffected. The editor
+     is expected to draw its own window chrome later anyway.
    - Moving to 0.31 once it's stable is an upgrade inside `oxreal-window` only.
 2. **`raw-window-handle` 0.6 is the one sanctioned interop type.** `oxreal-window`'s `Window`
    implements `HasWindowHandle` and `HasDisplayHandle`, and the Vulkan backend creates surfaces
