@@ -40,7 +40,7 @@ Columns:
 
 These come from brief §11 and later ADRs, and are not commitments until a crate adopts them:
 - ash, ash-window, gpu-allocator and raw-window-handle (ADR-0012)
-- winit
+- winit (ADR-0015)
 - Rapier and Jolt bindings
 - Kira
 - egui
