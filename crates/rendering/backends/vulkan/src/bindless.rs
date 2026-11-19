@@ -10,7 +10,7 @@
 //!   `bindless_slots` lock.
 
 use ash::vk;
-use oxreal_diagnostics::info;
+use oxreal_diagnostics::{error, info};
 use oxreal_rhi::{RhiError, SAMPLERS_BINDING, TEXTURES_BINDING};
 
 use crate::error::from_vk;
@@ -28,6 +28,9 @@ pub(crate) struct DescriptorLimits {
     pub(crate) set_samplers: u32,
     pub(crate) stage_samplers: u32,
     pub(crate) stage_resources: u32,
+    /// `maxColorAttachments`: fragment-stage color attachments count against the per-stage
+    /// resource limit.
+    pub(crate) color_attachments: u32,
     pub(crate) all_pools: u32,
     /// `maxSamplerAllocationCount`: samplers that may exist at once.
     pub(crate) sampler_allocations: u32,
@@ -45,7 +48,13 @@ pub(crate) fn capacities(limits: &DescriptorLimits) -> Result<(u32, u32), String
     let textures = MAX_TEXTURES
         .min(limits.set_sampled_images)
         .min(limits.stage_sampled_images)
-        .min(limits.stage_resources.saturating_sub(samplers))
+        // maxPerStageUpdateAfterBindResources counts sampled images and the fragment stage's color
+        // attachments, but not samplers. The all-pools limit counts every descriptor.
+        .min(
+            limits
+                .stage_resources
+                .saturating_sub(limits.color_attachments),
+        )
         .min(limits.all_pools.saturating_sub(samplers));
     if textures == 0 || samplers == 0 {
         return Err(format!(
@@ -84,8 +93,17 @@ impl IndexAllocator {
     }
 
     /// Returns `index` for reuse. Callers only free an index whose object nothing can use.
+    ///
+    /// An index that isn't in use (never handed out, or already freed) is refused and logged:
+    /// freeing it would let two objects share one slot.
     pub(crate) fn release(&mut self, index: u32) {
-        debug_assert!(index < self.next && !self.free.contains(&index));
+        if index >= self.next || self.free.contains(&index) {
+            error!(
+                index,
+                "bindless index released twice or never allocated; ignored"
+            );
+            return;
+        }
         self.free.push(index);
     }
 }
@@ -140,9 +158,10 @@ impl Bindless {
             .push_next(&mut flags_info);
         // SAFETY: the device is alive and every structure is alive across the call. The binding
         // flags need descriptorBindingPartiallyBound, descriptorBindingSampledImageUpdateAfterBind
-        // and descriptorBindingUpdateUnusedWhilePending (required features). Sampler update after
-        // bind is core in Vulkan 1.2. The counts are within the update-after-bind limits
-        // (`capacities`).
+        // and descriptorBindingUpdateUnusedWhilePending (required features). The sampled-image one
+        // also gates UPDATE_AFTER_BIND on the SAMPLER binding (VUID-VkDescriptorSetLayoutBinding
+        // FlagsCreateInfo-descriptorBindingSampledImageUpdateAfterBind-03006). The counts are within
+        // the update-after-bind limits (`capacities`).
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
             .map_err(|e| from_vk("vkCreateDescriptorSetLayout", e))?;
 
@@ -211,10 +230,11 @@ impl Bindless {
         // SAFETY: the set is alive and externally synchronized by the `bindless_slots` lock the
         // caller holds. `index` came from the texture allocator, so it's below the binding's count.
         // No pending command buffer uses the slot: a freed index's old texture was destroyed only
-        // after everything that could sample it completed. With UPDATE_AFTER_BIND and
+        // after every encoder that could hold its index completed, and `ShaderCode`'s contract
+        // forbids using an index after that. With UPDATE_AFTER_BIND and
         // UPDATE_UNUSED_WHILE_PENDING the set may be bound in pending command buffers meanwhile.
-        // The view is alive, and its texture rests in SHADER_READ_ONLY_OPTIMAL whenever a shader
-        // may sample it.
+        // The view is alive, and its texture rests in SHADER_READ_ONLY_OPTIMAL whenever a shader may
+        // validly sample it (the contract forbids sampling it during a pass that draws into it).
         unsafe { device.update_descriptor_sets(&[write], &[]) };
     }
 
@@ -254,6 +274,7 @@ mod tests {
             set_samplers: 500_000,
             stage_samplers: 500_000,
             stage_resources: 500_000,
+            color_attachments: 8,
             all_pools: 500_000,
             sampler_allocations: 4_000,
         }
@@ -271,8 +292,9 @@ mod tests {
             sampler_allocations: 1_000,
             ..generous()
         };
-        // Samplers are capped by allocations, and textures share the per-stage budget.
-        assert_eq!(capacities(&tight), Ok((9_000, 1_000)));
+        // Samplers are capped by allocations. Textures share the per-stage budget with the 8 color
+        // attachments (samplers don't count against it).
+        assert_eq!(capacities(&tight), Ok((9_992, 1_000)));
         let none = DescriptorLimits {
             set_samplers: 0,
             ..generous()
@@ -290,5 +312,16 @@ mod tests {
         indices.release(a);
         assert_eq!(indices.allocate(), Some(a));
         assert_eq!(indices.allocate(), None);
+    }
+
+    #[test]
+    fn double_releases_are_ignored() {
+        let mut indices = IndexAllocator::new(4);
+        let a = indices.allocate().unwrap();
+        indices.release(a);
+        indices.release(a); // Twice: refused.
+        indices.release(3); // Never handed out: refused.
+        assert_eq!(indices.allocate(), Some(a));
+        assert_ne!(indices.allocate(), Some(a), "the slot wasn't queued twice");
     }
 }

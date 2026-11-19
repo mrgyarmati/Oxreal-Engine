@@ -215,9 +215,10 @@ impl Shared {
             .min_lod(0.0)
             .max_lod(vk::LOD_CLAMP_NONE);
         // SAFETY: the device is alive. Anisotropy needs samplerAnisotropy (a required feature)
-        // and stays within maxSamplerAnisotropy (clamped above). Fewer samplers than
-        // maxSamplerAllocationCount exist: each holds a bindless index, and there are at most that
-        // many (`bindless::capacities`).
+        // and stays within maxSamplerAnisotropy (clamped above). Samplers stay within
+        // maxSamplerAllocationCount: every sampler, live or waiting to be destroyed, holds a bindless
+        // index (this one included, allocated above), and there are at most capacity ≤ that limit
+        // indices (`bindless::capacities`).
         let sampler = match unsafe { self.raw().create_sampler(&info, None) } {
             Ok(sampler) => sampler,
             Err(e) => {

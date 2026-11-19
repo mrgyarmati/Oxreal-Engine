@@ -216,8 +216,9 @@ impl Shared {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: the device is alive. The size is non-zero and within maxImageDimension2D
-        // (checked above). The format is one of the 8-bit RGBA/BGRA formats the Vulkan spec
-        // requires to support COLOR_ATTACHMENT and TRANSFER_SRC with optimal tiling.
+        // (checked above). The format is one of the 8-bit RGBA/BGRA formats (UNORM or sRGB) for
+        // which the Vulkan spec makes these optimal-tiling features mandatory:
+        // COLOR_ATTACHMENT, TRANSFER_SRC and TRANSFER_DST, and SAMPLED_IMAGE with linear filtering.
         let image = unsafe { self.raw().create_image(&info, None) }
             .map_err(|e| from_vk("vkCreateImage", e))?;
         // SAFETY: `image` was just created.

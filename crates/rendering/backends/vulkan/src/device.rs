@@ -17,7 +17,7 @@ use oxreal_rhi::{
     SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle, select_adapter,
 };
 
-use crate::bindless::{Bindless, BindlessSlots, DescriptorLimits};
+use crate::bindless::{Bindless, BindlessSlots, DescriptorLimits, capacities};
 use crate::buffers::Buffer;
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
@@ -560,6 +560,7 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
             stage_resources: v12.max_per_stage_update_after_bind_resources,
             all_pools: v12.max_update_after_bind_descriptors_in_all_pools,
             sampler_allocations: props.limits.max_sampler_allocation_count,
+            color_attachments: props.limits.max_color_attachments,
         };
         (
             v12.driver_name_as_c_str()
@@ -591,6 +592,10 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
                 .into_iter()
                 .map(|name| format!("missing feature {name}")),
         );
+        // Rejected here, with a reason, rather than failing in `create_device` after selection.
+        if let Err(problem) = capacities(&descriptor_limits) {
+            reasons.push(problem);
+        }
     }
 
     // SAFETY: `physical_device` belongs to the live `instance`.

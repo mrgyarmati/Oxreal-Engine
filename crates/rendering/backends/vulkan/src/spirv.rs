@@ -59,6 +59,7 @@ mod op {
     pub(super) const TYPE_ARRAY: u32 = 28;
     pub(super) const TYPE_IMAGE: u32 = 25;
     pub(super) const TYPE_SAMPLER: u32 = 26;
+    pub(super) const TYPE_SAMPLED_IMAGE: u32 = 27;
     pub(super) const TYPE_RUNTIME_ARRAY: u32 = 29;
     pub(super) const TYPE_STRUCT: u32 = 30;
     pub(super) const TYPE_POINTER: u32 = 32;
@@ -137,15 +138,19 @@ enum Type {
         storage: u32,
         pointee: u32,
     },
-    /// `OpTypeImage`: dimensionality, whether arrayed or multisampled, and the "Sampled"
-    /// operand (1 = used with a sampler).
+    /// `OpTypeImage`: its texel type, dimensionality, depth flag (1 = a depth image), whether
+    /// arrayed or multisampled, and the "Sampled" operand (1 = used with a sampler).
     Image {
+        sampled_type: u32,
         dim: u32,
+        depth: u32,
         arrayed: u32,
         multisampled: u32,
         sampled: u32,
     },
     Sampler,
+    /// `OpTypeSampledImage`, a combined image and sampler: not part of the bindless model.
+    SampledImage,
     RuntimeArray(u32),
     Unsized,
 }
@@ -158,6 +163,8 @@ struct Module {
     types: HashMap<u32, Type>,
     /// Integer type id → width in bits, to tell which constants can be array lengths.
     integer_types: HashMap<u32, u32>,
+    /// Float type id → width in bits, to check texture texel types.
+    float_types: HashMap<u32, u32>,
     /// Integer constants that fit in 32 bits.
     constants: HashMap<u32, u32>,
     /// Computed sizes, keyed by type and (for matrices and arrays) the struct member they
@@ -305,6 +312,8 @@ impl Module {
                 self.types.insert(id(0)?, Type::Scalar(width / 8));
                 if opcode == op::TYPE_INT {
                     self.integer_types.insert(id(0)?, width);
+                } else {
+                    self.float_types.insert(id(0)?, width);
                 }
             }
             op::TYPE_VECTOR => {
@@ -341,7 +350,9 @@ impl Module {
                 self.types.insert(
                     id(0)?,
                     Type::Image {
+                        sampled_type: id(1)?,
                         dim: id(2)?,
+                        depth: id(3)?,
                         arrayed: id(4)?,
                         multisampled: id(5)?,
                         sampled: id(6)?,
@@ -350,6 +361,9 @@ impl Module {
             }
             op::TYPE_SAMPLER => {
                 self.types.insert(id(0)?, Type::Sampler);
+            }
+            op::TYPE_SAMPLED_IMAGE => {
+                self.types.insert(id(0)?, Type::SampledImage);
             }
             op::TYPE_STRUCT => {
                 self.types.insert(
@@ -384,6 +398,8 @@ impl Module {
                 }
                 self.variables.insert(id(1)?, (id(0)?, id(2)?));
             }
+            // A repeated DescriptorSet or Binding decoration would be resolved last-wins here. Valid
+            // SPIR-V (`ShaderCode`'s contract, checked by spirv-val) never repeats one.
             op::DECORATE => match id(1)? {
                 decoration::ARRAY_STRIDE => {
                     self.array_strides.insert(id(0)?, id(2)?);
@@ -443,14 +459,29 @@ impl Module {
             match (binding, self.resource_element(id)?) {
                 (
                     TEXTURES_BINDING,
-                    Type::Image {
+                    &Type::Image {
+                        sampled_type,
                         dim: 1,
+                        depth,
                         arrayed: 0,
                         multisampled: 0,
                         sampled: 1,
                     },
-                )
-                | (SAMPLERS_BINDING, Type::Sampler) => {}
+                ) => {
+                    // The set holds 8-bit RGBA/BGRA (UNORM or sRGB) textures, which sample as
+                    // floats. Integer texel types and depth comparison need other formats.
+                    if self.float_types.get(&sampled_type) != Some(&32) {
+                        return Err(format!(
+                            "resource %{id}: bindless textures sample as 32-bit floats (Texture2D or Texture2D<float4>), not other texel types"
+                        ));
+                    }
+                    if depth == 1 {
+                        return Err(format!(
+                            "resource %{id}: depth textures (comparison sampling) aren't part of the bindless set"
+                        ));
+                    }
+                }
+                (SAMPLERS_BINDING, Type::Sampler) => {}
                 (TEXTURES_BINDING, _) => {
                     return Err(format!(
                         "resource %{id} at binding {TEXTURES_BINDING} must be an array of sampled 2D textures (Texture2D[])"
@@ -485,10 +516,23 @@ impl Module {
         let Type::Pointer { pointee, .. } = lookup(pointer)? else {
             return Err(format!("resource %{id} does not have a pointer type"));
         };
-        match lookup(*pointee)? {
-            Type::RuntimeArray(element) | Type::Array { element, .. } => lookup(*element),
-            other => Ok(other),
+        let element = match lookup(*pointee)? {
+            Type::RuntimeArray(element) => lookup(*element)?,
+            // The set's size depends on the device, so a fixed length could exceed it
+            // (VUID-VkGraphicsPipelineCreateInfo-layout-07991).
+            Type::Array { .. } => {
+                return Err(format!(
+                    "resource %{id} is a fixed-size array; declare bindless arrays unsized (Texture2D[], SamplerState[]): their size depends on the device"
+                ));
+            }
+            other => other,
+        };
+        if matches!(element, Type::SampledImage) {
+            return Err(format!(
+                "resource %{id} is a combined image sampler (Sampler2D), which the bindless model doesn't support: use Texture2D[] and SamplerState[] (Bindless.slang)"
+            ));
         }
+        Ok(element)
     }
 
     /// Size in bytes of type `id` in an explicit layout, never smaller than the bytes it can
@@ -602,6 +646,7 @@ impl Module {
             | Type::Unsized
             | Type::RuntimeArray(_)
             | Type::Image { .. }
+            | Type::SampledImage
             | Type::Sampler => Err(format!(
                 "push constants contain type %{id}, which has no fixed size in an explicit layout"
             )),
@@ -917,6 +962,63 @@ mod tests {
             inspect(&with_resource(op::TYPE_IMAGE, &cube, 0, 0)).is_err(),
             "cube maps aren't 2D"
         );
+    }
+
+    #[test]
+    fn fixed_size_descriptor_arrays_are_rejected() {
+        // Texture2D t[1000000] at binding 0: its length can exceed the device's set.
+        let words = Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, 0])
+            .op(op::DECORATE, &[40, decoration::BINDING, 0])
+            .op(op::TYPE_FLOAT, &[10, 32])
+            .op(op::TYPE_IMAGE, &TEXTURE_2D)
+            .op(op::TYPE_INT, &[11, 32, 0])
+            .op(op::CONSTANT, &[11, 12, 1_000_000])
+            .op(op::TYPE_ARRAY, &[30, 20, 12])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0;
+        let err = inspect(&words).unwrap_err();
+        assert!(err.contains("fixed-size array"), "{err}");
+    }
+
+    #[test]
+    fn textures_must_be_float_and_not_depth() {
+        // Texture2D<uint>: an integer texel type.
+        let words = Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, 0])
+            .op(op::DECORATE, &[40, decoration::BINDING, 0])
+            .op(op::TYPE_INT, &[10, 32, 0])
+            .op(op::TYPE_IMAGE, &TEXTURE_2D)
+            .op(op::TYPE_RUNTIME_ARRAY, &[30, 20])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0;
+        let err = inspect(&words).unwrap_err();
+        assert!(err.contains("32-bit floats"), "{err}");
+        // A depth image (depth operand 1).
+        let depth = [20, 10, 1, 1, 0, 0, 1, 0];
+        let err = inspect(&with_resource(op::TYPE_IMAGE, &depth, 0, 0)).unwrap_err();
+        assert!(err.contains("depth textures"), "{err}");
+        // Depth 2 ("unknown") is what Slang emits for Texture2D: accepted.
+        let unknown = [20, 10, 1, 2, 0, 0, 1, 0];
+        assert!(inspect(&with_resource(op::TYPE_IMAGE, &unknown, 0, 0)).is_ok());
+    }
+
+    #[test]
+    fn combined_image_samplers_get_a_clear_error() {
+        let words = Asm::new()
+            .op(op::DECORATE, &[40, decoration::DESCRIPTOR_SET, 0])
+            .op(op::DECORATE, &[40, decoration::BINDING, 0])
+            .op(op::TYPE_FLOAT, &[10, 32])
+            .op(op::TYPE_IMAGE, &[21, 10, 1, 0, 0, 0, 1, 0])
+            .op(op::TYPE_SAMPLED_IMAGE, &[20, 21])
+            .op(op::TYPE_RUNTIME_ARRAY, &[30, 20])
+            .op(op::TYPE_POINTER, &[31, 0, 30])
+            .op(op::VARIABLE, &[31, 40, 0])
+            .0;
+        let err = inspect(&words).unwrap_err();
+        assert!(err.contains("combined image sampler"), "{err}");
     }
 
     #[test]

@@ -159,6 +159,18 @@ Three questions shape everything above the RHI:
     and GPU-assisted validation (layer 1.4.363) didn't report a removed return-to-rest
     transition either. The transitions follow the spec, and the render-to-texture test checks
     the result.
+  - *After the `unsafe` audit:* `ShaderCode`'s contract spells out the index rules:
+    - indices only from `texture_index` and `sampler_index`, of live objects, each in its own
+      array, marked non-uniform where they vary;
+    - never sample a texture that is a color attachment of the current pass (it isn't in a
+      readable layout during the pass).
+
+    The backend also rejects:
+    - fixed-size descriptor arrays (the set's size depends on the device);
+    - integer or depth textures;
+    - combined image samplers.
+
+    A GPU whose descriptor limits are too small is rejected at selection, with a reason.
 - Slang shaders access resources through shared engine modules (`common/Bindless.slang`). The
   shader compiler's capability allowlist (ADR-0013) permits exactly the capabilities this model
   needs: `RuntimeDescriptorArray`, `ShaderNonUniform`, the non-uniform indexing capabilities and
