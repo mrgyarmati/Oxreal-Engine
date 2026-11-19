@@ -22,47 +22,22 @@ jobs:
         run: |
           bin=$(cargo test -p oxreal-rhi-vulkan --test triangle --no-run --locked --message-format=json | jq -r 'select(.executable != null) | .executable' | tail -1)
           echo "binary: $bin"; echo "bin=$bin" >> "$GITHUB_ENV"
-      - name: parallel suite 60x at full speed, core dumps on
+      - name: which driver manifests are installed
+        run: ls /usr/share/vulkan/icd.d/
+      - name: control, 100 parallel runs, all drivers
         shell: bash
         run: |
           set +e +o pipefail
-          ulimit -c unlimited
-          sudo sysctl -w kernel.core_pattern=/tmp/core.%p >/dev/null
-          crashes=0
-          for i in $(seq 1 60); do
-            "$bin" --ignored > /tmp/run.log 2>&1; code=$?
-            if [ $code -ne 0 ]; then
-              crashes=$((crashes+1)); echo "=== run $i: exit $code"; tail -15 /tmp/run.log
-            fi
-          done
-          echo "crashes: $crashes / 60"
-          ls -la /tmp/core.* 2>/dev/null | head
-      - name: crashing thread only, with loaded libraries
-        if: always()
+          segv=0; other=0
+          for i in $(seq 1 100); do "$bin" --ignored > /tmp/run.log 2>&1; c=$?; [ $c -eq 139 ] && segv=$((segv+1)); [ $c -ne 0 ] && [ $c -ne 139 ] && other=$((other+1)); done
+          echo "ALL DRIVERS: SIGSEGV $segv / 100, other failures $other"
+      - name: 100 parallel runs, Lavapipe selected
         shell: bash
+        env:
+          VK_LOADER_DRIVERS_SELECT: "*lvp*"
         run: |
           set +e +o pipefail
-          for core in $(ls /tmp/core.* 2>/dev/null | head -4); do
-            echo "=== $core"
-            gdb -q -batch -ex "set pagination off" -ex "bt 40" -ex "info symbol \$pc" "$bin" "$core" > /tmp/gdb.txt 2>&1
-            grep -vE "^warning: |auto-load|libthread_db|^\[New LWP" /tmp/gdb.txt | head -60
-          done
-      - name: same loop with validation layers off (count only SIGSEGV, exit 139)
-        if: always()
-        shell: bash
-        run: |
-          set +e +o pipefail
-          segv=0
-          for i in $(seq 1 60); do
-            OXREAL_VULKAN_VALIDATION=0 "$bin" --ignored > /tmp/run.log 2>&1; [ $? -eq 139 ] && segv=$((segv+1))
-          done
-          echo "SIGSEGV without validation layers: $segv / 60"
-      - name: same loop, device creation only (tests/device.rs, 2 threads)
-        if: always()
-        shell: bash
-        run: |
-          set +e +o pipefail
-          dev=$(cargo test -p oxreal-rhi-vulkan --test device --no-run --locked --message-format=json 2>/dev/null | jq -r 'select(.executable != null) | .executable' | tail -1)
-          segv=0
-          for i in $(seq 1 60); do "$dev" --ignored > /tmp/run.log 2>&1; [ $? -eq 139 ] && segv=$((segv+1)); done
-          echo "SIGSEGV in device tests: $segv / 60"
+          "$bin" --ignored --exact triangle_points_up_and_has_its_corner_colors --nocapture 2>&1 | grep -iE "GPU found|llvmpipe" | head -3
+          segv=0; other=0
+          for i in $(seq 1 100); do "$bin" --ignored > /tmp/run.log 2>&1; c=$?; [ $c -eq 139 ] && segv=$((segv+1)); [ $c -ne 0 ] && [ $c -ne 139 ] && { other=$((other+1)); tail -5 /tmp/run.log; }; done
+          echo "LAVAPIPE SELECTED: SIGSEGV $segv / 100, other failures $other"
