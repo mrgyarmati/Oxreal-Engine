@@ -12,14 +12,16 @@
 use std::any::Any;
 use std::ffi::CString;
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use ash::vk;
 use oxreal_diagnostics::error;
 use oxreal_rhi::{
-    BINDLESS_SET, CommandEncoder, DepthAttachment, DepthLoadOp, HandlePool, LoadOp, PipelineHandle,
-    RenderPassDesc, StoreOp, SurfaceHandle, TextureFormat,
+    BINDLESS_SET, BufferHandle, BufferUsage, CommandEncoder, DepthAttachment, DepthLoadOp,
+    HandlePool, IndexFormat, LoadOp, PipelineHandle, RenderPassDesc, StoreOp, SurfaceHandle,
+    TextureFormat,
 };
 
 use crate::device::{Shared, lock};
@@ -196,8 +198,64 @@ struct Pass {
     depth_format: Option<TextureFormat>,
     /// Push-constant bytes of the pipeline bound in this pass.
     pipeline_push_bytes: Option<u32>,
+    /// The index buffer bound in this pass.
+    index: Option<BoundIndex>,
     /// Attachments with a resting layout (sampled textures), returned to it when the pass ends.
     restore: Vec<(u64, vk::Image, vk::ImageLayout)>,
+}
+
+/// An index buffer bound with `set_index_buffer`.
+#[derive(Debug, Clone, Copy)]
+struct BoundIndex {
+    buffer: BufferHandle,
+    /// Indices between the bound offset and the end of the buffer. Buffer sizes never change,
+    /// and a destroyed buffer stays alive until this encoder's work completes, so this holds for
+    /// the whole pass.
+    available: u64,
+}
+
+/// Checks a `set_index_buffer` call against the buffer's usage and size, returning the
+/// number of indices from `offset` to the end of the buffer.
+fn index_range(
+    buffer: BufferHandle,
+    usage: BufferUsage,
+    size: u64,
+    offset: u64,
+    format: IndexFormat,
+) -> Result<u64, String> {
+    if !usage.contains(BufferUsage::INDEX) {
+        return Err(format!(
+            "set_index_buffer: {buffer:?} was not created with BufferUsage::INDEX"
+        ));
+    }
+    if !offset.is_multiple_of(format.size()) {
+        return Err(format!(
+            "set_index_buffer: offset {offset} is not a multiple of the {format:?} index size ({} bytes)",
+            format.size()
+        ));
+    }
+    if offset >= size {
+        return Err(format!(
+            "set_index_buffer: offset {offset} is not inside {buffer:?} ({size} bytes)"
+        ));
+    }
+    Ok((size - offset) / format.size())
+}
+
+/// Checks an indexed draw's index range against the indices the bound buffer holds.
+fn check_index_draw(indices: &Range<u32>, bound: &BoundIndex) -> Result<(), String> {
+    if indices.start > indices.end {
+        return Err(format!(
+            "draw_indexed: index range {indices:?} ends before it starts"
+        ));
+    }
+    if u64::from(indices.end) > bound.available {
+        return Err(format!(
+            "draw_indexed: index range {indices:?} reads past the end of {:?}, which holds {} indices from the bound offset",
+            bound.buffer, bound.available
+        ));
+    }
+    Ok(())
 }
 
 /// Records commands into a primary command buffer.
@@ -580,6 +638,7 @@ impl CommandEncoder for VulkanEncoder {
             formats: Vec::with_capacity(desc.color_attachments.len()),
             depth_format: None,
             pipeline_push_bytes: None,
+            index: None,
             restore: Vec::new(),
         };
 
@@ -927,27 +986,12 @@ impl CommandEncoder for VulkanEncoder {
         first_vertex: u32,
         first_instance: u32,
     ) {
-        let written = self.push_written;
-        let Some(needed) = self
-            .rendering_pass("draw")
-            .map(|pass| pass.pipeline_push_bytes)
-        else {
-            return;
-        };
-        let Some(needed) = needed else {
-            self.misuse
-                .push("draw before a successful set_pipeline in this pass".to_owned());
-            return;
-        };
-        if written < needed {
-            self.misuse.push(format!(
-                "draw: the pipeline reads {needed} push-constant bytes, but only {written} were written"
-            ));
+        if !self.ready_to_draw("draw") {
             return;
         }
         // SAFETY: `cmd` is recording inside a rendering pass with a compatible graphics pipeline
         // bound, its dynamic viewport and scissor set, and every push-constant byte it reads
-        // written.
+        // written (`ready_to_draw`).
         unsafe {
             self.shared.raw().cmd_draw(
                 self.cmd,
@@ -959,8 +1003,114 @@ impl CommandEncoder for VulkanEncoder {
         }
     }
 
+    fn set_index_buffer_raw(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        let shared = Arc::clone(&self.shared);
+        if self.rendering_pass("set_index_buffer").is_none() {
+            return;
+        }
+        let buffers = lock(&shared.buffers);
+        let checked = match buffers.get(buffer.to_raw()) {
+            None => Err(format!("set_index_buffer: {buffer:?} does not exist")),
+            Some(found) => index_range(buffer, found.usage, found.size, offset, format)
+                .map(|available| (found.buffer, available)),
+        };
+        let bound = match checked {
+            Ok((raw, available)) => {
+                let index_type = match format {
+                    IndexFormat::Uint16 => vk::IndexType::UINT16,
+                    IndexFormat::Uint32 => vk::IndexType::UINT32,
+                };
+                // SAFETY: `cmd` is recording. The buffer is alive: it was found in the table
+                // under its lock, and destroying it later is deferred past this encoder's work
+                // (ADR-0016 §1). It has INDEX_BUFFER usage, `offset` is inside it and a multiple
+                // of the index size (`index_range`), and the index type is UINT16 or UINT32,
+                // which need no extension.
+                unsafe {
+                    shared
+                        .raw()
+                        .cmd_bind_index_buffer(self.cmd, raw, offset, index_type);
+                }
+                Some(BoundIndex { buffer, available })
+            }
+            Err(problem) => {
+                self.misuse.push(problem);
+                None
+            }
+        };
+        drop(buffers);
+        // A failed bind leaves the pass without an index buffer, so later indexed draws are
+        // refused rather than reading one bound earlier.
+        if let Some(pass) = self.pass.as_mut() {
+            pass.index = bound;
+        }
+    }
+
+    fn draw_indexed_raw(
+        &mut self,
+        indices: Range<u32>,
+        vertex_offset: i32,
+        instance_count: u32,
+        first_instance: u32,
+    ) {
+        if !self.ready_to_draw("draw_indexed") {
+            return;
+        }
+        let Some(bound) = self.pass.as_ref().and_then(|pass| pass.index) else {
+            self.misuse
+                .push("draw_indexed without a successful set_index_buffer in this pass".to_owned());
+            return;
+        };
+        if let Err(problem) = check_index_draw(&indices, &bound) {
+            self.misuse.push(problem);
+            return;
+        }
+        // SAFETY: as for `draw_raw` (`ready_to_draw`). The index buffer bound in this pass is
+        // alive (see `set_index_buffer_raw`), and every index read lies inside it:
+        // `indices.end` is at most the indices from the bound offset to its end
+        // (`check_index_draw`), the condition vkCmdDrawIndexed sets without robustBufferAccess2.
+        // Primitive restart is off and fullDrawIndexUint32 is enabled (a required feature), so
+        // every index value is valid.
+        unsafe {
+            self.shared.raw().cmd_draw_indexed(
+                self.cmd,
+                indices.end - indices.start,
+                instance_count,
+                indices.start,
+                vertex_offset,
+                first_instance,
+            );
+        }
+    }
+
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
         self
+    }
+}
+
+impl VulkanEncoder {
+    /// Whether a draw may be recorded: a rendering pass with a successfully set pipeline, and
+    /// every push-constant byte the pipeline reads written. Records the problem otherwise.
+    fn ready_to_draw(&mut self, what: &str) -> bool {
+        let written = self.push_written;
+        let Some(needed) = self
+            .rendering_pass(what)
+            .map(|pass| pass.pipeline_push_bytes)
+        else {
+            return false;
+        };
+        let Some(needed) = needed else {
+            self.misuse.push(format!(
+                "{what} before a successful set_pipeline in this pass"
+            ));
+            return false;
+        };
+        if written < needed {
+            self.misuse.push(format!(
+                "{what}: the pipeline reads {needed} push-constant bytes, but only {written} were written"
+            ));
+            return false;
+        }
+        true
     }
 }
 
@@ -976,6 +1126,69 @@ mod tests {
         });
         assert_eq!((v.x, v.y, v.width, v.height), (0.0, 480.0, 640.0, -480.0));
         assert_eq!((v.min_depth, v.max_depth), (0.0, 1.0));
+    }
+
+    #[test]
+    fn index_buffers_are_checked_for_usage_alignment_and_offset() {
+        let buffer = BufferHandle::from_raw(1);
+        let index = BufferUsage::INDEX;
+        // 64 bytes: 32 u16 indices or 16 u32 indices.
+        assert_eq!(
+            index_range(buffer, index, 64, 0, IndexFormat::Uint16),
+            Ok(32)
+        );
+        assert_eq!(
+            index_range(buffer, index, 64, 0, IndexFormat::Uint32),
+            Ok(16)
+        );
+        assert_eq!(
+            index_range(buffer, index, 64, 8, IndexFormat::Uint32),
+            Ok(14)
+        );
+        // A trailing partial index doesn't count.
+        assert_eq!(
+            index_range(buffer, index, 66, 0, IndexFormat::Uint32),
+            Ok(16)
+        );
+
+        let wrong_usage = index_range(
+            buffer,
+            BufferUsage::SHADER_ADDRESS,
+            64,
+            0,
+            IndexFormat::Uint16,
+        );
+        assert!(wrong_usage.unwrap_err().contains("BufferUsage::INDEX"));
+        let misaligned = index_range(buffer, index, 64, 2, IndexFormat::Uint32);
+        assert!(misaligned.unwrap_err().contains("not a multiple"));
+        let outside = index_range(buffer, index, 64, 64, IndexFormat::Uint16);
+        assert!(outside.unwrap_err().contains("not inside"));
+    }
+
+    #[test]
+    fn indexed_draws_stay_inside_the_bound_indices() {
+        let bound = BoundIndex {
+            buffer: BufferHandle::from_raw(1),
+            available: 36,
+        };
+        assert_eq!(check_index_draw(&(0..36), &bound), Ok(()));
+        assert_eq!(check_index_draw(&(30..36), &bound), Ok(()));
+        assert_eq!(check_index_draw(&(36..36), &bound), Ok(()));
+        assert!(
+            check_index_draw(&(0..37), &bound)
+                .unwrap_err()
+                .contains("past the end")
+        );
+        #[expect(
+            clippy::reversed_empty_ranges,
+            reason = "testing that misuse is refused"
+        )]
+        let reversed = 6..3;
+        assert!(
+            check_index_draw(&reversed, &bound)
+                .unwrap_err()
+                .contains("ends before")
+        );
     }
 
     #[test]
