@@ -53,9 +53,19 @@ pub struct RenderPassDesc<'a> {
 /// Recording is infallible (ADR-0017 §3): misuse such as an invalid handle is remembered and
 /// reported as an error when the frame ends.
 ///
+/// Rules the backends enforce, reporting violations as misuse instead of recording invalid
+/// commands:
+/// - A texture used by one encoder can't be used by another until the first is submitted (or
+///   dropped). This keeps resource state in submission order.
+/// - A pass whose attachments aren't all valid records nothing. A pipeline must be set in every
+///   pass, and must match the pass's attachment formats. Every push-constant byte the pipeline
+///   declares must be written before a draw.
+/// - A pass left open (for example a leaked [`RenderPass`] guard) is closed at submission and
+///   reported.
+///
 /// The `*_raw` methods exist for backends to implement. Renderer code uses
 /// [`begin_render_pass`](trait.CommandEncoder.html#method.begin_render_pass) on
-/// `dyn CommandEncoder`, which guarantees every pass is ended.
+/// `dyn CommandEncoder`, which ends the pass when its guard drops.
 pub trait CommandEncoder: Send + fmt::Debug {
     /// Backend hook: begin a render pass. Called only by [`RenderPass`].
     fn begin_render_pass_raw(&mut self, desc: &RenderPassDesc<'_>);
@@ -101,7 +111,8 @@ pub struct RenderPass<'p, 'e> {
 }
 
 impl RenderPass<'_, '_> {
-    /// Binds the pipeline used by the following draws.
+    /// Binds the pipeline used by the following draws. It must be created for this pass's
+    /// attachment formats, and must be set again in every pass.
     pub fn set_pipeline(&mut self, pipeline: PipelineHandle) {
         self.encoder.set_pipeline_raw(pipeline);
     }
@@ -113,7 +124,8 @@ impl RenderPass<'_, '_> {
         self.encoder.set_push_constants_raw(bytes);
     }
 
-    /// Draws `vertex_count` vertices, `instance_count` times, with the bound pipeline.
+    /// Draws `vertex_count` vertices, `instance_count` times, with the bound pipeline. Every
+    /// push-constant byte the pipeline declares must have been written by this encoder.
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32) {
         self.encoder.draw_raw(vertex_count, instance_count, 0, 0);
     }
@@ -128,8 +140,8 @@ impl Drop for RenderPass<'_, '_> {
 /// One frame of a surface, returned by [`crate::Device::begin_frame`].
 ///
 /// Record into [`Frame::encoder`] and render to [`Frame::backbuffer`], then pass the frame to
-/// [`crate::Device::end_frame`]. **Every frame must be ended:** a dropped frame leaves the
-/// swapchain image acquired.
+/// [`crate::Device::end_frame`]. **Every frame must be ended.** A dropped frame is reported as an
+/// error, and the next `begin_frame` on its surface recovers by recreating the swapchain.
 #[derive(Debug)]
 #[must_use = "a frame must be passed to Device::end_frame"]
 pub struct Frame {

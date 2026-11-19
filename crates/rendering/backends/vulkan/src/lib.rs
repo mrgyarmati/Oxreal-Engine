@@ -38,6 +38,7 @@ mod instance;
 mod present;
 mod resources;
 mod retire;
+mod spirv;
 
 pub use device::{VulkanDevice, create_device};
 pub use instance::VALIDATION_ENV_VAR;

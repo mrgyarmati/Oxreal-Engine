@@ -54,6 +54,18 @@ These rules follow [ADR-0010](../decisions/0010-errors-logging-and-profiling.md)
   (`clippy::undocumented_unsafe_blocks` is denied).
 - Every `unsafe fn` documents its contract in a `# Safety` doc section.
 - Run new `unsafe` and FFI past the `unsafe-auditor` agent.
+- **A safe API must stay sound under any safe caller,** not just well-behaved ones. In particular:
+  - Soundness can't depend on a `Drop` guard running, because `std::mem::forget` is safe. Check
+    again at the next point you control, for example submission.
+  - It can't depend on public constructors being used "correctly": take the data you act on
+    from your own state.
+  - It can't depend on a handle's owner still being alive: share ownership (`Arc`) or tie
+    the lifetimes.
+  - It can't depend on two threads not interleaving: hold the lock across every step that
+    must be atomic, and keep a documented lock order.
+- When a safety property can't be checked at reasonable cost (for example the validity of
+  shader code), the constructor that accepts the input is `unsafe` with a `# Safety` contract.
+  The callee still checks what it can.
 
 ## State
 

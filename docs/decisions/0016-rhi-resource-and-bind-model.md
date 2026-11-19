@@ -95,7 +95,9 @@ Three questions shape everything above the RHI:
     timeline value. The Vulkan backend's retire queue therefore also waits for every encoder that
     was open at destruction time to be submitted (then for its value) or dropped. The
     bookkeeping is pure and unit-tested, and a GPU test destroys a pipeline and texture
-    mid-recording under validation.
+    mid-recording under validation. The `unsafe` audit then found that queueing an object and
+    recording a submission must not interleave. Both happen under the queue lock (lock order
+    `queue` → `retired` → `textures`), and readback registers like an encoder.
 - Every object takes a **debug name** at creation (ADR-0003, ADR-0010).
 
 ### 2. Bind model: bindless

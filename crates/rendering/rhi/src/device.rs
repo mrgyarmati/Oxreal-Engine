@@ -94,7 +94,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::InvalidUsage`] for a stale handle, or [`RhiError::DeviceLost`].
+    /// [`RhiError::InvalidUsage`] for a stale handle or while a frame of the surface is open
+    /// (end it first), or [`RhiError::DeviceLost`].
     fn destroy_surface(&self, surface: SurfaceHandle) -> Result<(), RhiError>;
 
     /// Starts a frame on `surface`. Returns `Ok(None)` when nothing should be drawn this time,
@@ -103,7 +104,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::DeviceLost`], [`RhiError::InvalidUsage`] for a stale handle, or another
+    /// [`RhiError::DeviceLost`], [`RhiError::InvalidUsage`] for a stale handle or while another
+    /// frame of the surface is still open (each surface has at most one), or another
     /// [`RhiError`] from the backend.
     fn begin_frame(&self, surface: SurfaceHandle) -> Result<Option<Frame>, RhiError>;
 
@@ -111,8 +113,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] for a zero size or an empty
-    /// usage.
+    /// [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] for a zero size, a size above the
+    /// device's limit, or an empty usage.
     fn create_texture(&self, desc: &TextureDesc<'_>) -> Result<TextureHandle, RhiError>;
 
     /// Destroys a texture once the GPU has finished every submission that may use it
@@ -127,8 +129,9 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::InvalidUsage`] for invalid descriptions (for example too many push-constant
-    /// bytes), or [`RhiError::Backend`] if the driver rejects the shaders.
+    /// [`RhiError::InvalidUsage`] for invalid descriptions: too many push-constant bytes or color
+    /// formats, or shader code with a bad header, a missing entry point, or a push-constant block
+    /// larger than declared; or [`RhiError::Backend`] if the driver rejects the shaders.
     fn create_render_pipeline(
         &self,
         desc: &RenderPipelineDesc<'_>,
@@ -161,7 +164,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::DeviceLost`].
+    /// [`RhiError::DeviceLost`], or [`RhiError::InvalidUsage`] for an id that was never returned by
+    /// [`Device::submit`].
     fn wait_for_submission(&self, submission: SubmissionId) -> Result<(), RhiError>;
 
     /// Copies a texture's pixels to the CPU: tightly packed rows, top row first, in the
@@ -170,7 +174,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::InvalidUsage`] for a stale handle or missing usage, or a device error.
+    /// [`RhiError::InvalidUsage`] for a stale handle, missing usage, or a texture an unsubmitted
+    /// encoder still uses; or a device error.
     fn read_texture(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError>;
 
     /// Submits the frame's commands and presents its backbuffer.
@@ -178,7 +183,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// [`RhiError::DeviceLost`] / [`RhiError::OutOfMemory`] from submission or presentation, or
-    /// [`RhiError::InvalidUsage`] if misuse was detected while recording. The frame is still
-    /// submitted in that case, so presentation continues.
+    /// [`RhiError::InvalidUsage`] if misuse was detected while recording (the frame is still
+    /// submitted, so presentation continues) or if the frame isn't the surface's open frame. If
+    /// submission fails, the swapchain is recreated at the next [`Device::begin_frame`].
     fn end_frame(&self, frame: Frame) -> Result<(), RhiError>;
 }

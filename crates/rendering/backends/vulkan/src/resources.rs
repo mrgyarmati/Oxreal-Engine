@@ -2,19 +2,21 @@
 //! ADR-0017).
 
 use std::ffi::CString;
+use std::sync::Arc;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use oxreal_rhi::{
     CommandEncoder, CullMode, MAX_PUSH_CONSTANT_BYTES, PipelineHandle, RenderPipelineDesc,
-    RhiError, ShaderCode, SubmissionId, TextureDesc, TextureFormat, TextureHandle, TextureUsage,
+    RhiError, ShaderEntry, SubmissionId, TextureDesc, TextureFormat, TextureHandle, TextureUsage,
 };
 
-use crate::device::VulkanDevice;
-use crate::encoder::VulkanEncoder;
+use crate::device::{QueueState, Shared, lock};
+use crate::encoder::{Registration, VulkanEncoder};
 use crate::error::from_vk;
-use crate::present::{Texture, color_subresource, lock};
+use crate::present::{SurfaceObjects, Texture, color_subresource};
+use crate::spirv::{self, Stage};
 
 /// Stages that may read push constants. One range for every pipeline keeps all pipelines
 /// layout-compatible (ADR-0016 §2).
@@ -27,9 +29,10 @@ pub(crate) const PUSH_CONSTANT_STAGES: vk::ShaderStageFlags = vk::ShaderStageFla
 pub(crate) struct Pipeline {
     pub(crate) pipeline: vk::Pipeline,
     pub(crate) push_constant_bytes: u32,
+    pub(crate) color_formats: Vec<TextureFormat>,
 }
 
-/// An object whose destruction waits for the GPU (ADR-0016 §1).
+/// An object whose destruction waits until nothing can use it any more (ADR-0016 §1).
 #[derive(Debug)]
 pub(crate) enum Retired {
     Texture {
@@ -37,8 +40,13 @@ pub(crate) enum Retired {
         view: vk::ImageView,
         allocation: Allocation,
     },
+    Buffer {
+        buffer: vk::Buffer,
+        allocation: Allocation,
+    },
     Pipeline(vk::Pipeline),
     CommandPool(vk::CommandPool),
+    Surface(Box<SurfaceObjects>),
 }
 
 /// The Vulkan format for `format`, or an error for formats this backend doesn't support yet.
@@ -77,7 +85,7 @@ fn vk_usage(usage: TextureUsage) -> vk::ImageUsageFlags {
     flags
 }
 
-fn invalid(details: impl Into<String>) -> RhiError {
+pub(crate) fn invalid(details: impl Into<String>) -> RhiError {
     RhiError::InvalidUsage {
         details: details.into(),
     }
@@ -91,18 +99,23 @@ pub(crate) fn create_pipeline_layout(device: &ash::Device) -> Result<vk::Pipelin
         .offset(0)
         .size(MAX_PUSH_CONSTANT_BYTES)];
     let info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges);
-    // SAFETY: the device is alive. Every conformant device supports 128 bytes of push constants.
+    // SAFETY: the device is alive. 128 bytes is the minimum maxPushConstantsSize every
+    // conformant device supports.
     unsafe { device.create_pipeline_layout(&info, None) }
         .map_err(|e| from_vk("vkCreatePipelineLayout", e))
 }
 
-impl VulkanDevice {
-    pub(crate) fn create_texture_impl(
-        &self,
-        desc: &TextureDesc<'_>,
-    ) -> Result<TextureHandle, RhiError> {
+impl Shared {
+    pub(crate) fn create_texture(&self, desc: &TextureDesc<'_>) -> Result<TextureHandle, RhiError> {
         if desc.width == 0 || desc.height == 0 {
             return Err(invalid(format!("texture {:?} has zero size", desc.label)));
+        }
+        let max = self.limits.max_image_dimension_2d;
+        if desc.width > max || desc.height > max {
+            return Err(invalid(format!(
+                "texture {:?} is {}×{}, above this device's limit of {max} pixels per side",
+                desc.label, desc.width, desc.height
+            )));
         }
         let usage = vk_usage(desc.usage);
         if usage.is_empty() {
@@ -128,8 +141,9 @@ impl VulkanDevice {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        // SAFETY: the device is alive, and the parameters describe a valid 2D image of a format
-        // every Vulkan 1.3 device supports for these usages.
+        // SAFETY: the device is alive. The size is non-zero and within maxImageDimension2D
+        // (checked above). The format is one of the 8-bit RGBA/BGRA formats the Vulkan spec
+        // requires to support COLOR_ATTACHMENT and TRANSFER_SRC with optimal tiling.
         let image = unsafe { self.raw().create_image(&info, None) }
             .map_err(|e| from_vk("vkCreateImage", e))?;
         // SAFETY: `image` was just created.
@@ -171,7 +185,7 @@ impl VulkanDevice {
         };
         self.name_object(image, desc.label);
         self.name_object(view, &format!("{} view", desc.label));
-        let raw = lock(&self.textures, "texture table")?.insert(Texture {
+        let raw = lock(&self.textures).insert(Texture {
             image,
             view,
             extent,
@@ -179,12 +193,14 @@ impl VulkanDevice {
             format: desc.format,
             usage,
             allocation: Some(allocation),
+            user: None,
+            frame_owner: None,
         });
         Ok(TextureHandle::from_raw(raw))
     }
 
-    pub(crate) fn destroy_texture_impl(&self, texture: TextureHandle) -> Result<(), RhiError> {
-        let mut textures = lock(&self.textures, "texture table")?;
+    pub(crate) fn destroy_texture(&self, texture: TextureHandle) -> Result<(), RhiError> {
+        let mut textures = lock(&self.textures);
         match textures.get(texture.to_raw()) {
             None => return Err(invalid(format!("{texture:?} does not exist"))),
             Some(t) if t.allocation.is_none() => {
@@ -211,7 +227,7 @@ impl VulkanDevice {
         Ok(())
     }
 
-    pub(crate) fn create_render_pipeline_impl(
+    pub(crate) fn create_render_pipeline(
         &self,
         desc: &RenderPipelineDesc<'_>,
     ) -> Result<PipelineHandle, RhiError> {
@@ -223,14 +239,21 @@ impl VulkanDevice {
                 desc.label, desc.push_constant_bytes
             )));
         }
-        if desc.color_formats.is_empty() {
+        let max_attachments = self.limits.max_color_attachments as usize;
+        if desc.color_formats.is_empty() || desc.color_formats.len() > max_attachments {
             return Err(invalid(format!(
-                "pipeline {:?} has no color formats",
-                desc.label
+                "pipeline {:?} has {} color formats; 1 to {max_attachments} are allowed",
+                desc.label,
+                desc.color_formats.len()
             )));
         }
-        let vertex_module = self.shader_module(desc.label, desc.vertex.code)?;
-        let pixel_module = match self.shader_module(desc.label, desc.pixel.code) {
+        let formats = desc
+            .color_formats
+            .iter()
+            .map(|&f| vk_format(f))
+            .collect::<Result<Vec<vk::Format>, RhiError>>()?;
+        let vertex_module = self.shader_module(desc, &desc.vertex, Stage::Vertex)?;
+        let pixel_module = match self.shader_module(desc, &desc.pixel, Stage::Fragment) {
             Ok(module) => module,
             Err(error) => {
                 // SAFETY: the module is unused and destroyed exactly once.
@@ -238,7 +261,7 @@ impl VulkanDevice {
                 return Err(error);
             }
         };
-        let result = self.build_pipeline(desc, vertex_module, pixel_module);
+        let result = self.build_pipeline(desc, &formats, vertex_module, pixel_module);
         // SAFETY: modules may be destroyed once pipeline creation has returned.
         unsafe {
             self.raw().destroy_shader_module(vertex_module, None);
@@ -246,37 +269,59 @@ impl VulkanDevice {
         }
         let pipeline = result?;
         self.name_object(pipeline, desc.label);
-        let raw = lock(&self.pipelines, "pipeline table")?.insert(Pipeline {
+        let raw = lock(&self.pipelines).insert(Pipeline {
             pipeline,
             push_constant_bytes: desc.push_constant_bytes,
+            color_formats: desc.color_formats.to_vec(),
         });
         Ok(PipelineHandle::from_raw(raw))
     }
 
+    /// Checks one stage's SPIR-V (see [`spirv`]) and creates its module.
     fn shader_module(
         &self,
-        label: &str,
-        code: ShaderCode<'_>,
+        desc: &RenderPipelineDesc<'_>,
+        entry: &ShaderEntry<'_>,
+        stage: Stage,
     ) -> Result<vk::ShaderModule, RhiError> {
-        let ShaderCode::Spirv(words) = code else {
+        let label = desc.label;
+        let Some(words) = entry.code.as_spirv() else {
             return Err(invalid(format!(
                 "pipeline {label:?}: the Vulkan backend needs SPIR-V shader code"
             )));
         };
-        if words.is_empty() {
-            return Err(invalid(format!("pipeline {label:?}: empty SPIR-V")));
+        let info = spirv::inspect(words)
+            .map_err(|problem| invalid(format!("pipeline {label:?}: {problem}")))?;
+        if !info.has_entry_point(stage, entry.entry_point) {
+            let found: Vec<String> = info
+                .entry_points
+                .iter()
+                .map(|(s, n)| format!("{n} ({s:?})"))
+                .collect();
+            return Err(invalid(format!(
+                "pipeline {label:?}: no {stage:?} entry point {:?} in its shader code; it has: {}",
+                entry.entry_point,
+                found.join(", ")
+            )));
         }
-        let info = vk::ShaderModuleCreateInfo::default().code(words);
-        // SAFETY: the device is alive and `words` is alive across the call. Malformed SPIR-V is
-        // rejected by the driver (and reported by validation) rather than causing UB, because the
-        // shader compiler validated it.
-        unsafe { self.raw().create_shader_module(&info, None) }
+        if info.push_constant_bytes > desc.push_constant_bytes {
+            return Err(invalid(format!(
+                "pipeline {label:?}: its shaders read {} push-constant bytes, but it declares {}",
+                info.push_constant_bytes, desc.push_constant_bytes
+            )));
+        }
+        let create_info = vk::ShaderModuleCreateInfo::default().code(words);
+        // SAFETY: the device is alive and `words` outlives the call. The words are valid SPIR-V
+        // for Vulkan 1.3: `ShaderCode::from_spirv_unchecked` makes that the caller's promise,
+        // and `spirv::inspect` checked the header and instruction framing.
+        unsafe { self.raw().create_shader_module(&create_info, None) }
             .map_err(|e| from_vk("vkCreateShaderModule", e))
     }
 
     fn build_pipeline(
         &self,
         desc: &RenderPipelineDesc<'_>,
+        formats: &[vk::Format],
         vertex: vk::ShaderModule,
         pixel: vk::ShaderModule,
     ) -> Result<vk::Pipeline, RhiError> {
@@ -321,8 +366,7 @@ impl VulkanDevice {
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> = desc
-            .color_formats
+        let blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> = formats
             .iter()
             .map(|_| {
                 vk::PipelineColorBlendAttachmentState::default()
@@ -334,13 +378,8 @@ impl VulkanDevice {
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = desc
-            .color_formats
-            .iter()
-            .map(|&f| vk_format(f))
-            .collect::<Result<Vec<vk::Format>, RhiError>>()?;
         let mut rendering =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(formats);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
@@ -352,9 +391,12 @@ impl VulkanDevice {
             .dynamic_state(&dynamic)
             .layout(self.pipeline_layout)
             .push_next(&mut rendering);
-        // SAFETY: every structure referenced by `info` is alive across the call. The modules and
-        // layout belong to this device. Dynamic rendering is enabled (a required feature), so a
-        // null render pass with PipelineRenderingCreateInfo is valid.
+        // SAFETY: every structure referenced by `info` (stages, entry-point names, states,
+        // formats) is alive across the call. The modules and layout belong to this device, the
+        // entry points exist for their stages, and the shaders' push constants fit the layout's
+        // range (checked in `shader_module`). Dynamic rendering is enabled (a required feature),
+        // so a null render pass with PipelineRenderingCreateInfo is valid, and the attachment
+        // count is within maxColorAttachments.
         let pipelines = unsafe {
             self.raw()
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
@@ -366,30 +408,27 @@ impl VulkanDevice {
             .ok_or_else(|| invalid("vkCreateGraphicsPipelines returned no pipeline"))
     }
 
-    pub(crate) fn destroy_render_pipeline_impl(
-        &self,
-        pipeline: PipelineHandle,
-    ) -> Result<(), RhiError> {
-        let removed = lock(&self.pipelines, "pipeline table")?
+    pub(crate) fn destroy_render_pipeline(&self, pipeline: PipelineHandle) -> Result<(), RhiError> {
+        let removed = lock(&self.pipelines)
             .remove(pipeline.to_raw())
             .ok_or_else(|| invalid(format!("{pipeline:?} does not exist")))?;
         self.retire(Retired::Pipeline(removed.pipeline))
     }
 
-    pub(crate) fn create_encoder_impl(
-        &self,
+    pub(crate) fn create_encoder(
+        shared: &Arc<Self>,
         label: &str,
     ) -> Result<Box<dyn CommandEncoder>, RhiError> {
-        self.collect_garbage()?;
-        let (pool, cmd) = self.begin_one_time_commands(label)?;
+        shared.collect_garbage()?;
+        let (pool, cmd) = shared.begin_one_time_commands(label)?;
         Ok(Box::new(VulkanEncoder::standalone(
-            self.encoder_context(),
+            Arc::clone(shared),
             cmd,
             pool,
         )))
     }
 
-    pub(crate) fn submit_impl(
+    pub(crate) fn submit(
         &self,
         encoder: Box<dyn CommandEncoder>,
     ) -> Result<SubmissionId, RhiError> {
@@ -402,31 +441,39 @@ impl VulkanDevice {
                 "frame encoders are submitted by end_frame, not submit",
             ));
         };
-        let result = self.submit_one_time_commands(pool, cmd);
-        if let Ok(id) = result {
-            encoder.mark_submitted(id.0);
-        }
+        encoder.finish_recording();
+        let value = self.submit_one_time_commands(pool, cmd, Some(encoder.registration()))?;
         let misuse = encoder.take_misuse();
-        let id = result?;
         if misuse.is_empty() {
-            Ok(id)
+            Ok(SubmissionId(value))
         } else {
             Err(invalid(misuse.join("; ")))
         }
     }
 
-    pub(crate) fn read_texture_impl(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError> {
-        let (image, extent, layout, format) = {
-            let textures = lock(&self.textures, "texture table")?;
+    pub(crate) fn read_texture(
+        shared: &Arc<Self>,
+        texture: TextureHandle,
+    ) -> Result<Vec<u8>, RhiError> {
+        // Registered like an encoder, so destroying the texture meanwhile waits for this copy,
+        // and claiming it keeps its layout tracking in submission order (ADR-0016 §1).
+        let mut registration = Registration::new(shared);
+        let (image, extent, old_layout, format) = {
+            let mut textures = lock(&shared.textures);
             let t = textures
-                .get(texture.to_raw())
+                .get_mut(texture.to_raw())
                 .ok_or_else(|| invalid(format!("{texture:?} does not exist")))?;
             if !t.usage.contains(vk::ImageUsageFlags::TRANSFER_SRC) {
                 return Err(invalid(format!(
                     "{texture:?} was not created with TextureUsage::COPY_SOURCE"
                 )));
             }
-            (t.image, t.extent, t.layout, t.format)
+            registration
+                .claim(texture.to_raw(), t)
+                .map_err(|problem| invalid(format!("read_texture: {problem}")))?;
+            let old = t.layout;
+            t.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+            (t.image, t.extent, old, t.format)
         };
         let size = u64::from(extent.width)
             * u64::from(extent.height)
@@ -437,49 +484,69 @@ impl VulkanDevice {
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: the device is alive and the size is non-zero (textures can't be empty).
-        let buffer = unsafe { self.raw().create_buffer(&buffer_info, None) }
+        let buffer = unsafe { shared.raw().create_buffer(&buffer_info, None) }
             .map_err(|e| from_vk("vkCreateBuffer", e))?;
         // SAFETY: `buffer` was just created.
-        let requirements = unsafe { self.raw().get_buffer_memory_requirements(buffer) };
-        // GpuToCpu memory is always HOST_COHERENT in gpu-allocator, so no invalidation is needed.
+        let requirements = unsafe { shared.raw().get_buffer_memory_requirements(buffer) };
+        // GpuToCpu memory is always HOST_COHERENT in gpu-allocator 0.28 (preferred and required
+        // flags), so no vkInvalidateMappedMemoryRanges is needed before reading.
         let allocation =
-            match self.allocate("readback", requirements, MemoryLocation::GpuToCpu, true) {
+            match shared.allocate("readback", requirements, MemoryLocation::GpuToCpu, true) {
                 Ok(allocation) => allocation,
                 Err(error) => {
                     // SAFETY: unused and destroyed exactly once.
-                    unsafe { self.raw().destroy_buffer(buffer, None) };
+                    unsafe { shared.raw().destroy_buffer(buffer, None) };
                     return Err(error);
                 }
             };
 
-        let copied = self.copy_texture_to_buffer(image, extent, layout, buffer, &allocation);
-        let pixels = copied.and_then(|()| {
-            allocation
-                .mapped_slice()
-                .and_then(|bytes| bytes.get(..usize::try_from(size).ok()?))
-                .map(<[u8]>::to_vec)
-                .ok_or_else(|| invalid("readback memory is not mapped"))
-        });
-        // SAFETY: the copy has completed (waited on) or failed, so the buffer is unused.
-        unsafe { self.raw().destroy_buffer(buffer, None) };
-        self.free(allocation);
-        if pixels.is_ok()
-            && let Ok(mut textures) = self.textures.lock()
-            && let Some(t) = textures.get_mut(texture.to_raw())
-        {
-            t.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+        let submitted = shared.copy_texture_to_buffer(
+            image,
+            extent,
+            old_layout,
+            buffer,
+            &allocation,
+            &mut registration,
+        );
+        let value = match submitted {
+            Ok(value) => value,
+            Err(error) => {
+                // SAFETY: nothing was submitted, so the GPU never used the buffer. Destroyed
+                // exactly once, then its memory freed.
+                unsafe { shared.raw().destroy_buffer(buffer, None) };
+                shared.free(allocation);
+                return Err(error); // `registration` restores the texture's layout.
+            }
+        };
+        if let Err(error) = shared.wait_timeline(value) {
+            // The copy may still be writing the buffer: it goes once the GPU is done.
+            lock(&shared.retired)
+                .retire_after_submission(Retired::Buffer { buffer, allocation }, value);
+            return Err(error);
         }
+        let pixels = allocation
+            .mapped_slice()
+            .and_then(|bytes| bytes.get(..usize::try_from(size).ok()?))
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| invalid("readback memory is not mapped"));
+        // SAFETY: the copy has completed (its timeline value was reached), so the buffer is
+        // unused. Destroyed exactly once, then its memory freed.
+        unsafe { shared.raw().destroy_buffer(buffer, None) };
+        shared.free(allocation);
+        shared.collect_garbage()?;
         pixels
     }
 
+    /// Records and submits the readback copy. Returns its timeline value.
     fn copy_texture_to_buffer(
         &self,
         image: vk::Image,
         extent: vk::Extent2D,
-        layout: vk::ImageLayout,
+        old_layout: vk::ImageLayout,
         buffer: vk::Buffer,
         allocation: &Allocation,
-    ) -> Result<(), RhiError> {
+        registration: &mut Registration,
+    ) -> Result<u64, RhiError> {
         // SAFETY: the allocation satisfies the buffer's requirements and is bound exactly once.
         unsafe {
             self.raw()
@@ -493,7 +560,7 @@ impl VulkanDevice {
             .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::COPY)
             .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-            .old_layout(layout)
+            .old_layout(old_layout)
             .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
             .image(image)
             .subresource_range(color_subresource())];
@@ -515,9 +582,11 @@ impl VulkanDevice {
             .dst_access_mask(vk::AccessFlags2::HOST_READ)
             .buffer(buffer)
             .size(vk::WHOLE_SIZE)];
-        // SAFETY: `cmd` is recording. The image and buffer are alive, and the barriers make the
-        // previous writes visible to the copy and the copy visible to the host read after the
-        // wait below.
+        // SAFETY: `cmd` is recording. The image can't be destroyed before this submission
+        // completes (it's claimed by `registration`), and `old_layout` is its layout at this
+        // point in submission order (no other unsubmitted encoder may use it). The barriers
+        // make earlier writes visible to the copy, and the copy visible to the host read after
+        // the timeline wait.
         unsafe {
             self.raw().cmd_pipeline_barrier2(
                 cmd,
@@ -535,16 +604,35 @@ impl VulkanDevice {
                 &vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barrier),
             );
         }
-        let id = self.submit_one_time_commands(pool, cmd)?;
-        self.wait_for_submission_impl(id)
+        self.submit_one_time_commands(pool, cmd, Some(registration))
     }
 
-    pub(crate) fn wait_for_submission_impl(
-        &self,
-        submission: SubmissionId,
-    ) -> Result<(), RhiError> {
+    pub(crate) fn wait_for_submission(&self, submission: SubmissionId) -> Result<(), RhiError> {
+        let last = lock(&self.queue).timeline_value;
+        if submission.0 > last {
+            return Err(invalid(format!(
+                "{submission:?} was never submitted (the last submission is {last})"
+            )));
+        }
         self.wait_timeline(submission.0)?;
         self.collect_garbage()
+    }
+
+    /// Blocks until the timeline reaches `value`, which must have been submitted already.
+    pub(crate) fn wait_timeline(&self, value: u64) -> Result<(), RhiError> {
+        if value == 0 {
+            return Ok(());
+        }
+        let semaphores = [self.timeline];
+        let values = [value];
+        let info = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        // SAFETY: the timeline semaphore is alive. Every caller passes a value that a successful
+        // submission will signal (`wait_for_submission` checks it), so the wait ends unless the
+        // device is lost, which the result reports.
+        unsafe { self.raw().wait_semaphores(&info, u64::MAX) }
+            .map_err(|e| from_vk("vkWaitSemaphores", e))
     }
 
     /// Creates a transient command pool with one command buffer in the recording state.
@@ -588,53 +676,90 @@ impl VulkanDevice {
         }
     }
 
-    /// Ends, submits and retires a one-time command buffer. The pool is destroyed once the GPU
-    /// has finished.
+    /// Ends and submits a one-time command buffer, then retires its pool. Returns the
+    /// submission's timeline value.
     fn submit_one_time_commands(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
-    ) -> Result<SubmissionId, RhiError> {
-        // SAFETY: `cmd` is recording and has no open render pass (the guard closes passes).
+        registration: Option<&mut Registration>,
+    ) -> Result<u64, RhiError> {
+        // SAFETY: `cmd` is recording and no render pass is open: encoders close any open pass in
+        // `finish_recording` before this, and readback commands never open one.
         if let Err(e) = unsafe { self.raw().end_command_buffer(cmd) } {
-            // SAFETY: never submitted.
+            // SAFETY: never submitted. Destroying the pool frees its buffer.
             unsafe { self.raw().destroy_command_pool(pool, None) };
             return Err(from_vk("vkEndCommandBuffer", e));
         }
-        let mut queue = lock(&self.queue, "queue")?;
+        let mut queue = lock(&self.queue);
+        match self.submit_locked(&mut queue, Some(cmd), &[], &[]) {
+            Ok(value) => {
+                // Still under the queue lock (lock order queue → retired), so no retirement can
+                // slip between this submission and its bookkeeping.
+                if let Some(registration) = registration {
+                    registration.submitted(value);
+                }
+                lock(&self.retired).retire_after_submission(Retired::CommandPool(pool), value);
+                Ok(value)
+            }
+            Err(error) => {
+                drop(queue);
+                // SAFETY: the submission failed, so the command buffer never became pending
+                // (out of memory), or the device is lost and executes nothing more. Either way
+                // the pool can be destroyed.
+                unsafe { self.raw().destroy_command_pool(pool, None) };
+                Err(error)
+            }
+        }
+    }
+
+    /// Submits `cmd` (if any) on the queue, waiting on `waits`, signalling `signals` and the
+    /// next timeline value. `queue` is the locked queue state. Returns the new timeline value.
+    pub(crate) fn submit_locked(
+        &self,
+        queue: &mut QueueState,
+        cmd: Option<vk::CommandBuffer>,
+        waits: &[vk::SemaphoreSubmitInfo<'_>],
+        signals: &[vk::SemaphoreSubmitInfo<'_>],
+    ) -> Result<u64, RhiError> {
         let value = queue.timeline_value + 1;
-        let command_buffers = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-        let signals = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(self.timeline)
-            .value(value)
-            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+        let command_buffers: Vec<vk::CommandBufferSubmitInfo<'_>> = cmd
+            .into_iter()
+            .map(|cmd| vk::CommandBufferSubmitInfo::default().command_buffer(cmd))
+            .collect();
+        let mut all_signals = signals.to_vec();
+        all_signals.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.timeline)
+                .value(value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        );
         let submit = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(waits)
             .command_buffer_infos(&command_buffers)
-            .signal_semaphore_infos(&signals);
-        // SAFETY: the queue is externally synchronized by the lock. `cmd` is fully recorded. The
-        // timeline value increases monotonically.
-        let submitted = unsafe {
+            .signal_semaphore_infos(&all_signals);
+        // SAFETY: the queue is externally synchronized: the caller holds its lock. Command
+        // buffers are fully recorded. The timeline value increases monotonically. Callers
+        // guarantee the binary semaphores in `waits` have a pending signal and those in
+        // `signals` are unsignalled.
+        unsafe {
             self.raw()
                 .queue_submit2(queue.queue, &[submit], vk::Fence::null())
-        };
-        if let Err(e) = submitted {
-            drop(queue);
-            // SAFETY: the submission failed, so the buffer is not pending.
-            unsafe { self.raw().destroy_command_pool(pool, None) };
-            return Err(from_vk("vkQueueSubmit2", e));
         }
+        .map_err(|e| from_vk("vkQueueSubmit2", e))?;
         queue.timeline_value = value;
-        drop(queue);
-        lock(&self.retired, "retire queue")?
-            .retire_after_submission(Retired::CommandPool(pool), value);
-        Ok(SubmissionId(value))
+        Ok(value)
     }
 
     /// Queues `object` for destruction after every submission made so far, and every encoder
     /// still recording, has finished with it (see [`crate::retire`]).
     pub(crate) fn retire(&self, object: Retired) -> Result<(), RhiError> {
-        let after = lock(&self.queue, "queue")?.timeline_value;
-        lock(&self.retired, "retire queue")?.retire(object, after);
+        {
+            // Hold the queue lock while queueing (lock order queue → retired), so no submission
+            // can complete its bookkeeping between reading the value and queueing the object.
+            let queue = lock(&self.queue);
+            lock(&self.retired).retire(object, queue.timeline_value);
+        }
         self.collect_garbage()
     }
 
@@ -643,14 +768,16 @@ impl VulkanDevice {
         // SAFETY: the timeline semaphore is alive.
         let completed = unsafe { self.raw().get_semaphore_counter_value(self.timeline) }
             .map_err(|e| from_vk("vkGetSemaphoreCounterValue", e))?;
-        let ready = lock(&self.retired, "retire queue")?.take_ready(completed);
+        let ready = lock(&self.retired).take_ready(completed);
         for object in ready {
             self.destroy_retired(object);
         }
         Ok(())
     }
 
-    /// Destroys a retired object now. The GPU must have finished with it.
+    /// Destroys a retired object now. Nothing may use it any more: its timeline value was
+    /// reached and no encoder that could reference it is still recording, or the device is
+    /// idle and being torn down.
     pub(crate) fn destroy_retired(&self, object: Retired) {
         match object {
             Retired::Texture {
@@ -658,29 +785,36 @@ impl VulkanDevice {
                 view,
                 allocation,
             } => {
-                // SAFETY: the GPU has finished every submission that could use them (timeline
-                // reached). Each is destroyed exactly once, and the memory is freed after.
+                // SAFETY: unused, per this function's contract. Each is destroyed exactly once,
+                // and the memory is freed after the image.
                 unsafe {
                     self.raw().destroy_image_view(view, None);
                     self.raw().destroy_image(image, None);
                 }
                 self.free(allocation);
             }
+            Retired::Buffer { buffer, allocation } => {
+                // SAFETY: as above.
+                unsafe { self.raw().destroy_buffer(buffer, None) };
+                self.free(allocation);
+            }
             // SAFETY: as above.
             Retired::Pipeline(pipeline) => unsafe { self.raw().destroy_pipeline(pipeline, None) },
-            // SAFETY: as above. Destroying the pool frees its command buffers.
+            // SAFETY: as above. Destroying the pool frees its command buffers, which may still be
+            // in the recording state (dropped encoders); that is allowed.
             Retired::CommandPool(pool) => unsafe { self.raw().destroy_command_pool(pool, None) },
+            Retired::Surface(objects) => self.destroy_surface_objects(*objects),
         }
     }
 
-    fn allocate(
+    pub(crate) fn allocate(
         &self,
         name: &str,
         requirements: vk::MemoryRequirements,
         location: MemoryLocation,
         linear: bool,
     ) -> Result<Allocation, RhiError> {
-        let mut allocator = lock(&self.allocator, "allocator")?;
+        let mut allocator = lock(&self.allocator);
         let allocator = allocator
             .as_mut()
             .ok_or_else(|| invalid("the allocator was already shut down"))?;
@@ -706,11 +840,7 @@ impl VulkanDevice {
     }
 
     pub(crate) fn free(&self, allocation: Allocation) {
-        let freed = match self.allocator.lock() {
-            Ok(mut guard) => guard.as_mut().map(|a| a.free(allocation)),
-            Err(poisoned) => poisoned.into_inner().as_mut().map(|a| a.free(allocation)),
-        };
-        if let Some(Err(e)) = freed {
+        if let Some(Err(e)) = lock(&self.allocator).as_mut().map(|a| a.free(allocation)) {
             oxreal_diagnostics::warn!(error = %e, "freeing GPU memory failed");
         }
     }

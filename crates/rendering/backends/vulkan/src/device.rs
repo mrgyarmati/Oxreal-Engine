@@ -1,7 +1,11 @@
 //! GPU selection, the logical device and the memory allocator.
+//!
+//! The device's state lives in [`Shared`], behind an `Arc` that every encoder also holds. The
+//! `VkDevice`, its tables and its allocator therefore outlive any encoder still recording, even
+//! after the [`VulkanDevice`] itself is dropped.
 
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
@@ -12,13 +16,25 @@ use oxreal_rhi::{
     SurfaceDesc, SurfaceHandle, SurfaceTarget, TextureDesc, TextureHandle, select_adapter,
 };
 
-use crate::encoder::EncoderContext;
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
 use crate::instance::{VulkanInstance, format_version};
 use crate::present::{Surface, Texture};
 use crate::resources::{Pipeline, Retired, create_pipeline_layout};
 use crate::retire::RetireQueue;
+
+/// Locks `mutex`, recovering it if a panic poisoned it.
+///
+/// No critical section in this crate can panic between two related updates. They call no user
+/// code, and allocation failure aborts. So a poisoned lock still guards consistent data, and
+/// recovering it is correct. Turning poisoning into errors instead would leak the Vulkan
+/// objects that were being registered or destroyed, and turn one panic into failures
+/// everywhere.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Creates a Vulkan device according to `desc`.
 ///
@@ -94,17 +110,6 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
     // SAFETY: queue family `queue_family`, index 0, was requested in `create_logical_device`.
     let queue = unsafe { logical.device.get_device_queue(queue_family, 0) };
 
-    let loaders = Loaders {
-        surface: instance
-            .surface_support()
-            .then(|| ash::khr::surface::Instance::new(&instance.entry, &instance.instance)),
-        swapchain: swapchain_available
-            .then(|| ash::khr::swapchain::Device::new(&instance.instance, &logical.device)),
-        debug: instance
-            .debug_utils()
-            .then(|| ash::ext::debug_utils::Device::new(&instance.instance, &logical.device)),
-    };
-
     let allocator = Allocator::new(&AllocatorCreateDesc {
         instance: instance.instance.clone(),
         device: logical.device.clone(),
@@ -149,34 +154,40 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         "Vulkan device created"
     );
 
-    let device = VulkanDevice {
-        surfaces: Mutex::new(HandlePool::new()),
-        textures: Arc::new(Mutex::new(HandlePool::new())),
-        pipelines: Arc::new(Mutex::new(HandlePool::new())),
-        retired: Arc::new(Mutex::new(RetireQueue::default())),
-        pipeline_layout,
+    let shared = Shared {
+        textures: Mutex::new(HandlePool::new()),
+        pipelines: Mutex::new(HandlePool::new()),
+        retired: Mutex::new(RetireQueue::default()),
         queue: Mutex::new(QueueState {
             queue,
             timeline_value: 0,
         }),
         timeline,
-        loaders,
+        pipeline_layout,
         allocator: Mutex::new(Some(allocator)),
+        limits: Limits {
+            max_image_dimension_2d: probe.limits.max_image_dimension2_d,
+            max_color_attachments: probe.limits.max_color_attachments,
+        },
         queue_family,
         physical_device: probe.physical_device,
-        adapter_info,
+        debug: instance
+            .debug_utils()
+            .then(|| ash::ext::debug_utils::Device::new(&instance.instance, &logical.device)),
+        surface_loader: instance
+            .surface_support()
+            .then(|| ash::khr::surface::Instance::new(&instance.entry, &instance.instance)),
+        swapchain_loader: swapchain_available
+            .then(|| ash::khr::swapchain::Device::new(&instance.instance, &logical.device)),
         logical,
         instance,
     };
-    device.name_object(timeline, "Oxreal queue timeline");
-    Ok(device)
-}
-
-/// Extension function tables, present when their extension is enabled.
-pub(crate) struct Loaders {
-    pub(crate) surface: Option<ash::khr::surface::Instance>,
-    pub(crate) swapchain: Option<ash::khr::swapchain::Device>,
-    pub(crate) debug: Option<ash::ext::debug_utils::Device>,
+    shared.name_object(timeline, "Oxreal queue timeline");
+    Ok(VulkanDevice {
+        surfaces: Mutex::new(HandlePool::new()),
+        shared: Arc::new(shared),
+        adapter_info,
+    })
 }
 
 /// The queue and its timeline. Vulkan requires external synchronization for queue access, so
@@ -187,31 +198,43 @@ pub(crate) struct QueueState {
     pub(crate) timeline_value: u64,
 }
 
-/// A Vulkan device: the selected GPU, a graphics+compute queue, the memory allocator, and the
-/// surfaces and textures created on it.
+/// Device limits the backend checks requests against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub(crate) max_image_dimension_2d: u32,
+    pub(crate) max_color_attachments: u32,
+}
+
+/// The device state that encoders share with the device.
 ///
-/// Teardown order: `Drop` waits for the GPU, destroys every surface (swapchains, views,
-/// semaphores, command pools) and the timeline, and frees the allocator. Then the fields drop in
-/// declaration order, destroying the logical device and finally the instance.
-pub struct VulkanDevice {
-    pub(crate) surfaces: Mutex<HandlePool<Surface>>,
-    pub(crate) textures: Arc<Mutex<HandlePool<Texture>>>,
-    pub(crate) pipelines: Arc<Mutex<HandlePool<Pipeline>>>,
-    pub(crate) retired: Arc<Mutex<RetireQueue<Retired>>>,
-    /// The layout every pipeline shares (ADR-0016 §2).
-    pub(crate) pipeline_layout: vk::PipelineLayout,
+/// **Lock order:** `surfaces` (on [`VulkanDevice`]) → `queue` → `retired` → `textures` →
+/// `pipelines` → `allocator`. A thread holding one of these locks only takes locks to its right.
+/// `queue` → `retired` is what makes deferred destruction exact: "read the timeline value and
+/// queue an object" and "submit and record the submission" never interleave.
+///
+/// Teardown (`Drop`): wait for the GPU, then destroy retired objects (surfaces included), live
+/// textures and pipelines, the pipeline layout and the timeline, and free the allocator. Then
+/// the fields drop in declaration order: the logical device, then the instance.
+pub(crate) struct Shared {
+    pub(crate) textures: Mutex<HandlePool<Texture>>,
+    pub(crate) pipelines: Mutex<HandlePool<Pipeline>>,
+    pub(crate) retired: Mutex<RetireQueue<Retired>>,
     pub(crate) queue: Mutex<QueueState>,
     pub(crate) timeline: vk::Semaphore,
-    pub(crate) loaders: Loaders,
+    /// The layout every pipeline shares (ADR-0016 §2).
+    pub(crate) pipeline_layout: vk::PipelineLayout,
     pub(crate) allocator: Mutex<Option<Allocator>>,
+    pub(crate) limits: Limits,
     pub(crate) queue_family: u32,
     pub(crate) physical_device: vk::PhysicalDevice,
-    adapter_info: AdapterInfo,
+    pub(crate) debug: Option<ash::ext::debug_utils::Device>,
+    pub(crate) surface_loader: Option<ash::khr::surface::Instance>,
+    pub(crate) swapchain_loader: Option<ash::khr::swapchain::Device>,
     logical: LogicalDevice,
     pub(crate) instance: VulkanInstance,
 }
 
-impl VulkanDevice {
+impl Shared {
     /// The logical device.
     pub(crate) fn raw(&self) -> &ash::Device {
         &self.logical.device
@@ -220,7 +243,7 @@ impl VulkanDevice {
     /// Gives a Vulkan object a name for validation messages and GPU debuggers (ADR-0003). Does
     /// nothing without `VK_EXT_debug_utils`.
     pub(crate) fn name_object<H: vk::Handle>(&self, handle: H, name: &str) {
-        let Some(debug) = &self.loaders.debug else {
+        let Some(debug) = &self.debug else {
             return;
         };
         let Ok(name) = CString::new(name.replace('\0', "")) else {
@@ -237,53 +260,23 @@ impl VulkanDevice {
     }
 }
 
-impl std::fmt::Debug for VulkanDevice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VulkanDevice")
-            .field("adapter", &self.adapter_info.name)
-            .field("queue_family", &self.queue_family)
-            .field("physical_device", &self.physical_device)
-            .field("presentation", &self.loaders.swapchain.is_some())
-            .field("instance", &self.instance)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for VulkanDevice {
+impl Drop for Shared {
     fn drop(&mut self) {
-        // Wait before freeing anything the GPU might still use.
+        // No encoder can exist any more: each holds an `Arc` to this. Wait before freeing
+        // anything the GPU might still use.
         // SAFETY: the device is alive (it's destroyed later, by `LogicalDevice::drop`).
         if let Err(e) = unsafe { self.logical.device.device_wait_idle() } {
             warn!(error = ?e, "vkDeviceWaitIdle failed while destroying the device");
         }
-        // Surfaces the application didn't destroy: their swapchains, views, semaphores and
-        // command pools go before the device. Their windows are released afterwards.
-        let surfaces = match self.surfaces.get_mut() {
-            Ok(pool) => pool.drain(),
-            Err(poisoned) => poisoned.into_inner().drain(),
-        };
-        for surface in surfaces {
-            self.destroy_surface_objects(surface);
-        }
-        // Retired objects, then live ones the application didn't destroy. The GPU is idle, so
-        // none of them is in use. An encoder that outlives the device can't use them either: it
-        // only records into its own command buffer, which is never submitted.
-        let retired = match self.retired.lock() {
-            Ok(mut queue) => queue.drain(),
-            Err(poisoned) => poisoned.into_inner().drain(),
-        };
-        let textures = match self.textures.lock() {
-            Ok(mut pool) => pool.drain(),
-            Err(poisoned) => poisoned.into_inner().drain(),
-        };
-        let pipelines = match self.pipelines.lock() {
-            Ok(mut pool) => pool.drain(),
-            Err(poisoned) => poisoned.into_inner().drain(),
-        };
+        // Retired objects (surfaces included), then live ones the application didn't destroy.
+        let retired = lock(&self.retired).drain();
+        let textures = lock(&self.textures).drain();
+        let pipelines = lock(&self.pipelines).drain();
         let leftovers = retired
             .into_iter()
             .chain(textures.into_iter().filter_map(|t| {
-                // Backbuffers left the table with their surfaces, so these are all owned.
+                // Backbuffers left the table when their surface was retired, so these are all
+                // owned textures.
                 t.allocation.map(|allocation| Retired::Texture {
                     image: t.image,
                     view: t.view,
@@ -302,13 +295,50 @@ impl Drop for VulkanDevice {
         }
         // SAFETY: the GPU is idle, so no submission still signals or waits on the timeline.
         unsafe { self.logical.device.destroy_semaphore(self.timeline, None) };
-        // Free GPU memory explicitly, before the logical device is destroyed. Field order
-        // guarantees the same, but making it explicit documents the requirement.
-        let allocator = match self.allocator.get_mut() {
-            Ok(slot) => slot.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        drop(allocator);
+        // Free GPU memory before the logical device is destroyed (field order would do the
+        // same; this states the requirement).
+        drop(lock(&self.allocator).take());
+    }
+}
+
+/// A Vulkan device: the selected GPU, a graphics+compute queue, the memory allocator, and the
+/// surfaces, textures and pipelines created on it.
+///
+/// Dropping it retires its surfaces. The rest of the device is destroyed once no encoder
+/// references it any more, which is immediately unless an encoder outlives the device.
+pub struct VulkanDevice {
+    pub(crate) surfaces: Mutex<HandlePool<Surface>>,
+    pub(crate) shared: Arc<Shared>,
+    adapter_info: AdapterInfo,
+}
+
+impl VulkanDevice {
+    /// The logical device.
+    pub(crate) fn raw(&self) -> &ash::Device {
+        self.shared.raw()
+    }
+}
+
+impl std::fmt::Debug for VulkanDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VulkanDevice")
+            .field("adapter", &self.adapter_info.name)
+            .field("queue_family", &self.shared.queue_family)
+            .field("physical_device", &self.shared.physical_device)
+            .field("presentation", &self.shared.swapchain_loader.is_some())
+            .field("instance", &self.shared.instance)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for VulkanDevice {
+    fn drop(&mut self) {
+        // Surfaces the application didn't destroy. They wait in the retire queue for any frame
+        // encoder still recording into them, and go with `Shared` at the latest.
+        let surfaces = lock(&self.surfaces).drain();
+        for surface in surfaces {
+            self.retire_surface(surface);
+        }
     }
 }
 
@@ -318,17 +348,17 @@ impl oxreal_rhi::Device for VulkanDevice {
     }
 
     fn validation_enabled(&self) -> bool {
-        self.instance.validation_enabled()
+        self.shared.instance.validation_enabled()
     }
 
     fn validation_error_count(&self) -> u64 {
-        self.instance.validation_error_count()
+        self.shared.instance.validation_error_count()
     }
 
     fn wait_idle(&self) -> Result<(), RhiError> {
         // SAFETY: the device is alive for `&self`. Waiting has no other preconditions.
-        unsafe { self.logical.device.device_wait_idle() }
-            .map_err(|e| from_vk("vkDeviceWaitIdle", e))
+        unsafe { self.raw().device_wait_idle() }.map_err(|e| from_vk("vkDeviceWaitIdle", e))?;
+        self.shared.collect_garbage()
     }
 
     fn create_surface(
@@ -361,52 +391,38 @@ impl oxreal_rhi::Device for VulkanDevice {
     }
 
     fn create_texture(&self, desc: &TextureDesc<'_>) -> Result<TextureHandle, RhiError> {
-        self.create_texture_impl(desc)
+        self.shared.create_texture(desc)
     }
 
     fn destroy_texture(&self, texture: TextureHandle) -> Result<(), RhiError> {
-        self.destroy_texture_impl(texture)
+        self.shared.destroy_texture(texture)
     }
 
     fn create_render_pipeline(
         &self,
         desc: &RenderPipelineDesc<'_>,
     ) -> Result<PipelineHandle, RhiError> {
-        self.create_render_pipeline_impl(desc)
+        self.shared.create_render_pipeline(desc)
     }
 
     fn destroy_render_pipeline(&self, pipeline: PipelineHandle) -> Result<(), RhiError> {
-        self.destroy_render_pipeline_impl(pipeline)
+        self.shared.destroy_render_pipeline(pipeline)
     }
 
     fn create_encoder(&self, label: &str) -> Result<Box<dyn CommandEncoder>, RhiError> {
-        self.create_encoder_impl(label)
+        Shared::create_encoder(&self.shared, label)
     }
 
     fn submit(&self, encoder: Box<dyn CommandEncoder>) -> Result<SubmissionId, RhiError> {
-        self.submit_impl(encoder)
+        self.shared.submit(encoder)
     }
 
     fn wait_for_submission(&self, submission: SubmissionId) -> Result<(), RhiError> {
-        self.wait_for_submission_impl(submission)
+        self.shared.wait_for_submission(submission)
     }
 
     fn read_texture(&self, texture: TextureHandle) -> Result<Vec<u8>, RhiError> {
-        self.read_texture_impl(texture)
-    }
-}
-
-impl VulkanDevice {
-    /// What a new encoder needs from this device.
-    pub(crate) fn encoder_context(&self) -> EncoderContext {
-        EncoderContext {
-            device: self.raw().clone(),
-            textures: Arc::clone(&self.textures),
-            pipelines: Arc::clone(&self.pipelines),
-            retired: Arc::clone(&self.retired),
-            debug: self.loaders.debug.clone(),
-            pipeline_layout: self.pipeline_layout,
-        }
+        Shared::read_texture(&self.shared, texture)
     }
 }
 
@@ -417,8 +433,9 @@ struct LogicalDevice {
 
 impl Drop for LogicalDevice {
     fn drop(&mut self) {
-        // SAFETY: every object created from this device (the allocator's memory) has been freed:
-        // `VulkanDevice::drop` released the allocator and waited for the GPU to go idle.
+        // SAFETY: this only drops as a field of `Shared`, after `Shared::drop` waited for the GPU
+        // and destroyed every object created from the device and freed its memory. `Shared`
+        // outlives every encoder, so no other user of the device remains.
         unsafe { self.device.destroy_device(None) };
     }
 }
@@ -428,6 +445,7 @@ struct Probe {
     physical_device: vk::PhysicalDevice,
     candidate: AdapterCandidate,
     queue_family: Option<u32>,
+    limits: vk::PhysicalDeviceLimits,
 }
 
 fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe {
@@ -512,6 +530,7 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
             rejection_reasons: reasons,
         },
         queue_family,
+        limits: props.limits,
     }
 }
 

@@ -23,7 +23,7 @@ use oxreal_rhi::{
     SurfaceHandle, TextureFormat, Validation,
 };
 use oxreal_rhi_vulkan::VulkanDevice;
-use oxreal_shader_compiler::{CompileRequest, Optimization, SlangCompiler};
+use oxreal_shader_compiler::{CompileRequest, Optimization, SlangCompiler, validate_spirv};
 use oxreal_window::{App, Context, EventLoop, Window, WindowDesc, WindowEvent, WindowId};
 
 /// Radians per second.
@@ -68,16 +68,19 @@ impl TriangleApp {
                 .map_err(|e| e.to_string())?;
             self.pipeline = None;
         }
+        // SAFETY: produced by the pinned `slangc` through oxreal-shader-compiler and checked
+        // with `spirv-val` in `compile_shader` when it's installed (always in CI).
+        let code = unsafe { ShaderCode::from_spirv_unchecked(&self.spirv) };
         let pipeline = self
             .device
             .create_render_pipeline(&RenderPipelineDesc {
                 label: "triangle",
                 vertex: ShaderEntry {
-                    code: ShaderCode::Spirv(&self.spirv),
+                    code,
                     entry_point: "triangleVertex",
                 },
                 pixel: ShaderEntry {
-                    code: ShaderCode::Spirv(&self.spirv),
+                    code,
                     entry_point: "trianglePixel",
                 },
                 color_formats: &[format],
@@ -260,9 +263,14 @@ fn compile_shader() -> Result<Vec<u32>, Box<dyn std::error::Error>> {
         include_dirs: &[],
         optimization: Optimization::Release,
     })?;
+    let validated = validate_spirv(&shader.spirv, &source)?;
+    if !validated {
+        warn!("spirv-val not found (Vulkan SDK or spirv-tools); shader not validated");
+    }
     info!(
         slang = compiler.version(),
         words = shader.spirv.len(),
+        validated,
         "shader compiled"
     );
     Ok(shader.spirv)
