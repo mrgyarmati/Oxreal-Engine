@@ -10,7 +10,7 @@ decision and consequences (use the `adr-author` agent). Update the status here w
 | D-01 | ECS storage (archetype / sparse set / hybrid), change detection, parallel scheduling. Must meet ADR-0008 §3 (relations, hooks, deferred commands, stages) | M1 | Open | (ADR-0005 partial) |
 | D-02 | Reflection design: derive macro, type registry, attributes, stable type IDs. Metadata must be language-neutral (TAD §5.8) | before M2 | Open | |
 | D-03 | Vulkan bindings (ash?) and GPU memory allocation strategy | M1 | **Resolved**: `ash` 0.38 (runtime-loaded), `ash-window`, `gpu-allocator` 0.28 behind the RHI memory module | [ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md) |
-| D-04 | Shader language and compiler pipeline (HLSL via DXC, Slang, WGSL via naga, GLSL), reflection, hot reload | M1 | Open | |
+| D-04 | Shader language and compiler pipeline (HLSL via DXC, Slang, WGSL via naga, GLSL), reflection, hot reload | M1 | **Resolved**: Slang via the pinned `slangc` CLI, reflection JSON, capability allowlist, no compiler in shipped games | [ADR-0013](../decisions/0013-shader-language-and-compiler-pipeline.md) |
 | D-05 | Editor UI framework (egui prototype) and long-term custom widget needs | M2 | Open | |
 | D-06 | Render graph / frame graph design | M1 to M5 | Open | |
 | D-07 | Scene and project file format and versioning (RON? binary for cooked) and migration | M2 | Open | |
