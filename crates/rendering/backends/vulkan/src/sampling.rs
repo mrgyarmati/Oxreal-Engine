@@ -50,6 +50,13 @@ impl Shared {
                     "write_texture: {texture:?} was not created with TextureUsage::COPY_DESTINATION"
                 )));
             }
+            // The copy below uses the color aspect. Depth textures can't get COPY_DESTINATION
+            // today (`check_format_usage`); this keeps the copy valid if that changes.
+            if t.format.is_depth() {
+                return Err(invalid(format!(
+                    "write_texture: {texture:?} is a depth texture; uploading depth isn't supported"
+                )));
+            }
             let expected = u64::from(t.extent.width)
                 * u64::from(t.extent.height)
                 * u64::from(t.format.bytes_per_pixel());

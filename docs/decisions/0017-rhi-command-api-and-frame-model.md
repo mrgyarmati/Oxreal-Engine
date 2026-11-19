@@ -160,6 +160,15 @@ showed:
 - starting a `Load` from UNDEFINED instead of the tracked layout doesn't. The validation layers
   accept it, and this GPU kept the contents anyway. The same gap exists for color `Load`.
 
+*After the `unsafe` audit:*
+- `write_texture` and `read_texture` refuse depth textures themselves, because their copies use
+  the color aspect. Today the usage rules already keep depth textures out.
+- Attachment textures are checked against `maxFramebufferWidth` and `maxFramebufferHeight`,
+  which may be lower than `maxImageDimension2D`. Backbuffers take the surface's size.
+- A pass changes tracked layouts only once all of its barriers are built.
+- A test drops an encoder after a depth pass and then loads the depth in a new one. Breaking the
+  layout revert for abandoned encoders makes the validation layers fail it.
+
 ## Consequences
 
 - One renderer code path for every backend, runtime backend choice, and a straightforward C ABI

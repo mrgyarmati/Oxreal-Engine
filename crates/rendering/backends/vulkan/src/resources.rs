@@ -174,6 +174,9 @@ fn vk_compare_op(op: CompareOp) -> vk::CompareOp {
 
 /// Rejects usages a format doesn't support. Depth formats are only depth targets so far: they
 /// can't be sampled (the bindless set holds color textures), copied or rendered as color.
+///
+/// Paths that use the color aspect rely on this: `make_sampleable`, `write_texture`
+/// (`sampling.rs`) and `read_texture`. The two copies also refuse depth formats themselves.
 fn check_format_usage(desc: &TextureDesc<'_>) -> Result<(), RhiError> {
     let (format, usage) = (desc.format, desc.usage);
     if format.is_depth() && usage != TextureUsage::DEPTH_TARGET {
@@ -244,6 +247,20 @@ impl Shared {
             )));
         }
         let usage = vk_usage(desc.usage);
+        // A render pass's area must fit the framebuffer limits, which may be below
+        // maxImageDimension2D (VUID-VkRenderingInfo-pNext-07815/07816).
+        let attachment =
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        let (max_width, max_height) = (
+            self.limits.max_framebuffer_width,
+            self.limits.max_framebuffer_height,
+        );
+        if usage.intersects(attachment) && (desc.width > max_width || desc.height > max_height) {
+            return Err(invalid(format!(
+                "texture {:?} is {}×{}, above this device's render target limit of {max_width}×{max_height}",
+                desc.label, desc.width, desc.height
+            )));
+        }
         if usage.is_empty() {
             return Err(invalid(format!("texture {:?} has no usage", desc.label)));
         }
@@ -317,6 +334,8 @@ impl Shared {
         self.name_object(image, desc.label);
         self.name_object(view, &format!("{} view", desc.label));
 
+        // `make_sampleable` uses the color aspect and the bindless set holds color textures;
+        // `check_format_usage` keeps depth formats from SAMPLED.
         let (layout, bindless_index, resting_layout) =
             if usage.contains(vk::ImageUsageFlags::SAMPLED) {
                 match self.make_sampleable(image, view, desc.label) {
@@ -624,7 +643,8 @@ impl Shared {
             .collect();
         let blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-        // Without a depth state the pipeline has no depth attachment, and Vulkan ignores this.
+        // Without a depth state the pipeline has no depth attachment. The default struct is valid
+        // anyway: every test is disabled and its ops are valid enum values.
         let depth =
             desc.depth
                 .map_or_else(vk::PipelineDepthStencilStateCreateInfo::default, |depth| {
@@ -733,6 +753,13 @@ impl Shared {
             if !t.usage.contains(vk::ImageUsageFlags::TRANSFER_SRC) {
                 return Err(invalid(format!(
                     "{texture:?} was not created with TextureUsage::COPY_SOURCE"
+                )));
+            }
+            // The copy below uses the color aspect. Depth textures can't get COPY_SOURCE today
+            // (`check_format_usage`); this keeps the copy valid if that changes.
+            if t.format.is_depth() {
+                return Err(invalid(format!(
+                    "read_texture: {texture:?} is a depth texture; reading depth back isn't supported"
                 )));
             }
             registration
@@ -1203,6 +1230,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // Depth32Float is left out on purpose: `rhi_format` maps swapchain formats only.
     fn formats_round_trip() {
         for format in [
             TextureFormat::Bgra8UnormSrgb,

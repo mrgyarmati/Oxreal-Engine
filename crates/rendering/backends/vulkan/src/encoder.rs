@@ -620,6 +620,9 @@ impl CommandEncoder for VulkanEncoder {
             return;
         }
 
+        // Tracked layouts change only once every barrier is built, so a pass that records nothing
+        // leaves them as they were.
+        let mut new_layouts = Vec::with_capacity(desc.color_attachments.len() + 1);
         let mut barriers = Vec::with_capacity(desc.color_attachments.len());
         let mut attachments = Vec::with_capacity(desc.color_attachments.len());
         let mut area: Option<vk::Extent2D> = None;
@@ -651,7 +654,10 @@ impl CommandEncoder for VulkanEncoder {
                     .image(texture.image)
                     .subresource_range(color_subresource()),
             );
-            texture.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            new_layouts.push((
+                attachment.texture.to_raw(),
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ));
             area = Some(area.map_or(texture.extent, |a| vk::Extent2D {
                 width: a.width.min(texture.extent.width),
                 height: a.height.min(texture.extent.height),
@@ -709,7 +715,10 @@ impl CommandEncoder for VulkanEncoder {
                     .image(texture.image)
                     .subresource_range(subresource_range(texture.format)),
             );
-            texture.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            new_layouts.push((
+                depth.texture.to_raw(),
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ));
             area = Some(area.map_or(texture.extent, |a| vk::Extent2D {
                 width: a.width.min(texture.extent.width),
                 height: a.height.min(texture.extent.height),
@@ -738,10 +747,23 @@ impl CommandEncoder for VulkanEncoder {
                     }),
             );
         }
-        drop(textures);
-
         let complete = attachments.len() == desc.color_attachments.len()
             && depth_info.is_some() == desc.depth_attachment.is_some();
+        if complete {
+            for (raw, layout) in new_layouts {
+                if let Some(texture) = textures.get_mut(raw) {
+                    texture.layout = layout;
+                }
+            }
+        } else {
+            // Unreachable: every attachment was claimed under this lock just above.
+            self.misuse.push(format!(
+                "render pass {:?}: an attachment vanished while the pass began; nothing was recorded",
+                desc.label
+            ));
+        }
+        drop(textures);
+
         let Some(area) = area.filter(|_| complete) else {
             self.pass = Some(pass);
             return;
@@ -763,8 +785,12 @@ impl CommandEncoder for VulkanEncoder {
         // adapter selection requires to support it), so they can't alias. Each outlives this
         // encoder's submission because destroying it is deferred past every encoder open at that
         // time (the retire queue), and its tracked layout is current because this encoder
-        // claimed it. There are at most maxColorAttachments color attachments. A depth clear
-        // value is in [0, 1] (`check_depth_attachment`). dynamicRendering and synchronization2
+        // claimed it. There are at most maxColorAttachments color attachments. The render area is
+        // the smallest extent of all attachments, so it lies within each, and attachment textures
+        // fit the framebuffer limits (`create_texture`; backbuffers take the surface's size). The
+        // depth view has the DEPTH aspect, and DEPTH_STENCIL_ATTACHMENT_OPTIMAL with only that
+        // aspect is valid for D32_SFLOAT without separateDepthStencilLayouts, because the format
+        // has no stencil. A depth clear value is in [0, 1] (`check_depth_attachment`). dynamicRendering and synchronization2
         // are enabled (required features). `barriers`, `attachments`, `depth_info` and the infos
         // are alive across the calls.
         unsafe {

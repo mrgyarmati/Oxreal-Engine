@@ -191,6 +191,8 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         limits: Limits {
             max_image_dimension_2d: probe.limits.max_image_dimension2_d,
             max_color_attachments: probe.limits.max_color_attachments,
+            max_framebuffer_width: probe.limits.max_framebuffer_width,
+            max_framebuffer_height: probe.limits.max_framebuffer_height,
             max_buffer_size: probe.max_buffer_size,
             max_sampler_anisotropy: probe.limits.max_sampler_anisotropy,
         },
@@ -228,6 +230,10 @@ pub(crate) struct QueueState {
 pub(crate) struct Limits {
     pub(crate) max_image_dimension_2d: u32,
     pub(crate) max_color_attachments: u32,
+    /// `maxFramebufferWidth` and `maxFramebufferHeight`: a render area, so every attachment it
+    /// covers, must fit within them.
+    pub(crate) max_framebuffer_width: u32,
+    pub(crate) max_framebuffer_height: u32,
     /// Largest buffer `vkCreateBuffer` accepts (maintenance4 makes exceeding it invalid).
     pub(crate) max_buffer_size: u64,
     /// `maxSamplerAnisotropy` (at least 16 with samplerAnisotropy).

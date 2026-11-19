@@ -48,7 +48,8 @@ impl<'a> ShaderCode<'a> {
     ///   the encoder that uses the index was created. Indices that can differ between invocations
     ///   must be marked non-uniform (`NonUniformResourceIndex`; `Bindless.slang` does).
     ///   `spirv-val` doesn't check this.
-    /// - A draw must not sample a texture that is a color attachment of the render pass it's in.
+    /// - A draw must not sample a texture that is a color or depth attachment of the render pass
+    ///   it's in.
     ///   During the pass the texture is being written, and isn't in a shader-readable state.
     ///   Sample it in a later pass instead.
     /// - Addresses and indices are plain numbers: the device can't check what a shader does with

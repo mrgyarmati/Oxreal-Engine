@@ -509,6 +509,7 @@ fn depth_misuse_is_refused_with_reasons() {
     let target = target(&device);
     let depth = depth_buffer(&device);
     let with_depth = cube_pipeline(&device, &[FORMAT], Some(DepthState::SCENE));
+    let without_depth = cube_pipeline(&device, &[FORMAT], None);
     let mut encoder = device.create_encoder("misuse").expect("encoder");
     let color = [ColorAttachment {
         texture: target,
@@ -540,11 +541,21 @@ fn depth_misuse_is_refused_with_reasons() {
         });
         pass.set_pipeline(with_depth);
     }
+    // And the reverse: a pipeline without depth in a pass with depth.
+    {
+        let mut pass = encoder.begin_render_pass(&RenderPassDesc {
+            label: "unexpected depth",
+            color_attachments: &color,
+            depth_attachment: Some(cleared_depth(depth, StoreOp::DontCare)),
+        });
+        pass.set_pipeline(without_depth);
+    }
     let details = misuse(device.submit(encoder));
     for expected in [
         "was not created with TextureUsage::DEPTH_TARGET",
         "depth clears must be in [0, 1]",
-        "must agree on depth",
+        "has depth format Some(Depth32Float), but render pass \"no depth\" has None",
+        "has depth format None, but render pass \"unexpected depth\" has Some(Depth32Float)",
     ] {
         assert!(details.contains(expected), "{expected:?} in {details}");
     }
@@ -552,8 +563,53 @@ fn depth_misuse_is_refused_with_reasons() {
     for texture in [target, depth] {
         device.destroy_texture(texture).expect("destroy texture");
     }
+    for pipeline in [with_depth, without_depth] {
+        device
+            .destroy_render_pipeline(pipeline)
+            .expect("destroy pipeline");
+    }
+    assert_no_validation_errors(&device);
+}
+
+/// An encoder dropped without submission leaves the depth buffer's tracked layout as it was,
+/// so the next pass that loads it starts from the image's real layout. If tracking kept the
+/// dropped pass's layout, the validation layers would report the mismatch at submit.
+#[test]
+#[ignore = "requires a Vulkan 1.3 device, validation layers and the pinned Slang"]
+fn abandoned_depth_passes_leave_the_layout_unchanged() {
+    let device = device();
+    let pipeline = cube_pipeline(&device, &[FORMAT], Some(DepthState::SCENE));
+    let red = solid(&device, RED);
+    let target = target(&device);
+    let depth = depth_buffer(&device);
+    let scene = Scene::new(&device, &Transform::IDENTITY);
+    let near = scene.cube(&device, red, Vec3::new(0.0, 0.0, -3.0), 1.0);
+
+    let mut abandoned = device.create_encoder("abandoned").expect("encoder");
+    record_cubes(
+        abandoned.as_mut(),
+        target,
+        cleared_depth(depth, StoreOp::Store),
+        pipeline,
+        &[near],
+    );
+    drop(abandoned);
+
+    let mut encoder = device.create_encoder("loads").expect("encoder");
+    let loaded = DepthAttachment {
+        texture: depth,
+        load: DepthLoadOp::Load,
+        store: StoreOp::DontCare,
+    };
+    record_cubes(encoder.as_mut(), target, loaded, pipeline, &[]);
+    submit_and_read(&device, encoder, target);
+
+    scene.destroy(&device);
+    for texture in [red, target, depth] {
+        device.destroy_texture(texture).expect("destroy texture");
+    }
     device
-        .destroy_render_pipeline(with_depth)
+        .destroy_render_pipeline(pipeline)
         .expect("destroy pipeline");
     assert_no_validation_errors(&device);
 }
