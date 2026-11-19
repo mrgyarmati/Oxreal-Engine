@@ -106,6 +106,10 @@ struct FrameSlot {
     acquire: vk::Semaphore,
     /// Timeline value of the last submission that waited on `acquire` (0: none yet).
     last_submission: u64,
+    /// `acquire` still has a pending signal that `release_acquire` couldn't consume (its
+    /// submission failed). Such a semaphore is never used or destroyed again: the next frame on
+    /// the slot replaces it.
+    acquire_pending: bool,
 }
 
 fn stale(kind: &str, handle: impl std::fmt::Debug) -> RhiError {
@@ -288,9 +292,8 @@ impl VulkanDevice {
         }
         // Presentation may still use the swapchain and its semaphores, and no fence tracks
         // that. An idle device has finished presenting.
-        // SAFETY: the device is alive. Waiting has no other preconditions.
-        if let Err(e) = unsafe { self.raw().device_wait_idle() } {
-            warn!(error = %from_vk("vkDeviceWaitIdle", e), "waiting before destroying a surface failed");
+        if let Err(e) = self.shared.wait_idle() {
+            warn!(error = %e, "waiting before destroying a surface failed");
         }
         if let Err(e) = self
             .shared
@@ -304,6 +307,9 @@ impl VulkanDevice {
         &self,
         surface: SurfaceHandle,
     ) -> Result<Option<Frame>, RhiError> {
+        // A frame loop that never destroys anything still frees what earlier destroys left
+        // waiting for the GPU.
+        self.shared.collect_garbage()?;
         let mut surfaces = lock(&self.surfaces);
         let entry = surfaces
             .get_mut(surface.to_raw())
@@ -344,11 +350,15 @@ impl VulkanDevice {
         // The slot's command buffer and acquire semaphore are reusable once the GPU has finished
         // the slot's previous submission.
         self.shared.wait_timeline(slot.last_submission)?;
+        if slot.acquire_pending {
+            self.replace_acquire_semaphore(slot)?;
+        }
 
         // SAFETY: the swapchain and semaphore are alive. The semaphore is unsignalled with no
-        // pending operation: every signal from an earlier acquire was waited on by a later
-        // submission (`end_frame`, or `release_acquire` for frames that failed or were
-        // dropped), and that submission completed (waited above).
+        // pending operation: every signal from an earlier acquire was consumed by a later
+        // submission (`end_frame`, or `release_acquire` for frames that failed or were dropped)
+        // that completed (waited above). A signal that couldn't be consumed marked the slot
+        // `acquire_pending`, and the semaphore was replaced just above.
         let acquired = unsafe {
             swapchain_loader.acquire_next_image(
                 swapchain_handle,
@@ -369,11 +379,6 @@ impl VulkanDevice {
                 return Ok(None);
             }
             Err(e) => return Err(from_vk("vkAcquireNextImageKHR", e)),
-        };
-        let Some(slot) = entry.objects.frames.get_mut(slot_index) else {
-            return Err(invalid(format!(
-                "{surface:?} has no frame slot {slot_index}"
-            )));
         };
 
         // From here on, an image is acquired and `slot.acquire` will be signalled. Any failure
@@ -483,8 +488,30 @@ impl VulkanDevice {
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
         match self.shared.submit_locked(&mut queue, None, &waits, &[]) {
             Ok(value) => slot.last_submission = value,
-            Err(e) => warn!(error = %e, "releasing a frame's acquire semaphore failed"),
+            Err(e) => {
+                // The signal stays pending: the semaphore can be neither reused nor destroyed.
+                slot.acquire_pending = true;
+                drop(queue);
+                warn!(error = %e, "releasing a frame's acquire semaphore failed; it will be replaced");
+            }
         }
+    }
+
+    /// Gives `slot` a new acquire semaphore in place of one whose signal is still pending. The
+    /// old one is deliberately leaked: destroying a semaphore with a pending signal isn't
+    /// allowed, and this only happens after a failed submission (out of memory or a lost
+    /// device).
+    fn replace_acquire_semaphore(&self, slot: &mut FrameSlot) -> Result<(), RhiError> {
+        // SAFETY: the device is alive.
+        let semaphore = unsafe {
+            self.raw()
+                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+        }
+        .map_err(|e| from_vk("vkCreateSemaphore", e))?;
+        warn!("leaking an acquire semaphore whose signal could not be consumed");
+        slot.acquire = semaphore;
+        slot.acquire_pending = false;
+        Ok(())
     }
 
     pub(crate) fn end_frame_impl(&self, frame: Frame) -> Result<(), RhiError> {
@@ -495,6 +522,9 @@ impl VulkanDevice {
             .into_any()
             .downcast::<VulkanEncoder>()
             .map_err(|_| invalid("frame was created by a different RHI backend"))?;
+        if !encoder.belongs_to(&self.shared) {
+            return Err(invalid("end_frame was given a frame of a different device"));
+        }
         let Some(parts) = encoder.frame_parts() else {
             return Err(invalid(
                 "end_frame was given an encoder from create_encoder; use submit",
@@ -505,14 +535,19 @@ impl VulkanDevice {
         let entry = surfaces
             .get_mut(surface.to_raw())
             .ok_or_else(|| stale("surface", surface))?;
+        // Checked before anything changes: a frame that isn't this surface's open frame must
+        // leave the real open frame untouched.
         let is_open_frame = entry
             .open_frame
             .as_ref()
             .is_some_and(|open| Arc::ptr_eq(&open.token, &parts.token));
-        let Some(open) = entry.open_frame.take().filter(|_| is_open_frame) else {
+        if !is_open_frame {
             return Err(invalid(format!(
                 "this frame is not {surface:?}'s open frame"
             )));
+        }
+        let Some(open) = entry.open_frame.take() else {
+            return Err(invalid(format!("{surface:?} has no open frame")));
         };
         parts.token.end();
 
@@ -522,10 +557,14 @@ impl VulkanDevice {
         if let Some(texture) = lock(&self.shared.textures).get_mut(open.backbuffer) {
             texture.frame_owner = None;
         }
-        result?;
-        entry.frame_counter += 1;
-
         let misuse = encoder.take_misuse();
+        if let Err(error) = result {
+            if !misuse.is_empty() {
+                warn!(misuse = %misuse.join("; "), "misuse recorded in a frame that failed to submit");
+            }
+            return Err(error);
+        }
+        entry.frame_counter += 1;
         if misuse.is_empty() {
             Ok(())
         } else {
@@ -542,11 +581,19 @@ impl VulkanDevice {
     ) -> Result<(), RhiError> {
         let surface = parts.surface;
         let objects = &mut entry.objects;
-        let (Some(swapchain), Some(swapchain_loader), Some(slot)) = (
-            &objects.swapchain,
-            &self.shared.swapchain_loader,
-            objects.frames.get_mut(parts.slot_index),
-        ) else {
+        // The slot index came from `begin_frame` on this surface, whose slots never change.
+        let Some(slot) = objects.frames.get_mut(parts.slot_index) else {
+            return Err(invalid(format!(
+                "{surface:?} has no frame slot {}",
+                parts.slot_index
+            )));
+        };
+        let (Some(swapchain), Some(swapchain_loader)) =
+            (&objects.swapchain, &self.shared.swapchain_loader)
+        else {
+            // Unreachable while the frame is open, but the acquire signal must still be consumed.
+            self.release_acquire(slot);
+            entry.needs_recreate = true;
             return Err(invalid(format!(
                 "{surface:?} has no swapchain to present to"
             )));
@@ -621,7 +668,12 @@ impl VulkanDevice {
                 entry.needs_recreate = true;
                 Ok(())
             }
-            Err(e) => Err(from_vk("vkQueuePresentKHR", e)),
+            Err(e) => {
+                // Surface lost, out of memory or device lost. Whether the present consumed its
+                // semaphore wait is unspecified, so rebuild the swapchain and its semaphores.
+                entry.needs_recreate = true;
+                Err(from_vk("vkQueuePresentKHR", e))
+            }
         }
     }
 
@@ -661,6 +713,7 @@ impl VulkanDevice {
             cmd,
             acquire,
             last_submission: 0,
+            acquire_pending: false,
         })
     }
 
@@ -674,8 +727,7 @@ impl VulkanDevice {
             return Ok(());
         };
         // The old swapchain's images, views and semaphores may still be in use.
-        // SAFETY: the device is alive.
-        unsafe { self.raw().device_wait_idle() }.map_err(|e| from_vk("vkDeviceWaitIdle", e))?;
+        shared.wait_idle()?;
         let surface = entry.objects.surface;
 
         // SAFETY: the surface belongs to this instance and the physical device is this device's.
@@ -733,40 +785,43 @@ impl VulkanDevice {
             .clipped(true)
             .old_swapchain(old);
         // SAFETY: every value comes from the surface's reported capabilities, formats and modes.
-        // `old` is the surface's current swapchain (or null), and is retired below.
-        let handle = unsafe { swapchain_loader.create_swapchain(&info, None) }
-            .map_err(|e| from_vk("vkCreateSwapchainKHR", e))?;
+        // `old` is the surface's current swapchain (or null). It has not been retired yet: a
+        // retired one is destroyed right below, whether creation succeeds or not.
+        let created = unsafe { swapchain_loader.create_swapchain(&info, None) };
+        // Passing `old` retires it even if creation fails, so it may never be passed again.
+        // The device is idle (waited above) and no frame is open, so nothing uses it.
         if let Some(previous) = entry.objects.swapchain.take() {
-            // The device is idle (waited above) and no frame is open, so no encoder uses its
-            // backbuffers.
             shared.forget_backbuffers(&previous);
             shared.destroy_swapchain(previous);
         }
+        let handle = created.map_err(|e| from_vk("vkCreateSwapchainKHR", e))?;
 
-        let mut swapchain = Swapchain {
+        // Stored before anything else can fail or log, so the surface never has a live
+        // swapchain it doesn't know about, even if a log subscriber panics.
+        let swapchain = entry.objects.swapchain.insert(Swapchain {
             handle,
             images: Vec::new(),
             views: Vec::new(),
             render_finished: Vec::new(),
-        };
-        if let Err(error) =
-            self.populate_swapchain(&mut swapchain, &entry.name, format.format, extent)
-        {
-            shared.forget_backbuffers(&swapchain);
-            shared.destroy_swapchain(swapchain);
+        });
+        if let Err(error) = self.populate_swapchain(swapchain, &entry.name, format.format, extent) {
+            if let Some(partial) = entry.objects.swapchain.take() {
+                shared.forget_backbuffers(&partial);
+                shared.destroy_swapchain(partial);
+            }
             return Err(error);
         }
+        let images = swapchain.images.len();
+        entry.needs_recreate = false;
         info!(
             surface = %entry.name,
             width = extent.width,
             height = extent.height,
             format = ?format.format,
             present_mode = ?mode,
-            images = swapchain.images.len(),
+            images,
             "swapchain created"
         );
-        entry.objects.swapchain = Some(swapchain);
-        entry.needs_recreate = false;
         Ok(())
     }
 
@@ -859,14 +914,15 @@ impl Shared {
     }
 
     fn destroy_frame_slot(&self, slot: FrameSlot) {
-        // SAFETY: nothing uses either object: the device is idle or the slot's submissions
-        // completed, and no encoder records into the buffer any more. Each is destroyed exactly
-        // once, and destroying the pool frees its command buffer. The acquire semaphore has no
-        // pending signal (consumed by `release_acquire` or an `end_frame` submission).
-        unsafe {
-            self.raw().destroy_semaphore(slot.acquire, None);
-            self.raw().destroy_command_pool(slot.pool, None);
+        if !slot.acquire_pending {
+            // SAFETY: nothing uses the semaphore (the device is idle or the slot's submissions
+            // completed), and its last signal was consumed by `release_acquire` or an
+            // `end_frame` submission. Destroyed exactly once.
+            unsafe { self.raw().destroy_semaphore(slot.acquire, None) };
         }
+        // SAFETY: no submission uses the pool's command buffer any more (as above), and no
+        // encoder records into it. Destroyed exactly once, which frees its command buffer.
+        unsafe { self.raw().destroy_command_pool(slot.pool, None) };
     }
 
     /// Destroys everything a retired surface owns, then releases its window.

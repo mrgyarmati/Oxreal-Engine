@@ -646,3 +646,66 @@ fn a_loading_pass_keeps_the_previous_passes_pixels() {
     device.destroy_texture(target).expect("destroy texture");
     assert_no_validation_errors(&device);
 }
+
+/// Second audit, S-A: an encoder belongs to the device that created it. Submitting it to
+/// another device would run its Vulkan objects on the wrong device.
+#[test]
+#[ignore = "requires a Vulkan 1.3 device, validation layers and the pinned Slang"]
+fn encoders_of_another_device_are_refused() {
+    let first = device();
+    let second = device();
+    let target = target(&second);
+    let mut encoder = second
+        .create_encoder("from the second device")
+        .expect("encoder");
+    {
+        let attachments = [ColorAttachment {
+            texture: target,
+            load: black(),
+            store: StoreOp::Store,
+        }];
+        let _pass = encoder.begin_render_pass(&RenderPassDesc {
+            label: "wrong device",
+            color_attachments: &attachments,
+        });
+    }
+    let details = misuse(first.submit(encoder));
+    assert!(details.contains("different device"), "{details}");
+    second.destroy_texture(target).expect("destroy texture");
+    assert_no_validation_errors(&first);
+    assert_no_validation_errors(&second);
+}
+
+/// Second audit, S-C: `vkDeviceWaitIdle` needs every queue externally synchronized, so
+/// `wait_idle` must not run unsynchronized with another thread's submissions. The validation
+/// layer's thread-safety checks report it if it does.
+#[test]
+#[ignore = "requires a Vulkan 1.3 device, validation layers and the pinned Slang"]
+fn wait_idle_is_safe_while_another_thread_submits() {
+    let device = device();
+    let pipeline = pipeline(&device, CullMode::None);
+    let texture = target(&device);
+    // Maximum contention: one thread submits back to back (without waiting), the other waits for
+    // idle in a tight loop until the submitter is done.
+    let submitting = std::sync::atomic::AtomicBool::new(true);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..400 {
+                let mut encoder = device.create_encoder("submitter").expect("encoder");
+                record_triangle(encoder.as_mut(), texture, pipeline);
+                device.submit(encoder).expect("submit");
+            }
+            submitting.store(false, std::sync::atomic::Ordering::Release);
+        });
+        scope.spawn(|| {
+            while submitting.load(std::sync::atomic::Ordering::Acquire) {
+                device.wait_idle().expect("wait idle");
+            }
+        });
+    });
+    device
+        .destroy_render_pipeline(pipeline)
+        .expect("destroy pipeline");
+    device.destroy_texture(texture).expect("destroy texture");
+    assert_no_validation_errors(&device);
+}

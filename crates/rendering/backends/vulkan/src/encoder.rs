@@ -279,6 +279,12 @@ impl VulkanEncoder {
         self.cmd
     }
 
+    /// Whether this encoder was created by the device whose state is `shared`. Submitting an
+    /// encoder to another device would use its Vulkan objects on the wrong device.
+    pub(crate) fn belongs_to(&self, shared: &Shared) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.shared), shared)
+    }
+
     pub(crate) fn registration(&mut self) -> &mut Registration {
         &mut self.registration
     }
@@ -458,11 +464,13 @@ impl Drop for VulkanEncoder {
             }
             Kind::Frame(parts) => {
                 if parts.token.state() == FrameState::Open {
+                    // State first, then the log: a panicking log subscriber must not leave the
+                    // frame marked open forever.
+                    parts.token.abandon();
                     error!(
                         surface = ?parts.surface,
                         "a frame was dropped without Device::end_frame; the next begin_frame recreates the swapchain"
                     );
-                    parts.token.abandon();
                 }
             }
         }
@@ -499,19 +507,35 @@ impl CommandEncoder for VulkanEncoder {
             return;
         }
 
+        // Claim every attachment before changing any layout or recording any barrier, so a
+        // failure can't leave a layout updated without its barrier. `check_attachments` checked
+        // the same conditions under this lock, so this only fails if they ever diverge.
+        let mut claim_failed = false;
+        for attachment in desc.color_attachments {
+            let raw = attachment.texture.to_raw();
+            let claimed = match textures.get_mut(raw) {
+                Some(texture) => self.registration.claim(raw, texture),
+                None => Err(format!("{:?} vanished", attachment.texture)),
+            };
+            if let Err(problem) = claimed {
+                self.misuse.push(problem);
+                claim_failed = true;
+            }
+        }
+        if claim_failed {
+            drop(textures);
+            self.pass = Some(pass);
+            return;
+        }
+
         let mut barriers = Vec::with_capacity(desc.color_attachments.len());
         let mut attachments = Vec::with_capacity(desc.color_attachments.len());
         let mut area: Option<vk::Extent2D> = None;
         for attachment in desc.color_attachments {
-            let raw = attachment.texture.to_raw();
-            // Both were checked above, under the same lock.
-            let Some(texture) = textures.get_mut(raw) else {
+            // Claimed just above, under the same lock.
+            let Some(texture) = textures.get_mut(attachment.texture.to_raw()) else {
                 continue;
             };
-            if let Err(problem) = self.registration.claim(raw, texture) {
-                self.misuse.push(problem);
-                continue;
-            }
             // Contents are only preserved for `Load`. Otherwise starting from UNDEFINED lets the
             // driver skip the old contents.
             let old_layout = match attachment.load {
@@ -578,11 +602,12 @@ impl CommandEncoder for VulkanEncoder {
             .layer_count(1)
             .color_attachments(&attachments);
         // SAFETY: `cmd` is recording and no pass is open. Every attachment is a live texture of
-        // this device with COLOR_ATTACHMENT usage, used once, and claimed by this encoder, so it
-        // outlives the submission and its tracked layout is current. There are at most
-        // maxColorAttachments of them. dynamicRendering and synchronization2 are enabled
-        // (required features). `barriers`, `attachments` and the infos are alive across the
-        // calls.
+        // this device with COLOR_ATTACHMENT usage, used once. It outlives this encoder's
+        // submission because destroying it is deferred past every encoder open at that time (the
+        // retire queue), and its tracked layout is current because this encoder claimed it.
+        // There are at most maxColorAttachments of them. dynamicRendering and synchronization2
+        // are enabled (required features). `barriers`, `attachments` and the infos are alive
+        // across the calls.
         unsafe {
             shared.raw().cmd_pipeline_barrier2(self.cmd, &dependency);
             shared.raw().cmd_begin_rendering(self.cmd, &rendering);

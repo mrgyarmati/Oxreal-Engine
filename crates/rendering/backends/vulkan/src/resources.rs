@@ -436,6 +436,10 @@ impl Shared {
             .into_any()
             .downcast::<VulkanEncoder>()
             .map_err(|_| invalid("encoder was created by a different RHI backend"))?;
+        // Before any state changes: an encoder of another device must never reach this queue.
+        if !encoder.belongs_to(self) {
+            return Err(invalid("submit was given an encoder of a different device"));
+        }
         let Some((pool, cmd)) = encoder.take_standalone() else {
             return Err(invalid(
                 "frame encoders are submitted by end_frame, not submit",
@@ -620,6 +624,16 @@ impl Shared {
         self.submit_one_time_commands(pool, cmd, Some(registration))
     }
 
+    /// Waits until the device is idle. `vkDeviceWaitIdle` requires host access to every queue of
+    /// the device to be externally synchronized, so this holds the queue lock (lock order:
+    /// callers may hold `surfaces`).
+    pub(crate) fn wait_idle(&self) -> Result<(), RhiError> {
+        let _queue = lock(&self.queue);
+        // SAFETY: the device is alive, and holding the queue lock synchronizes its only queue
+        // against every submit and present, as vkDeviceWaitIdle requires.
+        unsafe { self.raw().device_wait_idle() }.map_err(|e| from_vk("vkDeviceWaitIdle", e))
+    }
+
     pub(crate) fn wait_for_submission(&self, submission: SubmissionId) -> Result<(), RhiError> {
         let last = lock(&self.queue).timeline_value;
         if submission.0 > last {
@@ -716,11 +730,10 @@ impl Shared {
                 Ok(value)
             }
             Err(error) => {
-                drop(queue);
-                // SAFETY: the submission failed, so the command buffer never became pending
-                // (out of memory), or the device is lost and executes nothing more. Either way
-                // the pool can be destroyed.
-                unsafe { self.raw().destroy_command_pool(pool, None) };
+                // Whether a failed submit (out of memory, device lost) left the command buffer
+                // pending isn't something to bet on. The pool waits until device teardown, which
+                // first waits for the device to be idle.
+                lock(&self.retired).retire_after_submission(Retired::CommandPool(pool), u64::MAX);
                 Err(error)
             }
         }

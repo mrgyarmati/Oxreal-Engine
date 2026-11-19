@@ -109,6 +109,23 @@ backend now enforces them, so safe code can't reach undefined behaviour:
   promises valid SPIR-V (`spirv-val --target-env vulkan1.3`). The backend still checks the
   header, instruction framing, entry points and push-constant size before the driver sees it.
 
+A second audit added:
+- an encoder is refused by any device other than the one that created it;
+- `vkDeviceWaitIdle` runs under the queue lock (Vulkan requires every queue to be externally
+  synchronized during it);
+- a frame is checked before it changes any state;
+- a failed acquire release or swapchain creation leaves nothing signalled or retired.
+
+**Known limitations,** to be addressed with the frame graph, which tracks per-resource usage:
+- Destroying an object waits for *every* encoder open at that moment, not only those that use
+  it. A long-lived or leaked (`mem::forget`) unsubmitted encoder therefore delays all later
+  destruction until it is submitted or dropped, or until the device is dropped. This is
+  correct but conservative.
+- `begin_frame` holds the surface table across GPU waits (frame pacing, image acquisition,
+  swapchain recreation), and `end_frame` holds the queue lock across `vkQueuePresentKHR`. There
+  is no lock cycle, so this can't deadlock. While one surface waits, though, other surfaces and
+  submissions on the device wait too.
+
 Regression tests: `oxreal-rhi-vulkan` `tests/triangle.rs` and `examples/frame_protocol.rs`. CI
 runs them with synchronization validation on (`OXREAL_VULKAN_SYNC_VALIDATION=1`, requested through
 `VkValidationFeaturesEXT`; device creation fails if the layer can't provide it).

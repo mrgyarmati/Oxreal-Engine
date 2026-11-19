@@ -248,7 +248,9 @@ impl Drop for VulkanInstance {
             unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
         }
         // SAFETY: every child object (device, messenger) is destroyed before this point:
-        // `VulkanDevice` declares its logical device before its instance, so it drops first.
+        // `Shared` (the only owner of a `VulkanInstance` next to a device) declares its logical
+        // device before its instance, so the device is destroyed first. Surfaces are destroyed
+        // in `Shared::drop`, before either.
         unsafe { self.instance.destroy_instance(None) };
     }
 }

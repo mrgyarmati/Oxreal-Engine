@@ -25,11 +25,17 @@ use crate::retire::RetireQueue;
 
 /// Locks `mutex`, recovering it if a panic poisoned it.
 ///
-/// No critical section in this crate can panic between two related updates. They call no user
-/// code, and allocation failure aborts. So a poisoned lock still guards consistent data, and
-/// recovering it is correct. Turning poisoning into errors instead would leak the Vulkan
-/// objects that were being registered or destroyed, and turn one panic into failures
-/// everywhere.
+/// This is sound because every critical section in this crate keeps its data consistent at each
+/// point where it could panic:
+/// - The only user code it can run is logging (the application's tracing subscriber). Every log
+///   call inside a critical section comes after the guarded data is consistent again. For
+///   example, a new swapchain is stored on its surface before anything is logged.
+/// - Otherwise it only does bounded arithmetic and collection updates, and allocation failure
+///   aborts instead of unwinding.
+///
+/// So a poisoned lock still guards consistent data. Turning poisoning into errors instead would
+/// leak the Vulkan objects that were being registered or destroyed, and turn one panic into
+/// failures everywhere. Keep this property when adding a critical section.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -356,8 +362,7 @@ impl oxreal_rhi::Device for VulkanDevice {
     }
 
     fn wait_idle(&self) -> Result<(), RhiError> {
-        // SAFETY: the device is alive for `&self`. Waiting has no other preconditions.
-        unsafe { self.raw().device_wait_idle() }.map_err(|e| from_vk("vkDeviceWaitIdle", e))?;
+        self.shared.wait_idle()?;
         self.shared.collect_garbage()
     }
 

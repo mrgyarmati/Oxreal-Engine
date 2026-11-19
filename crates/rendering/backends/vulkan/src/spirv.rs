@@ -10,6 +10,7 @@
 //! It isn't a validator. Full validity is the caller's promise when it creates
 //! [`oxreal_rhi::ShaderCode`]. Numbers come from the SPIR-V specification (unified, 1.6).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 const MAGIC: u32 = 0x0723_0203;
@@ -95,10 +96,19 @@ enum Type {
     Unsized,
 }
 
+/// A type, and the struct member (struct id, member index) it belongs to when that matters.
+type SizeKey = (u32, Option<(u32, u32)>);
+
 #[derive(Default)]
 struct Module {
     types: HashMap<u32, Type>,
+    /// Integer type id → width in bits, to tell which constants can be array lengths.
+    integer_types: HashMap<u32, u32>,
+    /// Integer constants that fit in 32 bits.
     constants: HashMap<u32, u32>,
+    /// Computed sizes, keyed by type and (for matrices and arrays) the struct member they
+    /// belong to. Keeps the walk linear even for adversarial type graphs.
+    sizes: RefCell<HashMap<SizeKey, u32>>,
     array_strides: HashMap<u32, u32>,
     /// (struct id, member index) → offset, matrix stride, row-major.
     member_offsets: HashMap<(u32, u32), u32>,
@@ -207,10 +217,13 @@ impl Module {
             }
             op::TYPE_INT | op::TYPE_FLOAT => {
                 let width = id(1)?;
-                if width == 0 || width % 8 != 0 {
+                if width == 0 || !width.is_multiple_of(8) {
                     return Err(format!("type %{} has a width of {width} bits", id(0)?));
                 }
                 self.types.insert(id(0)?, Type::Scalar(width / 8));
+                if opcode == op::TYPE_INT {
+                    self.integer_types.insert(id(0)?, width);
+                }
             }
             op::TYPE_VECTOR => {
                 self.types.insert(
@@ -258,8 +271,16 @@ impl Module {
                 );
             }
             op::CONSTANT => {
-                // Only the low word matters: array lengths in push constants are small.
-                self.constants.insert(id(1)?, id(2)?);
+                // Only integer constants whose value fits in 32 bits are recorded. Anything else
+                // used as an array length is rejected as non-constant, never misread.
+                let value = match (self.integer_types.get(&id(0)?), operands.get(2..)) {
+                    (Some(32), Some(&[low])) => Some(low),
+                    (Some(64), Some(&[low, 0])) => Some(low),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    self.constants.insert(id(1)?, value);
+                }
             }
             op::VARIABLE => {
                 if id(2)? == STORAGE_PUSH_CONSTANT {
@@ -291,8 +312,8 @@ impl Module {
         Ok(())
     }
 
-    /// Size in bytes of type `id` in an explicit layout. `member` is the struct member it
-    /// belongs to, for matrix decorations.
+    /// Size in bytes of type `id` in an explicit layout, never smaller than the bytes it can
+    /// touch. `member` is the struct member it belongs to, for matrix decorations.
     fn size_of(&self, id: u32, member: Option<(u32, u32)>, depth: u32) -> Result<u32, String> {
         if depth > MAX_TYPE_DEPTH {
             return Err(format!("types nest deeper than {MAX_TYPE_DEPTH} levels"));
@@ -301,7 +322,41 @@ impl Module {
             .types
             .get(&id)
             .ok_or_else(|| format!("push constants use undefined type %{id}"))?;
+        // Only matrices (and arrays of them) depend on the member's decorations.
+        let key = match ty {
+            Type::Matrix { .. } | Type::Array { .. } => (id, member),
+            _ => (id, None),
+        };
+        if let Some(&size) = self.sizes.borrow().get(&key) {
+            return Ok(size);
+        }
+        let size = self.compute_size(id, ty, member, depth)?;
+        self.sizes.borrow_mut().insert(key, size);
+        Ok(size)
+    }
+
+    fn compute_size(
+        &self,
+        id: u32,
+        ty: &Type,
+        member: Option<(u32, u32)>,
+        depth: u32,
+    ) -> Result<u32, String> {
         let overflow = || format!("the size of type %{id} overflows");
+        // `count` elements `stride` apart, each `element` bytes: the larger of the strided span
+        // and where the last element ends, so a stride below the element size can't hide
+        // bytes.
+        let extent = |stride: u32, count: u32, element: u32| -> Result<u32, String> {
+            if count == 0 {
+                return Err(format!("type %{id} has zero elements"));
+            }
+            let span = stride.checked_mul(count).ok_or_else(overflow)?;
+            let last_end = stride
+                .checked_mul(count - 1)
+                .and_then(|start| start.checked_add(element))
+                .ok_or_else(overflow)?;
+            Ok(span.max(last_end))
+        };
         match ty {
             Type::Scalar(bytes) => Ok(*bytes),
             Type::Vector { component, count } => self
@@ -317,17 +372,22 @@ impl Module {
                     .and_then(|key| self.member_row_major.get(&key))
                     .copied()
                     .unwrap_or(false);
-                // Column-major: one stride per column. Row-major: one per row, which is the
-                // column vector's component count.
-                let lines = if row_major {
-                    match self.types.get(column) {
-                        Some(Type::Vector { count, .. }) => *count,
-                        _ => return Err(format!("matrix %{id} has a non-vector column type")),
-                    }
-                } else {
-                    *count
+                let Some(&Type::Vector {
+                    component,
+                    count: rows,
+                }) = self.types.get(column)
+                else {
+                    return Err(format!("matrix %{id} has a non-vector column type"));
                 };
-                stride.checked_mul(lines).ok_or_else(overflow)
+                let component_size = self.size_of(component, None, depth + 1)?;
+                if row_major {
+                    // One stride per row; a row holds one component of every column.
+                    let row_size = component_size.checked_mul(*count).ok_or_else(overflow)?;
+                    extent(stride, rows, row_size)
+                } else {
+                    let column_size = component_size.checked_mul(rows).ok_or_else(overflow)?;
+                    extent(stride, *count, column_size)
+                }
             }
             Type::Array { element, length_id } => {
                 let length = self
@@ -335,16 +395,11 @@ impl Module {
                     .get(length_id)
                     .copied()
                     .ok_or_else(|| format!("array %{id} has a non-constant length"))?;
-                let stride = match self.array_strides.get(&id) {
-                    Some(&stride) => stride,
-                    None => {
-                        return Err(format!("array %{id} in push constants has no ArrayStride"));
-                    }
+                let Some(&stride) = self.array_strides.get(&id) else {
+                    return Err(format!("array %{id} in push constants has no ArrayStride"));
                 };
-                // The last element only needs its own size, but stride × length is the
-                // conservative bound the block can't exceed by more than padding.
-                let _ = self.size_of(*element, member, depth + 1)?;
-                stride.checked_mul(length).ok_or_else(overflow)
+                let element_size = self.size_of(*element, member, depth + 1)?;
+                extent(stride, length, element_size)
             }
             Type::Struct(members) => {
                 let mut end = 0_u32;
@@ -537,6 +592,76 @@ mod tests {
             .op(op::VARIABLE, &[31, 32, STORAGE_PUSH_CONSTANT])
             .0;
         assert!(inspect(&words).unwrap_err().contains("deeper than"));
+    }
+
+    #[test]
+    fn array_lengths_must_be_32_bit_integer_constants() {
+        // A 64-bit length of 0x1_0000_0001 must not be read as 1.
+        let block = |length_words: &[u32], int_width: u32| {
+            let mut constant = vec![19, 18];
+            constant.extend_from_slice(length_words);
+            Asm::new()
+                .op(op::MEMBER_DECORATE, &[30, 0, decoration::OFFSET, 0])
+                .op(op::DECORATE, &[24, decoration::ARRAY_STRIDE, 4])
+                .op(op::TYPE_FLOAT, &[20, 32])
+                .op(op::TYPE_INT, &[19, int_width, 0])
+                .op(op::CONSTANT, &constant)
+                .op(op::TYPE_ARRAY, &[24, 20, 18])
+                .op(op::TYPE_STRUCT, &[30, 24])
+                .op(op::TYPE_POINTER, &[31, STORAGE_PUSH_CONSTANT, 30])
+                .op(op::VARIABLE, &[31, 32, STORAGE_PUSH_CONSTANT])
+                .0
+        };
+        assert_eq!(inspect(&block(&[3], 32)).unwrap().push_constant_bytes, 12);
+        assert_eq!(
+            inspect(&block(&[3, 0], 64)).unwrap().push_constant_bytes,
+            12
+        );
+        let huge = inspect(&block(&[1, 1], 64)).unwrap_err();
+        assert!(huge.contains("non-constant length"), "{huge}");
+        let zero = inspect(&block(&[0], 32)).unwrap_err();
+        assert!(zero.contains("zero elements"), "{zero}");
+    }
+
+    #[test]
+    fn a_stride_below_the_element_size_cannot_hide_bytes() {
+        // vec4[2] with ArrayStride 4: the last element ends at 4 + 16 = 20, not 2 × 4 = 8.
+        let words = Asm::new()
+            .op(op::MEMBER_DECORATE, &[30, 0, decoration::OFFSET, 0])
+            .op(op::DECORATE, &[24, decoration::ARRAY_STRIDE, 4])
+            .op(op::TYPE_FLOAT, &[20, 32])
+            .op(op::TYPE_VECTOR, &[21, 20, 4])
+            .op(op::TYPE_INT, &[19, 32, 0])
+            .op(op::CONSTANT, &[19, 18, 2])
+            .op(op::TYPE_ARRAY, &[24, 21, 18])
+            .op(op::TYPE_STRUCT, &[30, 24])
+            .op(op::TYPE_POINTER, &[31, STORAGE_PUSH_CONSTANT, 30])
+            .op(op::VARIABLE, &[31, 32, STORAGE_PUSH_CONSTANT])
+            .0;
+        assert_eq!(inspect(&words).unwrap().push_constant_bytes, 20);
+    }
+
+    #[test]
+    fn wide_and_deep_type_graphs_stay_fast() {
+        // 16 levels, each a struct of 64 members of the level below: 64^16 paths without
+        // memoization. Each level is 0 bytes wide, so no size-based early exit helps either.
+        let mut asm = Asm::new().op(op::TYPE_STRUCT, &[100]);
+        for level in 1..16_u32 {
+            let id = 100 + level;
+            let mut operands = vec![id];
+            operands.extend(std::iter::repeat_n(id - 1, 64));
+            for member in 0..64 {
+                asm = asm.op(op::MEMBER_DECORATE, &[id, member, decoration::OFFSET, 0]);
+            }
+            asm = asm.op(op::TYPE_STRUCT, &operands);
+        }
+        let words = asm
+            .op(op::TYPE_POINTER, &[200, STORAGE_PUSH_CONSTANT, 115])
+            .op(op::VARIABLE, &[200, 201, STORAGE_PUSH_CONSTANT])
+            .0;
+        let started = std::time::Instant::now();
+        assert_eq!(inspect(&words).unwrap().push_constant_bytes, 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
