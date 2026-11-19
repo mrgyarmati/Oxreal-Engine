@@ -28,6 +28,7 @@ tools. It has Unreal Engine-class ambitions and an editor that Unreal developers
 | [Development setup](docs/development/setup.md) | Toolchains, Vulkan SDK, Linux packages |
 | [Conventions](docs/development/conventions.md) | Errors, logging, unsafe, testing, coordinates |
 | [Prior art](docs/development/prior-art.md) | Lessons from earlier engines (Cordite) and how Oxreal applies them |
+| [GPU support](docs/development/gpu-support.md) | Vulkan baseline and the hardware actually tested |
 | [Contributing](CONTRIBUTING.md) | How to contribute |
 | [Releasing](docs/development/releasing.md) | Versioning rules and the release checklist |
 | [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards and how to report problems |
