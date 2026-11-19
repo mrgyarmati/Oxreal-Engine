@@ -112,8 +112,13 @@ same extraction path.
 - The window surface is created from raw window and display handles that `platform` provides, so
   the renderer stays independent of the windowing layer.
 - Vulkan 1.3 baseline, `ash` bindings and `gpu-allocator` are decided in ADR-0012, all confined to
-  `oxreal-rhi-vulkan`. Shaders are Slang, compiled by the pinned `slangc` CLI (ADR-0013). The bind
-  model (its own ADR) is still open.
+  `oxreal-rhi-vulkan`. Shaders are Slang, compiled by the pinned `slangc` CLI (ADR-0013).
+- **Resource and bind model (ADR-0016):**
+  - typed generational handles into device pools, with deferred destruction
+  - **bindless**: one global descriptor set of runtime arrays for textures, storage images and
+    samplers; buffers by device address; per-draw data in at most 128 bytes of push constants
+  - two frames in flight, paced by timeline semaphores
+  - the required features are listed in `tools/ci/required-vulkan-features.txt`
 
 ### 5.4 Reflection (foundation, early)
 
