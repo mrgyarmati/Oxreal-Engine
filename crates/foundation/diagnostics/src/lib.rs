@@ -56,7 +56,9 @@ pub use profiling::frame_mark;
 #[cfg(feature = "application")]
 mod application;
 #[cfg(feature = "application")]
-pub use application::{InitError, LOG_ENV_VAR, init_application_logging};
+pub use application::{
+    InitError, LOG_ENV_VAR, error_chain, init_application_logging, run_application,
+};
 
 /// Implementation details of the exported macros. Not part of the public API.
 #[doc(hidden)]

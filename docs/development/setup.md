@@ -30,6 +30,8 @@
 ```sh
 vulkaninfo --summary                      # your GPU should be listed with apiVersion >= 1.3
 vulkaninfo | grep VK_LAYER_KHRONOS_validation   # must be found (PowerShell: | Select-String ...)
+bash tools/ci/check-vulkan-features.sh             # every required feature is supported
+cargo run -p oxreal-rhi-vulkan --example device_info   # Oxreal picks your GPU and creates a device
 ```
 
 If the validation layer isn't listed, the SDK isn't registered. Reinstall the SDK through its

@@ -106,8 +106,8 @@ listed here.
 |---|---|---|---|
 | `OXREAL_LOG` | `oxreal-diagnostics` | Log filter, `RUST_LOG` syntax (falls back to `RUST_LOG`) | Implemented |
 | `OXREAL_LINUX_DISPLAY` | `oxreal-window` | Force `wayland` or `x11` | Implemented |
-| `OXREAL_GPU` | Vulkan backend | Choose a GPU by index or name (ADR-0012) | Planned |
-| `OXREAL_VULKAN_VALIDATION` | Vulkan backend | Force validation layers on or off (ADR-0012) | Planned |
+| `OXREAL_GPU` | `oxreal-rhi` (all backends) | Choose a GPU by index or name (ADR-0012) | Implemented |
+| `OXREAL_VULKAN_VALIDATION` | `oxreal-rhi-vulkan` | Force validation layers on (`1`) or off (`0`) (ADR-0012) | Implemented |
 | `OXREAL_SLANGC` | Shader compiler | Use a different `slangc` (ADR-0013) | Planned |
 
 ### Tests

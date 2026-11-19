@@ -127,8 +127,11 @@ fn parse_args() -> Result<(Option<u64>, Duration), String> {
     Ok((frames, timeout))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    oxreal_diagnostics::init_application_logging()?;
+fn main() -> std::process::ExitCode {
+    oxreal_diagnostics::run_application(run)
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (target_frames, timeout) = parse_args()?;
     let started = Instant::now();
     let app = Smoke {

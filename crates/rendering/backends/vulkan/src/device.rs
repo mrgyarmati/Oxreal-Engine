@@ -1,0 +1,348 @@
+//! GPU selection, the logical device and the memory allocator.
+
+use std::sync::Mutex;
+
+use ash::vk;
+use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
+use oxreal_diagnostics::{info, warn};
+use oxreal_rhi::{
+    AdapterCandidate, AdapterInfo, AdapterType, ApiVersion, DeviceDesc, GpuSelection, RhiError,
+    select_adapter,
+};
+
+use crate::error::from_vk;
+use crate::features::{self, FeatureSet};
+use crate::instance::{VulkanInstance, format_version};
+
+/// Creates a Vulkan device according to `desc`.
+///
+/// `OXREAL_GPU` and `OXREAL_VULKAN_VALIDATION` override the corresponding fields of `desc`.
+///
+/// # Errors
+///
+/// - [`RhiError::RuntimeUnavailable`] / [`RhiError::RuntimeTooOld`] without a Vulkan 1.3 loader.
+/// - [`RhiError::NoSuitableAdapter`], listing every GPU and why it was rejected.
+/// - [`RhiError::AdapterNotFound`] / [`RhiError::InvalidEnvironment`] for a bad selection.
+/// - Other [`RhiError`]s if a Vulkan call fails.
+pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
+    let instance = VulkanInstance::new(&desc.app_name, desc.validation)?;
+    let selection = GpuSelection::from_env_or(desc.gpu.clone())?;
+
+    // SAFETY: `instance.instance` is a live instance.
+    let physical_devices = unsafe { instance.instance.enumerate_physical_devices() }
+        .map_err(|e| from_vk("vkEnumeratePhysicalDevices", e))?;
+    let probes: Vec<Probe> = physical_devices
+        .iter()
+        .map(|&pd| probe(&instance.instance, pd))
+        .collect();
+    let candidates: Vec<AdapterCandidate> = probes.iter().map(|p| p.candidate.clone()).collect();
+    for (i, c) in candidates.iter().enumerate() {
+        info!(
+            index = i,
+            name = %c.info.name,
+            kind = ?c.info.adapter_type,
+            vulkan = %c.info.api_version,
+            usable = c.rejection_reasons.is_empty(),
+            rejected_because = %c.rejection_reasons.join("; "),
+            "GPU found"
+        );
+    }
+    let chosen = select_adapter(&candidates, &selection)?;
+    let probe = &probes[chosen];
+    let Some(queue_family) = probe.queue_family else {
+        // `select_adapter` only returns usable adapters, and a missing queue family is a
+        // rejection reason, so this can't happen. Report it rather than panic.
+        return Err(RhiError::Backend {
+            api: "Vulkan",
+            operation: "device selection",
+            details: "selected adapter has no graphics+compute queue family".to_owned(),
+        });
+    };
+
+    let logical = create_logical_device(&instance.instance, probe.physical_device, queue_family)?;
+    // SAFETY: queue family `queue_family`, index 0, was requested in `create_logical_device`.
+    let queue = unsafe { logical.device.get_device_queue(queue_family, 0) };
+
+    let allocator = Allocator::new(&AllocatorCreateDesc {
+        instance: instance.instance.clone(),
+        device: logical.device.clone(),
+        physical_device: probe.physical_device,
+        debug_settings: gpu_allocator::AllocatorDebugSettings::default(),
+        buffer_device_address: true,
+        allocation_sizes: gpu_allocator::AllocationSizes::default(),
+    })
+    .map_err(|e| RhiError::Backend {
+        api: "Vulkan",
+        operation: "gpu-allocator initialization",
+        details: e.to_string(),
+    })?;
+
+    let adapter_info = probe.candidate.info.clone();
+    info!(
+        name = %adapter_info.name,
+        driver = %adapter_info.driver_name,
+        driver_info = %adapter_info.driver_info,
+        vulkan = %adapter_info.api_version,
+        validation = instance.validation_enabled(),
+        "Vulkan device created"
+    );
+
+    Ok(VulkanDevice {
+        allocator: Mutex::new(Some(allocator)),
+        queue,
+        queue_family,
+        physical_device: probe.physical_device,
+        adapter_info,
+        logical,
+        instance,
+    })
+}
+
+/// A Vulkan device: the selected GPU, a graphics+compute queue and the memory allocator.
+///
+/// **Field order is the destruction order:** the allocator frees its memory first, then the
+/// logical device is destroyed (after waiting for the GPU), then the instance.
+pub struct VulkanDevice {
+    allocator: Mutex<Option<Allocator>>,
+    queue: vk::Queue,
+    queue_family: u32,
+    physical_device: vk::PhysicalDevice,
+    adapter_info: AdapterInfo,
+    logical: LogicalDevice,
+    instance: VulkanInstance,
+}
+
+impl std::fmt::Debug for VulkanDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VulkanDevice")
+            .field("adapter", &self.adapter_info.name)
+            .field("queue_family", &self.queue_family)
+            .field("queue", &self.queue)
+            .field("physical_device", &self.physical_device)
+            .field("instance", &self.instance)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for VulkanDevice {
+    fn drop(&mut self) {
+        // Wait before freeing anything the GPU might still use.
+        // SAFETY: the device is alive (it's destroyed later, by `LogicalDevice::drop`).
+        if let Err(e) = unsafe { self.logical.device.device_wait_idle() } {
+            warn!(error = ?e, "vkDeviceWaitIdle failed while destroying the device");
+        }
+        // Free GPU memory explicitly, before the logical device is destroyed. Field order
+        // guarantees the same, but making it explicit documents the requirement.
+        let allocator = match self.allocator.get_mut() {
+            Ok(slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        drop(allocator);
+    }
+}
+
+impl oxreal_rhi::Device for VulkanDevice {
+    fn adapter_info(&self) -> &AdapterInfo {
+        &self.adapter_info
+    }
+
+    fn validation_enabled(&self) -> bool {
+        self.instance.validation_enabled()
+    }
+
+    fn validation_error_count(&self) -> u64 {
+        self.instance.validation_error_count()
+    }
+
+    fn wait_idle(&self) -> Result<(), RhiError> {
+        // SAFETY: the device is alive for `&self`. Waiting has no other preconditions.
+        unsafe { self.logical.device.device_wait_idle() }
+            .map_err(|e| from_vk("vkDeviceWaitIdle", e))
+    }
+}
+
+/// Owns the `VkDevice`, destroying it on drop.
+struct LogicalDevice {
+    device: ash::Device,
+}
+
+impl Drop for LogicalDevice {
+    fn drop(&mut self) {
+        // SAFETY: every object created from this device (the allocator's memory) has been freed:
+        // `VulkanDevice::drop` released the allocator and waited for the GPU to go idle.
+        unsafe { self.device.destroy_device(None) };
+    }
+}
+
+/// What probing a physical device found out.
+struct Probe {
+    physical_device: vk::PhysicalDevice,
+    candidate: AdapterCandidate,
+    queue_family: Option<u32>,
+}
+
+fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe {
+    // SAFETY: `physical_device` was enumerated from `instance`, which is alive.
+    let props = unsafe { instance.get_physical_device_properties(physical_device) };
+    let api = props.api_version;
+    let mut reasons = Vec::new();
+
+    let (driver_name, driver_info) = if api >= vk::API_VERSION_1_2 {
+        let mut v12 = vk::PhysicalDeviceVulkan12Properties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut v12);
+        // SAFETY: the device supports Vulkan 1.2, so Vulkan12Properties is a valid chain member.
+        // Both structures are alive across the call.
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
+        (
+            v12.driver_name_as_c_str()
+                .map_or_else(|_| String::new(), |s| s.to_string_lossy().into_owned()),
+            v12.driver_info_as_c_str()
+                .map_or_else(|_| String::new(), |s| s.to_string_lossy().into_owned()),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    if api < vk::API_VERSION_1_3 {
+        reasons.push(format!(
+            "supports Vulkan {} (1.3 required)",
+            format_version(api)
+        ));
+    } else {
+        let available = query_features(instance, physical_device);
+        reasons.extend(
+            features::missing(&available)
+                .into_iter()
+                .map(|name| format!("missing feature {name}")),
+        );
+    }
+
+    // SAFETY: `physical_device` belongs to the live `instance`.
+    let families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+    let wanted = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
+    let queue_family = families
+        .iter()
+        .position(|f| f.queue_flags.contains(wanted) && f.queue_count > 0)
+        .and_then(|i| u32::try_from(i).ok());
+    if queue_family.is_none() {
+        reasons.push("no queue family supports both graphics and compute".to_owned());
+    }
+
+    // SAFETY: `physical_device` belongs to the live `instance`.
+    let memory = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    let device_local_bytes = memory
+        .memory_heaps_as_slice()
+        .iter()
+        .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|h| h.size)
+        .max()
+        .unwrap_or(0);
+
+    let name = props.device_name_as_c_str().map_or_else(
+        |_| "(unnamed GPU)".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+
+    Probe {
+        physical_device,
+        candidate: AdapterCandidate {
+            info: AdapterInfo {
+                name,
+                adapter_type: adapter_type(props.device_type),
+                vendor_id: props.vendor_id,
+                device_id: props.device_id,
+                driver_name,
+                driver_info,
+                api_version: ApiVersion::new(
+                    vk::api_version_major(api),
+                    vk::api_version_minor(api),
+                    vk::api_version_patch(api),
+                ),
+            },
+            device_local_bytes,
+            rejection_reasons: reasons,
+        },
+        queue_family,
+    }
+}
+
+/// Reads the features Oxreal cares about. The device must support Vulkan 1.3.
+fn query_features(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> FeatureSet {
+    let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut v13 = vk::PhysicalDeviceVulkan13Features::default();
+    let core = {
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut v12)
+            .push_next(&mut v13);
+        // SAFETY: the caller checked Vulkan 1.3 support, so both chained structures are valid.
+        // The chain's structures outlive the call.
+        unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
+        features2.features
+    };
+    // The chain no longer exists. Clear the dangling links before storing the structures.
+    v12.p_next = std::ptr::null_mut();
+    v13.p_next = std::ptr::null_mut();
+    FeatureSet { core, v12, v13 }
+}
+
+fn create_logical_device(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    queue_family: u32,
+) -> Result<LogicalDevice, RhiError> {
+    let priorities = [1.0_f32];
+    let queue_info = vk::DeviceQueueCreateInfo::default()
+        .queue_family_index(queue_family)
+        .queue_priorities(&priorities);
+    let queue_infos = [queue_info];
+
+    // Enable exactly the required features, which were verified during selection.
+    let FeatureSet {
+        core,
+        mut v12,
+        mut v13,
+    } = features::required_set();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .features(core)
+        .push_next(&mut v12)
+        .push_next(&mut v13);
+    let create_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&queue_infos)
+        .push_next(&mut features2);
+
+    // SAFETY: `physical_device` belongs to `instance`. Every enabled feature was verified as
+    // supported during selection. All structures referenced by `create_info` are alive across
+    // the call. `pEnabledFeatures` is null because PhysicalDeviceFeatures2 is chained, as the
+    // spec requires.
+    let device = unsafe { instance.create_device(physical_device, &create_info, None) }
+        .map_err(|e| from_vk("vkCreateDevice", e))?;
+    Ok(LogicalDevice { device })
+}
+
+fn adapter_type(t: vk::PhysicalDeviceType) -> AdapterType {
+    match t {
+        vk::PhysicalDeviceType::DISCRETE_GPU => AdapterType::Discrete,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => AdapterType::Integrated,
+        vk::PhysicalDeviceType::VIRTUAL_GPU => AdapterType::Virtual,
+        vk::PhysicalDeviceType::CPU => AdapterType::Cpu,
+        _ => AdapterType::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_types_map_to_adapter_types() {
+        assert_eq!(
+            adapter_type(vk::PhysicalDeviceType::DISCRETE_GPU),
+            AdapterType::Discrete
+        );
+        assert_eq!(adapter_type(vk::PhysicalDeviceType::CPU), AdapterType::Cpu);
+        assert_eq!(
+            adapter_type(vk::PhysicalDeviceType::OTHER),
+            AdapterType::Other
+        );
+    }
+}

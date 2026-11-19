@@ -76,7 +76,7 @@ jobs:
   # software Vulkan device CI renders with (D-19). The list lives in
   # tools/ci/required-vulkan-features.txt.
   vulkan-features:
-    name: vulkan features (lavapipe, ${{ matrix.os }})
+    name: vulkan (lavapipe, ${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -86,11 +86,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Lavapipe and vulkaninfo
+      - name: Install Lavapipe, vulkaninfo and the validation layers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
       - run: bash tools/ci/check-vulkan-features.sh
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # GPU tests (ignored by default) on Lavapipe with validation enabled. Any validation error
+      # fails them (ADR-0012 §5).
+      - name: Vulkan device tests (Lavapipe, validation on)
+        run: cargo test -p oxreal-rhi-vulkan --locked -- --ignored
+      - name: device_info example (Lavapipe)
+        run: cargo run -p oxreal-rhi-vulkan --example device_info --locked
 
   docs:
     name: rustdoc

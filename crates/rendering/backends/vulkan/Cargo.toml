@@ -1,0 +1,24 @@
+[package]
+name = "oxreal-rhi-vulkan"
+description = "Vulkan 1.3 backend of the Oxreal RHI: instance, validation, GPU selection, device and memory allocator (ADR-0012, ADR-0016)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "rendering"
+
+[dependencies]
+ash.workspace = true
+gpu-allocator.workspace = true
+oxreal-diagnostics.workspace = true
+oxreal-rhi.workspace = true
+
+[dev-dependencies]
+oxreal-diagnostics = { workspace = true, features = ["application"] }
+
+[lints]
+workspace = true

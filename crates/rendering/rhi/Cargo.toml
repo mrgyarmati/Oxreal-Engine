@@ -1,0 +1,18 @@
+[package]
+name = "oxreal-rhi"
+description = "Oxreal's Rendering Hardware Interface: backend-agnostic device API, adapter selection and errors (ADR-0003, ADR-0016)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "rendering"
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

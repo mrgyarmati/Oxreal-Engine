@@ -218,8 +218,8 @@ Create these only when M1 work starts, one at a time, each with real code:
 | `foundation/diagnostics` | foundation | **Created** (`oxreal-diagnostics`): re-exported log macros, `profile_*` macros, `init_application_logging` (ADR-0010) |
 | `platform/window` | platform | **Created** (`oxreal-window`): windows and the event loop, winit 0.30 behind an engine-owned `App` trait and event enum. Raw handles via `raw-window-handle` 0.6 (ADR-0015). |
 | `runtime/ecs` | runtime | Minimal ECS |
-| `rendering/rhi` | rendering | RHI traits |
-| `rendering/backends/vulkan` | rendering | Vulkan backend |
+| `rendering/rhi` | rendering | **Created** (`oxreal-rhi`): `Device` trait, `DeviceDesc`, adapter info and deterministic `select_adapter`, `RhiError`. Resources and commands come next. (ADR-0016) |
+| `rendering/backends/vulkan` | rendering | **Created** (`oxreal-rhi-vulkan`): loader, 1.3 instance, validation and debug messenger, GPU selection against required features, device, queue, gpu-allocator. Swapchain next. (ADR-0012) |
 | `rendering/renderer` | rendering | Basic mesh pass, camera |
 | `applications/player` | app-runtime | The vertical-slice app |
 
