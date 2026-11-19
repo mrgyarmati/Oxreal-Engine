@@ -6,6 +6,8 @@
 use oxreal_rhi::{Device as _, DeviceDesc, GpuSelection, RhiError, Validation};
 
 fn validated_desc() -> DeviceDesc {
+    // Validation messages go to the log; with a subscriber, a failing test shows them.
+    let _ = oxreal_diagnostics::init_application_logging();
     DeviceDesc {
         app_name: "oxreal-rhi-vulkan tests".to_owned(),
         validation: Validation::Enabled,

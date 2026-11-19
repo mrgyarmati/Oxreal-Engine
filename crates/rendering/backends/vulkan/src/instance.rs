@@ -13,6 +13,11 @@ use crate::error::from_vk;
 /// [`oxreal_rhi::DeviceDesc::validation`].
 pub const VALIDATION_ENV_VAR: &str = "OXREAL_VULKAN_VALIDATION";
 
+/// Environment variable that turns on synchronization validation (`1`): missing or wrong
+/// barriers become validation errors. It needs validation on, and instance creation fails if
+/// the layer can't provide it, so a run that asked for it never silently goes without.
+pub const SYNC_VALIDATION_ENV_VAR: &str = "OXREAL_VULKAN_SYNC_VALIDATION";
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const MIN_API_VERSION: u32 = vk::API_VERSION_1_3;
 
@@ -80,6 +85,39 @@ impl VulkanInstance {
             warn!("{reason}");
         }
         let validation = decision.enabled;
+        let sync_validation = match parse_switch(
+            SYNC_VALIDATION_ENV_VAR,
+            std::env::var(SYNC_VALIDATION_ENV_VAR).ok().as_deref(),
+        )? {
+            Some(true) => {
+                // Requested explicitly, so it must happen: silently running without it would
+                // make "zero validation errors" meaningless.
+                let unavailable = || RhiError::InvalidEnvironment {
+                    variable: SYNC_VALIDATION_ENV_VAR,
+                    value: "1".to_owned(),
+                    expected: "`0`, or install the Vulkan validation layers: synchronization \
+                               validation needs them and their VK_EXT_validation_features",
+                };
+                if !validation {
+                    return Err(unavailable());
+                }
+                // SAFETY: `entry` is a loaded loader, and the layer name is a valid C string of
+                // an available layer.
+                let layer_extensions = unsafe {
+                    entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER))
+                }
+                .map_err(|e| from_vk("vkEnumerateInstanceExtensionProperties", e))?;
+                let has_features = layer_extensions.iter().any(|e| {
+                    e.extension_name_as_c_str()
+                        .is_ok_and(|n| n == ash::ext::validation_features::NAME)
+                });
+                if !has_features {
+                    return Err(unavailable());
+                }
+                true
+            }
+            Some(false) | None => false,
+        };
 
         // SAFETY: `entry` is a loaded loader. `None` lists the implementation's extensions.
         let extensions = unsafe { entry.enumerate_instance_extension_properties(None) }
@@ -123,9 +161,15 @@ impl VulkanInstance {
         if surface_support {
             extension_names.extend(surface_extensions.iter().map(|name| name.as_ptr()));
         }
+        if sync_validation {
+            extension_names.push(ash::ext::validation_features::NAME.as_ptr());
+        }
 
         let debug_state = Box::<DebugState>::default();
         let mut instance_messenger = messenger_create_info(&debug_state);
+        let sync_features = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+        let mut validation_features =
+            vk::ValidationFeaturesEXT::default().enabled_validation_features(&sync_features);
         let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_layer_names(&layer_names)
@@ -134,11 +178,15 @@ impl VulkanInstance {
             // Also captures messages from instance creation and destruction themselves.
             create_info = create_info.push_next(&mut instance_messenger);
         }
+        if sync_validation {
+            create_info = create_info.push_next(&mut validation_features);
+        }
 
         // SAFETY: every pointer in `create_info` (application info, names, layer and extension
-        // lists, the chained messenger info and its user data) refers to locals or to
-        // `debug_state`, all alive across this call. The layer and extensions were checked to be
-        // available.
+        // lists, the chained messenger and validation-features infos, and the messenger's user
+        // data) refers to locals or to `debug_state`, all alive across this call. The layer and
+        // extensions were checked to be available. VK_EXT_validation_features comes from the
+        // enabled validation layer.
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|e| from_vk("vkCreateInstance", e))?;
 
@@ -165,6 +213,7 @@ impl VulkanInstance {
         info!(
             vulkan = %format_version(version),
             validation = this.validation,
+            sync_validation,
             debug_utils = debug_utils_available,
             surfaces = surface_support,
             "Vulkan instance created"
@@ -199,19 +248,26 @@ impl Drop for VulkanInstance {
             unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
         }
         // SAFETY: every child object (device, messenger) is destroyed before this point:
-        // `VulkanDevice` declares its logical device before its instance, so it drops first.
+        // `Shared` (the only owner of a `VulkanInstance` next to a device) declares its logical
+        // device before its instance, so the device is destroyed first. Surfaces are destroyed
+        // in `Shared::drop`, before either.
         unsafe { self.instance.destroy_instance(None) };
     }
 }
 
 /// Parses `OXREAL_VULKAN_VALIDATION`.
 fn validation_override(value: Option<&str>) -> Result<Option<bool>, RhiError> {
+    parse_switch(VALIDATION_ENV_VAR, value)
+}
+
+/// Parses an on/off environment switch: `1`, `true`, `on` or `0`, `false`, `off`.
+fn parse_switch(variable: &'static str, value: Option<&str>) -> Result<Option<bool>, RhiError> {
     match value.map(str::trim) {
         None | Some("") => Ok(None),
         Some("1" | "true" | "on") => Ok(Some(true)),
         Some("0" | "false" | "off") => Ok(Some(false)),
         Some(other) => Err(RhiError::InvalidEnvironment {
-            variable: VALIDATION_ENV_VAR,
+            variable,
             value: other.to_owned(),
             expected: "`1` or `0`",
         }),
@@ -320,6 +376,19 @@ mod tests {
         let err = validation_override(Some("maybe")).unwrap_err();
         assert!(
             err.to_string().contains("OXREAL_VULKAN_VALIDATION"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn switches_name_their_variable_in_errors() {
+        assert_eq!(
+            parse_switch(SYNC_VALIDATION_ENV_VAR, Some("on")).unwrap(),
+            Some(true)
+        );
+        let err = parse_switch(SYNC_VALIDATION_ENV_VAR, Some("yes")).unwrap_err();
+        assert!(
+            err.to_string().contains("OXREAL_VULKAN_SYNC_VALIDATION"),
             "{err}"
         );
     }

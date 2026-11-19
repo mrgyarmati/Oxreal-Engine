@@ -21,6 +21,7 @@ raw-window-handle.workspace = true
 
 [dev-dependencies]
 oxreal-math.workspace = true
+oxreal-shader-compiler.workspace = true
 oxreal-window.workspace = true
 oxreal-diagnostics = { workspace = true, features = ["application"] }
 

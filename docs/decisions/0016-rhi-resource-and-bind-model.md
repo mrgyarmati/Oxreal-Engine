@@ -90,6 +90,14 @@ Three questions shape everything above the RHI:
   every frame that could still use the object, tracked with a timeline semaphore value per
   submission. Using a destroyed handle is a detected error in debug builds, not undefined
   behaviour.
+  - *Implementation note (2026-11-19):* the timeline value alone isn't enough. An object can be
+    destroyed while an encoder that uses it is still **recording**, before that submission has a
+    timeline value. The Vulkan backend's retire queue therefore also waits for every encoder that
+    was open at destruction time to be submitted (then for its value) or dropped. The
+    bookkeeping is pure and unit-tested, and a GPU test destroys a pipeline and texture
+    mid-recording under validation. The `unsafe` audit then found that queueing an object and
+    recording a submission must not interleave. Both happen under the queue lock (lock order
+    `queue` → `retired` → `textures`), and readback registers like an encoder.
 - Every object takes a **debug name** at creation (ADR-0003, ADR-0010).
 
 ### 2. Bind model: bindless

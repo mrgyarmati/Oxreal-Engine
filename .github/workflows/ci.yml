@@ -103,19 +103,44 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
+    env:
+      # Load only Lavapipe, the driver this job tests. mesa-vulkan-drivers also installs manifests
+      # for GPUs the runner doesn't have. Loaders before 1.4.350 unload those inside
+      # vkEnumeratePhysicalDevices under a different lock than the one
+      # vkSetDebugUtilsObjectNameEXT (on any other instance) holds while walking them, so parallel
+      # GPU tests, one instance each, crash. On Ubuntu 26.04 (loader 1.4.341) that was 11 of 100
+      # runs with every driver, and 0 of 100 with this setting. Fixed upstream in
+      # KhronosGroup/Vulkan-Loader#1866 (issue #1863). See docs/development/setup.md,
+      # "Known upstream issues".
+      VK_LOADER_DRIVERS_SELECT: "*lvp*"
+      # Synchronization validation on top of the core checks: missing or wrong barriers become
+      # errors, which fail every GPU test and example. The engine requests it through
+      # VkValidationFeaturesEXT, which every layer version honours, and device creation fails if
+      # the layer can't provide it, so it can't be silently off.
+      OXREAL_VULKAN_SYNC_VALIDATION: "1"
+      # Shader code the tests hand to the driver must pass spirv-val (ShaderCode's safety
+      # contract), so a missing spirv-val is a failure here.
+      OXREAL_REQUIRE_SPIRV_VAL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Lavapipe, vulkaninfo, validation layers, Xvfb and X11 runtime libraries
+      - name: Install Lavapipe, vulkaninfo, validation layers, spirv-val, Xvfb and X11 runtime libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools vulkan-validationlayers \
-            xvfb libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6
+            spirv-tools xvfb libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6
       - run: bash tools/ci/check-vulkan-features.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The triangle pixel tests and example compile Slang with the pinned compiler (ADR-0013).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/downloads
+          key: slang-${{ runner.os }}-${{ hashFiles('tools/slang.json') }}
+      - run: cargo xtask slang install
       # GPU tests (ignored by default) on Lavapipe with validation enabled. Any validation error
-      # fails them (ADR-0012 §5).
+      # fails them (ADR-0012 §5). They include offscreen pixel tests of the first triangle and
+      # the regression tests of its unsafe audit.
       - name: Vulkan device tests (Lavapipe, validation on)
         run: cargo test -p oxreal-rhi-vulkan --locked -- --ignored
       - name: device_info example (Lavapipe)
@@ -125,6 +150,14 @@ jobs:
       - name: clear example (Lavapipe, X11 under Xvfb)
         timeout-minutes: 10
         run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example clear --locked -- --frames 120
+      - name: triangle example (Lavapipe, X11 under Xvfb)
+        timeout-minutes: 10
+        run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example triangle --locked -- --frames 120
+      # Misusing the frame loop (second begin_frame, dropped frame, tampered Frame, ...) is
+      # refused or recovered, never undefined behaviour.
+      - name: frame_protocol checks (Lavapipe, X11 under Xvfb)
+        timeout-minutes: 10
+        run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example frame_protocol --locked
 
   docs:
     name: rustdoc

@@ -50,6 +50,15 @@ define_handle!(
     /// A texture, including swapchain backbuffers.
     TextureHandle
 );
+define_handle!(
+    /// A render pipeline.
+    PipelineHandle
+);
+
+/// Identifies a submission made with [`crate::Device::submit`]. Pass it to
+/// [`crate::Device::wait_for_submission`] to wait for the GPU to finish it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubmissionId(pub u64);
 
 /// Storage for backend objects, addressed by generational handles.
 ///
@@ -91,10 +100,12 @@ impl<T> HandlePool<T> {
     /// If more than `u32::MAX` slots would be needed. That's an engine bug, not a runtime
     /// condition.
     pub fn insert(&mut self, value: T) -> u64 {
-        self.len += 1;
+        // `len` changes only once the value is stored, so a panic (the `expect` below) leaves the
+        // pool consistent. Backends recover poisoned locks around pools and rely on this.
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.value = Some(value);
+            self.len += 1;
             return raw(index, slot.generation);
         }
         let index = u32::try_from(self.slots.len()).expect("handle pool exceeded u32::MAX slots");
@@ -102,6 +113,7 @@ impl<T> HandlePool<T> {
             generation: 1,
             value: Some(value),
         });
+        self.len += 1;
         raw(index, 1)
     }
 

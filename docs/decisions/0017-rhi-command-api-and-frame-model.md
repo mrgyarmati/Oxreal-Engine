@@ -84,6 +84,52 @@ third-party RHI's concrete types (R7), which made adding a backend a rewrite.
    linear color and the hardware encodes (ADR-0011 §5).
 7. **Clear values and colors are linear** (`LinearRgba` from `oxreal-math`).
 
+### Implementation notes (2026-11-19, from the `unsafe` audit of the first draw call)
+
+The audit found that several guarantees above held only for well-behaved callers. The
+backend now enforces them, so safe code can't reach undefined behaviour:
+
+- **Guards don't prove anything (§4).** `std::mem::forget` is safe, so a `RenderPass` guard can
+  be leaked. Submission closes any open pass and reports it as misuse.
+- **One open frame per surface (§5).** A second `begin_frame` and `destroy_surface` are refused
+  while a frame is open. `end_frame` takes the surface, image and slot from the frame's own
+  encoder, never from `Frame`'s public parts. A dropped frame is reported. The next
+  `begin_frame` consumes its acquire semaphore with an empty submission and recreates the
+  swapchain, which releases the image. Any failure after an image is acquired is handled the
+  same way. Only the frame's encoder may use its backbuffer.
+- **Encoders keep the device alive.** The device's state is shared (`Arc`) with every encoder,
+  so an encoder that outlives the `Device` still records into live objects. Destroyed surfaces
+  wait in the retire queue for frame encoders that still use them.
+- **Resource state follows submission order.** An encoder claims every texture it records
+  commands for. No other unsubmitted encoder may use a claimed texture. A dropped encoder
+  restores the layouts it changed. Precise per-resource tracking arrives with the frame graph.
+- **Draws are validated before recording:** pipeline and pass formats match, every
+  push-constant byte is written, and attachments are unique and within device limits.
+- **Shader code is a trust boundary.** `ShaderCode::from_spirv_unchecked` is `unsafe`: the caller
+  promises valid SPIR-V (`spirv-val --target-env vulkan1.3`). The backend still checks the
+  header, instruction framing, entry points and push-constant size before the driver sees it.
+
+A second audit added:
+- an encoder is refused by any device other than the one that created it;
+- `vkDeviceWaitIdle` runs under the queue lock (Vulkan requires every queue to be externally
+  synchronized during it);
+- a frame is checked before it changes any state;
+- a failed acquire release or swapchain creation leaves nothing signalled or retired.
+
+**Known limitations,** to be addressed with the frame graph, which tracks per-resource usage:
+- Destroying an object waits for *every* encoder open at that moment, not only those that use
+  it. A long-lived or leaked (`mem::forget`) unsubmitted encoder therefore delays all later
+  destruction until it is submitted or dropped, or until the device is dropped. This is
+  correct but conservative.
+- `begin_frame` holds the surface table across GPU waits (frame pacing, image acquisition,
+  swapchain recreation), and `end_frame` holds the queue lock across `vkQueuePresentKHR`. There
+  is no lock cycle, so this can't deadlock. While one surface waits, though, other surfaces and
+  submissions on the device wait too.
+
+Regression tests: `oxreal-rhi-vulkan` `tests/triangle.rs` and `examples/frame_protocol.rs`. CI
+runs them with synchronization validation on (`OXREAL_VULKAN_SYNC_VALIDATION=1`, requested through
+`VkValidationFeaturesEXT`; device creation fails if the layer can't provide it).
+
 ## Consequences
 
 - One renderer code path for every backend, runtime backend choice, and a straightforward C ABI
