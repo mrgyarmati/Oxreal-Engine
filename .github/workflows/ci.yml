@@ -57,6 +57,20 @@ jobs:
       - run: cargo test --workspace --all-features --locked
       - run: cargo xtask layers
       - run: cargo xtask changelog check
+      # Opens a real window and runs 120 frames (ADR-0015 §7). The build steps above ran with
+      # no windowing dev packages; here only the runtime libraries and a virtual X server are
+      # installed. The example fails (never hangs) if frames stop arriving.
+      - name: Window smoke test (Linux, X11 under Xvfb)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6
+          OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-window --example smoke --locked -- --frames 120
+      - name: Window smoke test (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: cargo run -p oxreal-window --example smoke --locked -- --frames 120
 
   docs:
     name: rustdoc
