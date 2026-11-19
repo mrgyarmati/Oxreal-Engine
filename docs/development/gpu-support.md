@@ -19,6 +19,7 @@ tests on that hardware.
 | Vendor | GPU | Driver | OS / windowing | Vulkan (device) | Oxreal commit | Result | Tested by / date |
 |---|---|---|---|---|---|---|---|
 | AMD | Radeon RX 9070 XT | Adrenalin 26.11.2 (LLPC) | Windows 11 Pro (26200) | 1.4.359 | `oxreal-rhi-vulkan` device slice | Device created and destroyed with validation on, **0 validation errors**. Required features verified. | Maintainer machine, 2026-11-19 |
+| AMD | Radeon RX 9070 XT | Adrenalin 26.11.2 (LLPC) | Windows 11 Pro (26200), Win32 | 1.4.359 | `oxreal-rhi-vulkan` frame loop | `clear` example: B8G8R8A8_SRGB, FIFO, 3 images. 344 frames through 4 resizes, minimize, restore and close, with swapchain recreated each time. **0 validation errors.** | Maintainer machine, 2026-11-19 |
 
 ## Continuous integration
 

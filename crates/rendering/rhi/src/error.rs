@@ -87,6 +87,22 @@ pub enum RhiError {
         /// The operation that failed.
         operation: &'static str,
     },
+    /// The RHI was used incorrectly, for example with a stale handle. Detected during recording
+    /// and reported when the frame ends (ADR-0017 §3).
+    #[error("invalid RHI usage: {details}")]
+    InvalidUsage {
+        /// What was wrong, including the handle or operation involved.
+        details: String,
+    },
+    /// The selected GPU can't present to this window (no swapchain support, or its queue can't
+    /// present to the surface).
+    #[error("the selected GPU ({adapter}) cannot present to this window: {details}")]
+    PresentationUnsupported {
+        /// The adapter's name.
+        adapter: String,
+        /// Why.
+        details: String,
+    },
     /// Any other failure reported by the backend.
     #[error("{api} call {operation} failed: {details}")]
     Backend {

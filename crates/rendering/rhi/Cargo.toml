@@ -12,6 +12,8 @@ publish.workspace = true
 layer = "rendering"
 
 [dependencies]
+oxreal-math.workspace = true
+raw-window-handle.workspace = true
 thiserror.workspace = true
 
 [lints]
