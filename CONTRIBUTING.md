@@ -3,6 +3,10 @@
 Thanks for your interest! The project is in Milestone 0, so architecture review is the most
 valuable contribution right now.
 
+Everyone taking part in Oxreal spaces (issues, pull requests, Discussions) is expected to follow
+the [Code of Conduct](CODE_OF_CONDUCT.md), which also explains how to report problems
+confidentially.
+
 ## Before you start
 
 1. Read the [PRD](docs/product/PRD.md), the [TAD](docs/architecture/TAD.md) and the

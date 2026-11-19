@@ -28,6 +28,8 @@ tools. It has Unreal Engine-class ambitions and an editor that Unreal developers
 | [Development setup](docs/development/setup.md) | Toolchains, Vulkan SDK, Linux packages |
 | [Conventions](docs/development/conventions.md) | Errors, logging, unsafe, testing, coordinates |
 | [Contributing](CONTRIBUTING.md) | How to contribute |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards and how to report problems |
+| [Security policy](SECURITY.md) | How to report vulnerabilities privately |
 
 ## Building
 
