@@ -24,6 +24,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0007](0007-unreal-source-as-ux-reference-only.md) | Unreal Engine source is a UX reference only | Accepted |
 | [0008](0008-unreal-style-gameplay-framework-on-ecs.md) | Unreal-style gameplay framework on top of the engine ECS | Proposed |
 | [0009](0009-versioning-and-release-policy.md) | Versioning and release policy | Accepted |
+| [0010](0010-errors-logging-and-profiling.md) | Errors, logging and profiling | Accepted |
 
 Open questions that still need ADRs are tracked in
 [`../development/open-decisions.md`](../development/open-decisions.md).

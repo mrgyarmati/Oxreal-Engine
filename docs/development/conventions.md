@@ -16,22 +16,34 @@ Some conventions here are provisional and marked with the open decision that wil
 
 ## Errors
 
-- Library crates return typed errors: one error enum per crate or subsystem, implementing
-  `std::error::Error`. Messages must be actionable: say what failed, on which resource or path,
-  and what to try.
-- Applications and tools may wrap errors with context at the top level.
-- No `unwrap()` or `expect()` on fallible runtime paths in library code. `expect("reason")` is
-  acceptable for true invariants, and the reason must explain the invariant.
+These rules follow [ADR-0010](../decisions/0010-errors-logging-and-profiling.md).
+
+- Library crates return typed errors: one error enum per crate or subsystem, derived with
+  `thiserror`, marked `#[non_exhaustive]` when public, with causes chained through `#[source]`.
+- Messages must be actionable: lowercase, no trailing period, and naming the resource involved,
+  for example `failed to load texture 'Content/rock.ktx2': unsupported format BC6H_SF16`.
+- Applications and tools (`app-*`, `tool`) may use `anyhow` with `.context(...)` at the top
+  level. Library APIs never return `anyhow::Error`.
+- Panics are for bugs (violated invariants) only. No `unwrap()` on fallible runtime paths in
+  library code. `expect("reason")` is acceptable for true invariants, and the reason must
+  explain the invariant.
 - Never panic across FFI boundaries.
-- Crate choice (thiserror / anyhow) is pending D-18.
 
 ## Logging and diagnostics
 
-- Use structured diagnostics via `tracing` (pending D-18). No `println!` or `eprintln!` in
-  library crates.
-- Name GPU objects and profiling scopes from the start.
+- Emit diagnostics with the logging macros re-exported by `oxreal-diagnostics` (backed by
+  `tracing`), with structured fields such as `info!(window = %title, width, height, "swapchain created")`.
+  Engine and gameplay code don't depend on `tracing` directly.
+- No `println!` or `eprintln!` in library crates. Only applications install a log subscriber.
 - Log levels: `error` means the user must act, `warn` means degraded, `info` is lifecycle,
   `debug` and `trace` are for development.
+
+## Profiling
+
+- Instrument with the `oxreal-diagnostics` macros (`profile_function!`, `profile_scope!`, frame
+  marks). They compile to nothing unless the `profile-tracy` feature is enabled.
+- Name GPU objects and profiling scopes from the start. GPU zones go through RHI helpers.
+- Profiling builds are opt-in, and player builds never enable a profiler by default.
 
 ## `unsafe`
 
