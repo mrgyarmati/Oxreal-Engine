@@ -5,6 +5,7 @@ resolver = "3"
 members = [
     # foundation
     "crates/foundation/diagnostics",
+    "crates/foundation/math",
     # tools
     "tools/xtask",
 ]
@@ -24,6 +25,9 @@ publish = false
 # Third-party versions are centralized here. Every entry must be listed in
 # docs/development/dependencies.md with an audit result.
 serde_json = "1"
+
+# Math (ADR-0011): f32 core types plus f64 (future large worlds) and i32/u32 vectors only.
+glam = { version = "0.34.3", default-features = false, features = ["std", "f64", "i32", "u32"] }
 
 # Errors and diagnostics (ADR-0010).
 thiserror = "2.0.21"

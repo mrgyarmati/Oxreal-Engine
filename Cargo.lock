@@ -48,6 +48,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.34.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "627003914c6057c9c8f0832ee4f870b5a4f599d0cfa83f4072675114860cd0ff"
+
+[[package]]
 name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,6 +128,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracy-client",
+]
+
+[[package]]
+name = "oxreal-math"
+version = "0.1.0-dev"
+dependencies = [
+ "glam",
+ "thiserror",
 ]
 
 [[package]]
