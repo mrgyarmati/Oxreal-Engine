@@ -555,6 +555,16 @@ impl Shared {
         .map_err(|e| from_vk("vkBindBufferMemory", e))?;
 
         let (pool, cmd) = self.begin_one_time_commands("readback")?;
+        // The buffer's memory may have been written by earlier GPU work: the allocator reuses the
+        // memory of freed readback buffers. Those writes completed (the CPU waited for them), but
+        // this states the ordering in the command buffer instead of relying on that wait.
+        let buffer_reuse_barrier = [vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .buffer(buffer)
+            .size(vk::WHOLE_SIZE)];
         let image_barrier = [vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
@@ -582,15 +592,18 @@ impl Shared {
             .dst_access_mask(vk::AccessFlags2::HOST_READ)
             .buffer(buffer)
             .size(vk::WHOLE_SIZE)];
-        // SAFETY: `cmd` is recording. The image can't be destroyed before this submission
-        // completes (it's claimed by `registration`), and `old_layout` is its layout at this
-        // point in submission order (no other unsubmitted encoder may use it). The barriers
-        // make earlier writes visible to the copy, and the copy visible to the host read after
-        // the timeline wait.
+        // SAFETY: `cmd` is recording and the buffer is bound to its memory. The image can't be
+        // destroyed before this submission completes (it's claimed by `registration`), and
+        // `old_layout` is its layout at this point in submission order (no other unsubmitted
+        // encoder may use it). The barriers order earlier writes (to the image and to the
+        // buffer's reused memory) before the copy, and make the copy visible to the host read
+        // after the timeline wait.
         unsafe {
             self.raw().cmd_pipeline_barrier2(
                 cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&image_barrier),
+                &vk::DependencyInfo::default()
+                    .image_memory_barriers(&image_barrier)
+                    .buffer_memory_barriers(&buffer_reuse_barrier),
             );
             self.raw().cmd_copy_image_to_buffer(
                 cmd,
