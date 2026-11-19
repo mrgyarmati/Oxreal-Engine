@@ -95,6 +95,21 @@ OXREAL_LINUX_DISPLAY=x11     cargo run -p oxreal-window --example smoke -- --fra
 xvfb-run -a cargo run -p oxreal-window --example smoke -- --frames 120   # headless (X11)
 ```
 
+### Known upstream issues
+
+- **Vulkan loader crash with several instances on parallel threads (Linux).** Seen with loader
+  1.4.341 (Ubuntu 26.04), and still present on upstream `main` as of 2026-11-19.
+  - `vkEnumeratePhysicalDevices` unloads drivers that found no GPU, and frees their entries while
+    holding only `loader_lock`.
+  - Meanwhile, `vkSetDebugUtilsObjectNameEXT` on *any other* instance walks those entries, through
+    `loader_get_icd_and_device`, holding only `loader_global_instance_list_lock`.
+
+  It needs driver manifests for GPUs that aren't present, which `mesa-vulkan-drivers` installs. It
+  also needs more than one `VkInstance` in the process at once, which in Oxreal only the GPU test
+  suites do: each test creates its own device. If `cargo test -p oxreal-rhi-vulkan -- --ignored`
+  segfaults, choose your driver explicitly, for example `VK_LOADER_DRIVERS_SELECT='*lvp*'` for
+  Lavapipe, as CI does. Your GPU's manifest name is in `/usr/share/vulkan/icd.d/`.
+
 ## Unreal Engine source (UX reference, optional)
 
 Read [ADR-0007](../decisions/0007-unreal-source-as-ux-reference-only.md) first: Unreal source is
