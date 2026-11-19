@@ -28,10 +28,14 @@ impl<'a> ShaderCode<'a> {
     ///
     /// # Safety
     ///
-    /// `words` must be a valid SPIR-V module for the Vulkan 1.3 environment, as `spirv-val
-    /// --target-env vulkan1.3` defines it. Output of `oxreal-shader-compiler` (the pinned `slangc`)
-    /// meets this, and CI validates it with `spirv-val`. Words from anywhere else must be
-    /// validated before use.
+    /// - `words` must be a valid SPIR-V module for Vulkan 1.3 with the features Oxreal requires, as
+    ///   `spirv-val --target-env vulkan1.3 --scalar-block-layout` defines it. Output of
+    ///   `oxreal-shader-compiler` (the pinned `slangc`) meets this, and CI validates it with
+    ///   `spirv-val`. Words from anywhere else must be validated before use.
+    /// - Shaders that dereference buffer addresses ([`crate::Device::buffer_address`]) must only be
+    ///   given addresses of live buffers, and stay in bounds. An address is a plain number: the
+    ///   device can't check what a shader does with it, so programs that pass addresses to this
+    ///   shader take that responsibility on with it.
     #[must_use]
     pub const unsafe fn from_spirv_unchecked(words: &'a [u32]) -> Self {
         Self {

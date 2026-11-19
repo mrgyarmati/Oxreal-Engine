@@ -31,6 +31,7 @@
 //! [ADR-0012]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0012-vulkan-baseline-bindings-and-memory.md
 //! [ADR-0016]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0016-rhi-resource-and-bind-model.md
 
+mod buffers;
 mod debug;
 mod device;
 mod encoder;

@@ -663,7 +663,7 @@ impl Shared {
     }
 
     /// Creates a transient command pool with one command buffer in the recording state.
-    fn begin_one_time_commands(
+    pub(crate) fn begin_one_time_commands(
         &self,
         label: &str,
     ) -> Result<(vk::CommandPool, vk::CommandBuffer), RhiError> {
@@ -705,7 +705,7 @@ impl Shared {
 
     /// Ends and submits a one-time command buffer, then retires its pool. Returns the
     /// submission's timeline value.
-    fn submit_one_time_commands(
+    pub(crate) fn submit_one_time_commands(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
