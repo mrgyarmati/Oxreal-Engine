@@ -217,6 +217,9 @@ fn misuse_is_refused_with_reasons() {
         invalid(device.create_buffer(&desc(0, BufferUsage::COPY_SOURCE))).contains("zero size")
     );
     assert!(invalid(device.create_buffer(&desc(16, BufferUsage::default()))).contains("no usage"));
+    // Past maxBufferSize, which maintenance4 makes invalid to pass to the driver.
+    let huge = invalid(device.create_buffer(&desc(u64::MAX, BufferUsage::COPY_SOURCE)));
+    assert!(huge.contains("maxBufferSize"), "{huge}");
 
     let write_only = device
         .create_buffer(&desc(16, BufferUsage::COPY_DESTINATION))

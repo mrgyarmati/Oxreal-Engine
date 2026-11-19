@@ -61,8 +61,11 @@ impl Shared {
             .size(size)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        // SAFETY: the device is alive, the size is non-zero (callers check) and the usage flags
-        // are supported: SHADER_DEVICE_ADDRESS needs bufferDeviceAddress, a required feature.
+        // SAFETY: the device is alive. The size is non-zero and at most maxBufferSize:
+        // `create_buffer` checks both, and staging and readback buffers are as large as a checked
+        // buffer or a part of one. The usage flags are supported (SHADER_DEVICE_ADDRESS needs
+        // bufferDeviceAddress, a required feature), and exclusive sharing suits the device's
+        // single queue family.
         let buffer = unsafe { self.raw().create_buffer(&info, None) }
             .map_err(|e| from_vk("vkCreateBuffer", e))?;
         // SAFETY: `buffer` was just created.
@@ -103,6 +106,13 @@ impl Shared {
         if desc.size == 0 {
             return Err(invalid(format!("buffer {:?} has zero size", desc.label)));
         }
+        let max = self.limits.max_buffer_size;
+        if desc.size > max {
+            return Err(invalid(format!(
+                "buffer {:?} is {} bytes, above this device's maxBufferSize of {max}",
+                desc.label, desc.size
+            )));
+        }
         let usage = vk_usage(desc.usage);
         if usage.is_empty() {
             return Err(invalid(format!("buffer {:?} has no usage", desc.label)));
@@ -131,7 +141,8 @@ impl Shared {
         self.retire(Retired::Buffer {
             buffer: removed.buffer,
             allocation: removed.allocation,
-        })
+        });
+        Ok(())
     }
 
     pub(crate) fn buffer_address(&self, buffer: BufferHandle) -> Result<u64, RhiError> {
@@ -199,8 +210,9 @@ impl Shared {
             MemoryLocation::CpuToGpu,
         )?;
         // CpuToGpu memory is HOST_VISIBLE and HOST_COHERENT in gpu-allocator 0.28 (required
-        // flags), so the host write needs no flush. The memory is new to this call: no GPU work
-        // can be using it.
+        // flags), so the host write needs no flush, and the submission below makes it visible to
+        // the copy. No GPU work can be using this memory: staging and readback allocations are
+        // freed only after their submission completes, or at teardown once the device is idle.
         let Some(mapped) = staging
             .allocation
             .mapped_slice_mut()
@@ -229,8 +241,9 @@ impl Shared {
                 .buffer(target)
                 .offset(offset)
                 .size(len),
-            // The staging memory may be reused from an earlier staging buffer: order those
-            // writes too (as the readback does).
+            // Belt and braces: the staging memory may be reused from an earlier staging buffer,
+            // whose GPU use completed before it was freed. Stated here so the ordering doesn't rest
+            // on that alone (as the readback does).
             vk::BufferMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
@@ -252,10 +265,13 @@ impl Shared {
             .buffer(target)
             .offset(offset)
             .size(len)];
-        // SAFETY: `cmd` is recording. Both buffers are alive: the target can't be destroyed
-        // before this submission completes (`registration` blocks its retirement), and the
-        // staging buffer is retired only after it. The range was checked against the target's
-        // size, and the barriers order the copy after earlier use and before later use.
+        // SAFETY: `cmd` is recording. Both buffers are alive. The target can't be destroyed before
+        // this submission completes: `registration` was opened before `copy_target` looked the
+        // buffer up, so a `destroy_buffer` that removes it afterwards is blocked by this
+        // registration, and `submitted()` raises the wait to this copy's timeline value under the
+        // queue lock. The staging buffer is retired only after this submission. The range was
+        // checked against the target's size, and the barriers order the copy after earlier use
+        // and before later use.
         unsafe {
             shared.raw().cmd_pipeline_barrier2(
                 cmd,
@@ -278,19 +294,20 @@ impl Shared {
                     },
                     value,
                 );
-                shared.collect_garbage()
+                // The write is submitted: from here on it succeeds, whatever cleanup reports.
+                shared.collect_garbage_logged();
+                Ok(())
             }
-            Err(error) => {
-                // Whether a failed submit left the copy pending isn't specified: the staging
-                // buffer waits for device teardown, like the command pool.
-                lock(&shared.retired).retire_after_submission(
+            Err(failure) => {
+                // Freed now unless the copy may be pending (device lost).
+                failure.dispose(
+                    shared,
                     Retired::Buffer {
                         buffer: staging.buffer,
                         allocation: staging.allocation,
                     },
-                    u64::MAX,
                 );
-                Err(error)
+                Err(failure.error)
             }
         }
     }
@@ -329,7 +346,8 @@ impl Shared {
                 .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
                 .buffer(source)
                 .size(vk::WHOLE_SIZE),
-            // The readback memory may be reused from an earlier readback.
+            // Belt and braces: the readback memory may be reused from an earlier readback, whose
+            // GPU use completed before it was freed.
             vk::BufferMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
@@ -339,13 +357,25 @@ impl Shared {
                 .size(vk::WHOLE_SIZE),
         ];
         let region = [vk::BufferCopy::default().size(size)];
-        let after = [vk::BufferMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)
-            .buffer(readback.buffer)
-            .size(vk::WHOLE_SIZE)];
+        let after = [
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                .buffer(readback.buffer)
+                .size(vk::WHOLE_SIZE),
+            // Later work that writes the source (another thread may submit some before this
+            // call's wait returns) must wait for the copy to finish reading it.
+            // Write-after-read needs only an execution dependency.
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::NONE)
+                .buffer(source)
+                .size(vk::WHOLE_SIZE),
+        ];
         // SAFETY: `cmd` is recording. The source can't be destroyed before this submission
         // completes (`registration`), and the readback buffer is this call's. The barriers order
         // the copy after earlier writes and make it visible to the host read after the wait.
@@ -364,15 +394,16 @@ impl Shared {
         }
         let value = match shared.submit_one_time_commands(pool, cmd, Some(&mut registration)) {
             Ok(value) => value,
-            Err(error) => {
-                lock(&shared.retired).retire_after_submission(
+            Err(failure) => {
+                // Freed now unless the copy may be pending (device lost).
+                failure.dispose(
+                    shared,
                     Retired::Buffer {
                         buffer: readback.buffer,
                         allocation: readback.allocation,
                     },
-                    u64::MAX,
                 );
-                return Err(error);
+                return Err(failure.error);
             }
         };
         if let Err(error) = shared.wait_timeline(value) {
@@ -393,7 +424,7 @@ impl Shared {
             .ok_or_else(|| invalid("read_buffer: readback memory is not mapped"));
         // The copy completed (its timeline value was reached), so the buffer is unused.
         shared.destroy_raw_buffer(readback);
-        shared.collect_garbage()?;
+        shared.collect_garbage_logged();
         bytes
     }
 }

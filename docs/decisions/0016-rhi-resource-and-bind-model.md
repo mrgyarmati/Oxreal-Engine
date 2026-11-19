@@ -120,8 +120,20 @@ Three questions shape everything above the RHI:
   - Buffer structs use **scalar block layout**, the same as Rust `#[repr(C)]`, which is why
     `scalarBlockLayout` is required. `spirv-val` runs with `--scalar-block-layout` to match.
   - An address is a plain number, so what a shader does with it can't be checked. Using only
-    live addresses, in bounds, is part of `ShaderCode::from_spirv_unchecked`'s `unsafe` contract
-    (the shader trust boundary).
+    live addresses, in bounds and aligned, is part of `ShaderCode::from_spirv_unchecked`'s
+    `unsafe` contract (the shader trust boundary). This is a **program-wide** obligation: push
+    constants carrying an address are set through safe calls, so whoever creates `ShaderCode` for
+    an address-using shader vouches for every address the program passes it. GPU-side memory
+    safety of such shaders is outside what Rust's type system guarantees. "Live" means not
+    destroyed before the encoder that uses it was created, matching the retire queue. An opaque
+    `BufferAddress` type, or `unsafe` address-carrying push constants, can narrow this later.
+  - Shaders may only use what the required features guarantee: no `Int64` (so no 64-bit address
+    arithmetic), and no stores or atomics through addresses in vertex or pixel shaders
+    (`vertexPipelineStoresAndAtomics` and `fragmentStoresAndAtomics` aren't required). The
+    backend rejects SPIR-V capabilities outside the allowlist, the same list the shader compiler
+    enforces (a test keeps them equal).
+  - `write_buffer` doesn't wait, so a tight loop of large writes can outrun the GPU and grow
+    staging memory. A bounded upload ring belongs to streaming work.
   - Synchronization validation can't see accesses through device addresses. The copy barriers
     follow the spec's rules and are checked by pixel and ordering tests, not by the tool.
 - A texture or storage image created by the RHI gets a stable **bindless index** for its

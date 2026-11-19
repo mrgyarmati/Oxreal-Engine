@@ -177,6 +177,7 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
         limits: Limits {
             max_image_dimension_2d: probe.limits.max_image_dimension2_d,
             max_color_attachments: probe.limits.max_color_attachments,
+            max_buffer_size: probe.max_buffer_size,
         },
         queue_family,
         physical_device: probe.physical_device,
@@ -212,12 +213,15 @@ pub(crate) struct QueueState {
 pub(crate) struct Limits {
     pub(crate) max_image_dimension_2d: u32,
     pub(crate) max_color_attachments: u32,
+    /// Largest buffer `vkCreateBuffer` accepts (maintenance4 makes exceeding it invalid).
+    pub(crate) max_buffer_size: u64,
 }
 
 /// The device state that encoders share with the device.
 ///
 /// **Lock order:** `surfaces` (on [`VulkanDevice`]) → `queue` → `retired` → `textures` →
-/// `buffers` → `pipelines` → `allocator`. A thread holding one of these locks only takes locks to its right.
+/// `buffers` → `pipelines` → `allocator`. A thread holding one of these locks only takes locks to
+/// its right.
 /// `queue` → `retired` is what makes deferred destruction exact: "read the timeline value and
 /// queue an object" and "submit and record the submission" never interleave.
 ///
@@ -480,6 +484,8 @@ struct Probe {
     candidate: AdapterCandidate,
     queue_family: Option<u32>,
     limits: vk::PhysicalDeviceLimits,
+    /// `maxBufferSize` (Vulkan 1.3 core, from maintenance4).
+    max_buffer_size: u64,
 }
 
 fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe {
@@ -504,12 +510,20 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         (String::new(), String::new())
     };
 
+    // 0 for devices below Vulkan 1.3, which are rejected.
+    let mut max_buffer_size = 0;
     if api < vk::API_VERSION_1_3 {
         reasons.push(format!(
             "supports Vulkan {} (1.3 required)",
             format_version(api)
         ));
     } else {
+        let mut v13 = vk::PhysicalDeviceVulkan13Properties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut v13);
+        // SAFETY: the device supports Vulkan 1.3, so Vulkan13Properties is a valid chain member.
+        // Both structures are alive across the call.
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
+        max_buffer_size = v13.max_buffer_size;
         let available = query_features(instance, physical_device);
         reasons.extend(
             features::missing(&available)
@@ -565,6 +579,7 @@ fn probe(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Probe
         },
         queue_family,
         limits: props.limits,
+        max_buffer_size,
     }
 }
 

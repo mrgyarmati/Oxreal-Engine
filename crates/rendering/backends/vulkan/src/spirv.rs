@@ -6,6 +6,7 @@
 //! - Every instruction fits in the module.
 //! - Which entry points exist, and for which stage.
 //! - How many push-constant bytes the shaders read.
+//! - That every declared capability is one Oxreal's required features guarantee.
 //!
 //! It isn't a validator. Full validity is the caller's promise when it creates
 //! [`oxreal_rhi::ShaderCode`]. Numbers come from the SPIR-V specification (unified, 1.6).
@@ -21,7 +22,31 @@ const HEADER_WORDS: usize = 5;
 /// Type nesting deeper than this is rejected (also stops malicious recursion).
 const MAX_TYPE_DEPTH: u32 = 16;
 
+/// The SPIR-V capabilities Oxreal's required device features guarantee (ADR-0013, ADR-0016 §3).
+/// Must match `oxreal-shader-compiler`'s `ALLOWED_CAPABILITIES` (a test checks it): the compiler
+/// rejects other capabilities at build time, and this rejects them in code from anywhere else.
+const ALLOWED_CAPABILITIES: [u32; 7] = [
+    0,    // Matrix
+    1,    // Shader
+    5301, // ShaderNonUniform
+    5302, // RuntimeDescriptorArray
+    5307, // SampledImageArrayNonUniformIndexing
+    5309, // StorageImageArrayNonUniformIndexing
+    5347, // PhysicalStorageBufferAddresses
+];
+
+/// Names of capabilities that are easy to use by accident, for error messages.
+const KNOWN_CAPABILITY_NAMES: [(u32, &str); 6] = [
+    (9, "Float16"),
+    (10, "Float64"),
+    (11, "Int64"),
+    (22, "Int16"),
+    (39, "Int8"),
+    (4427, "DrawParameters"),
+];
+
 mod op {
+    pub(super) const CAPABILITY: u32 = 17;
     pub(super) const ENTRY_POINT: u32 = 15;
     pub(super) const TYPE_BOOL: u32 = 20;
     pub(super) const TYPE_INT: u32 = 21;
@@ -115,6 +140,7 @@ struct Module {
     member_matrix_strides: HashMap<(u32, u32), u32>,
     member_row_major: HashMap<(u32, u32), bool>,
     push_constant_pointer_types: Vec<u32>,
+    capabilities: Vec<u32>,
     entry_points: Vec<(Stage, String)>,
 }
 
@@ -158,6 +184,24 @@ pub(crate) fn inspect(words: &[u32]) -> Result<ModuleInfo, String> {
         }
         module.read(opcode, &words[at + 1..at + count])?;
         at += count;
+    }
+
+    let disallowed: Vec<String> = module
+        .capabilities
+        .iter()
+        .filter(|c| !ALLOWED_CAPABILITIES.contains(c))
+        .map(
+            |&c| match KNOWN_CAPABILITY_NAMES.iter().find(|(n, _)| *n == c) {
+                Some((_, name)) => format!("{name} ({c})"),
+                None => format!("capability {c}"),
+            },
+        )
+        .collect();
+    if !disallowed.is_empty() {
+        return Err(format!(
+            "uses SPIR-V capabilities Oxreal's required device features don't guarantee: {}",
+            disallowed.join(", ")
+        ));
     }
 
     let mut push_constant_bytes = 0;
@@ -207,6 +251,9 @@ impl Module {
     fn read(&mut self, opcode: u32, operands: &[u32]) -> Result<(), String> {
         let id = |i| operand(operands, i, "an instruction");
         match opcode {
+            op::CAPABILITY => {
+                self.capabilities.push(id(0)?);
+            }
             op::ENTRY_POINT => {
                 let model = id(0)?;
                 let (name, _) = literal_string(operands.get(2..).unwrap_or_default())?;
@@ -662,6 +709,36 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(inspect(&words).unwrap().push_constant_bytes, 0);
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn capabilities_outside_the_allowlist_are_rejected() {
+        let allowed = Asm::new()
+            .op(op::CAPABILITY, &[1])
+            .op(op::CAPABILITY, &[5347])
+            .entry(0, 1, "main")
+            .0;
+        assert!(inspect(&allowed).is_ok());
+        let int64 = Asm::new()
+            .op(op::CAPABILITY, &[1])
+            .op(op::CAPABILITY, &[11])
+            .op(op::CAPABILITY, &[6000])
+            .0;
+        let err = inspect(&int64).unwrap_err();
+        assert!(err.contains("Int64 (11)"), "{err}");
+        assert!(err.contains("capability 6000"), "{err}");
+    }
+
+    #[test]
+    fn the_allowlist_matches_the_shader_compiler() {
+        let mut compiler: Vec<u32> = oxreal_shader_compiler::ALLOWED_CAPABILITIES
+            .iter()
+            .map(|c| c.0)
+            .collect();
+        compiler.sort_unstable();
+        let mut ours = ALLOWED_CAPABILITIES.to_vec();
+        ours.sort_unstable();
+        assert_eq!(ours, compiler, "keep both allowlists in sync (ADR-0013)");
     }
 
     #[test]

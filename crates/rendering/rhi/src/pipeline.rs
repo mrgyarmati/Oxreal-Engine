@@ -32,10 +32,19 @@ impl<'a> ShaderCode<'a> {
     ///   `spirv-val --target-env vulkan1.3 --scalar-block-layout` defines it. Output of
     ///   `oxreal-shader-compiler` (the pinned `slangc`) meets this, and CI validates it with
     ///   `spirv-val`. Words from anywhere else must be validated before use.
+    /// - It may only use what Oxreal's required device features guarantee. `spirv-val` doesn't
+    ///   check this. Backends reject capabilities outside the allowlist (no `Int64`, so no 64-bit
+    ///   address arithmetic). Vertex and pixel shaders must not write or use atomics through
+    ///   buffer addresses (`vertexPipelineStoresAndAtomics` and `fragmentStoresAndAtomics`
+    ///   aren't required).
     /// - Shaders that dereference buffer addresses ([`crate::Device::buffer_address`]) must only be
-    ///   given addresses of live buffers, and stay in bounds. An address is a plain number: the
-    ///   device can't check what a shader does with it, so programs that pass addresses to this
-    ///   shader take that responsibility on with it.
+    ///   given addresses of live buffers, read in bounds and aligned to the type they read. A
+    ///   buffer is live for work recorded by an encoder created before the buffer was destroyed
+    ///   (until that encoder's work completes), and never for an encoder created after.
+    /// - An address is a plain number: the device can't check what a shader does with it, and push
+    ///   constants that carry one are set through safe calls. So this is a **program-wide**
+    ///   obligation: whoever creates `ShaderCode` for an address-using shader also vouches that
+    ///   every address the program passes it is valid (ADR-0016 §2).
     #[must_use]
     pub const unsafe fn from_spirv_unchecked(words: &'a [u32]) -> Self {
         Self {

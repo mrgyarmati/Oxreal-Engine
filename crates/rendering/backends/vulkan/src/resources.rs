@@ -49,6 +49,43 @@ pub(crate) enum Retired {
     Surface(Box<SurfaceObjects>),
 }
 
+/// A one-time submission that failed, and whether its work may still be pending.
+#[derive(Debug)]
+pub(crate) struct SubmitFailure {
+    pub(crate) error: RhiError,
+    /// `vkQueueSubmit2` returned `VK_ERROR_DEVICE_LOST`. The spec counts that as success when
+    /// deciding whether a command buffer is pending or a resource is in use ("Lost Device"), so
+    /// what the submission references must outlive the device's idle point. Otherwise nothing
+    /// was submitted: recording failed, or the submit ran out of memory, after which the spec
+    /// guarantees referenced resources are unaffected.
+    pub(crate) pending: bool,
+}
+
+impl SubmitFailure {
+    pub(crate) fn not_submitted(error: RhiError) -> Self {
+        Self {
+            error,
+            pending: false,
+        }
+    }
+
+    fn from_submit(error: RhiError) -> Self {
+        let pending = matches!(error, RhiError::DeviceLost { .. });
+        Self { error, pending }
+    }
+
+    /// Disposes of an object the failed submission referenced: destroyed now if nothing can be
+    /// pending, otherwise kept until device teardown (after the device is idle).
+    pub(crate) fn dispose(&self, shared: &Shared, object: Retired) {
+        if self.pending {
+            lock(&shared.retired).retire_after_submission(object, u64::MAX);
+        } else {
+            // Not in use: never submitted, or a failed submit left it unaffected.
+            shared.destroy_retired(object);
+        }
+    }
+}
+
 /// The Vulkan format for `format`, or an error for formats this backend doesn't support yet.
 pub(crate) fn vk_format(format: TextureFormat) -> Result<vk::Format, RhiError> {
     Ok(match format {
@@ -222,7 +259,7 @@ impl Shared {
                 image,
                 view,
                 allocation,
-            })?;
+            });
         }
         Ok(())
     }
@@ -412,7 +449,8 @@ impl Shared {
         let removed = lock(&self.pipelines)
             .remove(pipeline.to_raw())
             .ok_or_else(|| invalid(format!("{pipeline:?} does not exist")))?;
-        self.retire(Retired::Pipeline(removed.pipeline))
+        self.retire(Retired::Pipeline(removed.pipeline));
+        Ok(())
     }
 
     pub(crate) fn create_encoder(
@@ -446,7 +484,9 @@ impl Shared {
             ));
         };
         encoder.finish_recording();
-        let value = self.submit_one_time_commands(pool, cmd, Some(encoder.registration()))?;
+        let value = self
+            .submit_one_time_commands(pool, cmd, Some(encoder.registration()))
+            .map_err(|failure| failure.error)?;
         let misuse = encoder.take_misuse();
         if misuse.is_empty() {
             Ok(SubmissionId(value))
@@ -514,12 +554,11 @@ impl Shared {
         );
         let value = match submitted {
             Ok(value) => value,
-            Err(error) => {
-                // SAFETY: nothing was submitted, so the GPU never used the buffer. Destroyed
-                // exactly once, then its memory freed.
-                unsafe { shared.raw().destroy_buffer(buffer, None) };
-                shared.free(allocation);
-                return Err(error); // `registration` restores the texture's layout.
+            Err(failure) => {
+                // Freed now unless the copy may be pending (device lost). If nothing was
+                // submitted, `registration` restores the texture's layout when it drops.
+                failure.dispose(shared, Retired::Buffer { buffer, allocation });
+                return Err(failure.error);
             }
         };
         if let Err(error) = shared.wait_timeline(value) {
@@ -537,7 +576,7 @@ impl Shared {
         // unused. Destroyed exactly once, then its memory freed.
         unsafe { shared.raw().destroy_buffer(buffer, None) };
         shared.free(allocation);
-        shared.collect_garbage()?;
+        shared.collect_garbage_logged();
         pixels
     }
 
@@ -550,15 +589,17 @@ impl Shared {
         buffer: vk::Buffer,
         allocation: &Allocation,
         registration: &mut Registration,
-    ) -> Result<u64, RhiError> {
+    ) -> Result<u64, SubmitFailure> {
         // SAFETY: the allocation satisfies the buffer's requirements and is bound exactly once.
         unsafe {
             self.raw()
                 .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
         }
-        .map_err(|e| from_vk("vkBindBufferMemory", e))?;
+        .map_err(|e| SubmitFailure::not_submitted(from_vk("vkBindBufferMemory", e)))?;
 
-        let (pool, cmd) = self.begin_one_time_commands("readback")?;
+        let (pool, cmd) = self
+            .begin_one_time_commands("readback")
+            .map_err(SubmitFailure::not_submitted)?;
         // The buffer's memory may have been written by earlier GPU work: the allocator reuses the
         // memory of freed readback buffers. Those writes completed (the CPU waited for them), but
         // this states the ordering in the command buffer instead of relying on that wait.
@@ -705,18 +746,25 @@ impl Shared {
 
     /// Ends and submits a one-time command buffer, then retires its pool. Returns the
     /// submission's timeline value.
+    ///
+    /// # Errors
+    ///
+    /// A [`SubmitFailure`], which says whether the work may still be pending.
     pub(crate) fn submit_one_time_commands(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
         registration: Option<&mut Registration>,
-    ) -> Result<u64, RhiError> {
+    ) -> Result<u64, SubmitFailure> {
         // SAFETY: `cmd` is recording and no render pass is open: encoders close any open pass in
         // `finish_recording` before this, and readback commands never open one.
         if let Err(e) = unsafe { self.raw().end_command_buffer(cmd) } {
             // SAFETY: never submitted. Destroying the pool frees its buffer.
             unsafe { self.raw().destroy_command_pool(pool, None) };
-            return Err(from_vk("vkEndCommandBuffer", e));
+            return Err(SubmitFailure::not_submitted(from_vk(
+                "vkEndCommandBuffer",
+                e,
+            )));
         }
         let mut queue = lock(&self.queue);
         match self.submit_locked(&mut queue, Some(cmd), &[], &[]) {
@@ -730,11 +778,17 @@ impl Shared {
                 Ok(value)
             }
             Err(error) => {
-                // Whether a failed submit (out of memory, device lost) left the command buffer
-                // pending isn't something to bet on. The pool waits until device teardown, which
-                // first waits for the device to be idle.
-                lock(&self.retired).retire_after_submission(Retired::CommandPool(pool), u64::MAX);
-                Err(error)
+                let failure = SubmitFailure::from_submit(error);
+                if failure.pending {
+                    // Counts as submitted (see `SubmitFailure::pending`): everything it uses
+                    // waits for device teardown, which first waits for the device to be idle.
+                    if let Some(registration) = registration {
+                        registration.submitted(u64::MAX);
+                    }
+                }
+                drop(queue);
+                failure.dispose(self, Retired::CommandPool(pool));
+                Err(failure)
             }
         }
     }
@@ -778,15 +832,24 @@ impl Shared {
     }
 
     /// Queues `object` for destruction after every submission made so far, and every encoder
-    /// still recording, has finished with it (see [`crate::retire`]).
-    pub(crate) fn retire(&self, object: Retired) -> Result<(), RhiError> {
+    /// still recording, has finished with it (see [`crate::retire`]). Can't fail: the object is
+    /// queued either way, and a failed opportunistic cleanup (a lost device) is only logged.
+    pub(crate) fn retire(&self, object: Retired) {
         {
             // Hold the queue lock while queueing (lock order queue → retired), so no submission
             // can complete its bookkeeping between reading the value and queueing the object.
             let queue = lock(&self.queue);
             lock(&self.retired).retire(object, queue.timeline_value);
         }
-        self.collect_garbage()
+        self.collect_garbage_logged();
+    }
+
+    /// [`Self::collect_garbage`] for paths whose real work already succeeded: a failure (a lost
+    /// device) is logged instead of turning that success into an error.
+    pub(crate) fn collect_garbage_logged(&self) {
+        if let Err(e) = self.collect_garbage() {
+            oxreal_diagnostics::warn!(error = %e, "collecting destroyed objects failed");
+        }
     }
 
     /// Destroys retired objects that nothing can use any more.

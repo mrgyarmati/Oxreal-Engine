@@ -7,8 +7,9 @@ use std::ops::BitOr;
 pub struct BufferUsage(u32);
 
 impl BufferUsage {
-    /// Read and written by shaders through its device address
-    /// ([`crate::Device::buffer_address`]).
+    /// Read by shaders through its device address ([`crate::Device::buffer_address`]). Vertex and
+    /// pixel shaders may not write through addresses (Oxreal doesn't require the device features
+    /// for that); shader writes come with compute.
     pub const SHADER_ADDRESS: Self = Self(1);
     /// Written by [`crate::Device::write_buffer`].
     pub const COPY_DESTINATION: Self = Self(1 << 1);
@@ -36,7 +37,7 @@ impl BitOr for BufferUsage {
 pub struct BufferDesc<'a> {
     /// A name shown in validation messages and GPU debuggers.
     pub label: &'a str,
-    /// Size in bytes. Not zero.
+    /// Size in bytes. Not zero, and at most the device's maximum buffer size.
     pub size: u64,
     /// Allowed uses.
     pub usage: BufferUsage,

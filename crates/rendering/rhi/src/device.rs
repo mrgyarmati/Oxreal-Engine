@@ -183,13 +183,14 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] for a zero size or an empty
-    /// usage.
+    /// [`RhiError::OutOfMemory`], or [`RhiError::InvalidUsage`] for a zero size, a size above the
+    /// device's maximum, or an empty usage.
     fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<BufferHandle, RhiError>;
 
     /// Destroys a buffer once the GPU has finished every submission that may use it, and every
     /// encoder that was recording when it was destroyed (ADR-0016 §1). The handle is invalid
-    /// immediately; its address must not be used by work submitted after this call.
+    /// immediately. Its address stays valid for encoders created before this call (destruction
+    /// waits for them), and must not be used by encoders created after it.
     ///
     /// # Errors
     ///
@@ -213,7 +214,8 @@ pub trait Device: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`RhiError::InvalidUsage`] for a stale handle or missing usage, or a device error.
+    /// [`RhiError::InvalidUsage`] for a stale handle, missing usage, or a buffer too large to fit
+    /// in memory on this platform (`usize`); or a device error.
     fn read_buffer(&self, buffer: BufferHandle) -> Result<Vec<u8>, RhiError>;
 
     /// The buffer's 64-bit GPU address, for shaders to read and write it through (pass it in
