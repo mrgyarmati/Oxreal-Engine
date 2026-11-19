@@ -20,6 +20,7 @@ Columns:
 | tracing | 0.1.44 (`std` only, no proc-macro attributes) | MIT | `oxreal-diagnostics` | Structured log events and spans (ADR-0010) | Macros re-exported through `oxreal-diagnostics`. Callers never name the crate. | Stable 0.1 line for years. Released 2025-12. ~1.07B downloads. | Win + Linux (pure Rust) | 2026-11-19 |
 | tracing-subscriber | 0.3.23 (`std`, `fmt`, `ansi`, `env-filter`, `smallvec`, `tracing-log`) | MIT | `oxreal-diagnostics` (`application` feature only) | Global subscriber, `OXREAL_LOG` filter, forwards `log` records | No (types boxed inside `InitError`) | Released 2026-03. ~762M downloads. | Win + Linux (pure Rust) | 2026-11-19 |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | `oxreal-diagnostics` (`application` feature) | Derives `Error`/`Display` for library error enums (ADR-0010) | No (generates standard trait impls only) | Released 2026-09. ~1.89B downloads. | Win + Linux (proc macro) | 2026-11-19 |
+| glam | 0.34.3 (`std`, `f64`, `i32`, `u32`; no defaults) | MIT OR Apache-2.0 | `oxreal-math` | Vector, matrix and quaternion math (ADR-0011) | **Yes, deliberately** (ADR-0011 §1): types re-exported through `oxreal-math`. Callers never name `glam`. A breaking glam upgrade is a breaking Oxreal change. | Very active, 0.34.3 released 2026-11-08. ~194M downloads. | Win + Linux (pure Rust, no dependencies with these features) | 2026-11-19 |
 | tracy-client | 0.19.0 (`enable`, `ondemand`, `only-localhost`; no defaults) | MIT/Apache-2.0. Bundled Tracy C++ client (`tracy-client-sys` 0.30.1) is BSD-3-Clause. | `oxreal-diagnostics` (`profile-tracy` feature only) | Tracy profiler zones and frame marks | No (wrapped by `profile_*` macros) | Released 2026-08. ~14M downloads. | Win + Linux. Builds C++ with `cc` (MSVC / gcc / clang). | 2026-11-19 |
 
 **Audit notes, 2026-11-19 (`oxreal-diagnostics`):**
@@ -38,7 +39,6 @@ Columns:
 ## Candidates under evaluation (not yet adopted)
 
 These come from brief §11 and later ADRs, and are not commitments until a crate adopts them:
-- glam (ADR-0011)
 - ash, ash-window, gpu-allocator and raw-window-handle (ADR-0012)
 - winit
 - Rapier and Jolt bindings

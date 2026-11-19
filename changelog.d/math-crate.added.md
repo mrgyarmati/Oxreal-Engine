@@ -1,0 +1,6 @@
+- `oxreal-math`: the engine's math types (re-exported from glam) and conventions. It includes:
+  - `Transform` (translation, rotation, scale), with look-at helpers that never produce NaN
+  - reversed-depth perspective and orthographic projections with validated parameters
+  - the camera view matrix
+  - named axes (+Y up, −Z forward)
+  - `LinearRgba` with exact sRGB conversion
