@@ -13,4 +13,6 @@
   - a pipeline that doesn't match its pass, or unwritten push constants;
   - shader code with a bad header, a missing entry point or too many push-constant bytes.
 - `examples/frame_protocol.rs` checks the frame-loop cases in a real window.
-- CI runs every GPU test and example with Vulkan synchronization validation.
+- `OXREAL_VULKAN_SYNC_VALIDATION=1` turns on Vulkan synchronization validation (missing or
+  wrong barriers become errors). Device creation fails if it isn't available, so it can't be
+  silently off. CI runs every GPU test and example with it.

@@ -110,7 +110,8 @@ backend now enforces them, so safe code can't reach undefined behaviour:
   header, instruction framing, entry points and push-constant size before the driver sees it.
 
 Regression tests: `oxreal-rhi-vulkan` `tests/triangle.rs` and `examples/frame_protocol.rs`. CI
-runs them with synchronization validation on.
+runs them with synchronization validation on (`OXREAL_VULKAN_SYNC_VALIDATION=1`, requested through
+`VkValidationFeaturesEXT`; device creation fails if the layer can't provide it).
 
 ## Consequences
 

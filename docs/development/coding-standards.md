@@ -108,6 +108,7 @@ listed here.
 | `OXREAL_LINUX_DISPLAY` | `oxreal-window` | Force `wayland` or `x11` | Implemented |
 | `OXREAL_GPU` | `oxreal-rhi` (all backends) | Choose a GPU by index or name (ADR-0012) | Implemented |
 | `OXREAL_VULKAN_VALIDATION` | `oxreal-rhi-vulkan` | Force validation layers on (`1`) or off (`0`) (ADR-0012) | Implemented |
+| `OXREAL_VULKAN_SYNC_VALIDATION` | `oxreal-rhi-vulkan` | `1` adds synchronization validation (needs validation on; device creation fails if unavailable). Set in CI | Implemented |
 | `OXREAL_SLANGC` | `oxreal-shader-compiler` | Use a different `slangc` than the pinned one (logged as a warning) (ADR-0013) | Implemented |
 | `OXREAL_REQUIRE_SPIRV_VAL` | shader-compiler tests | `1` makes a missing `spirv-val` a test failure (set in CI on Linux) | Implemented |
 

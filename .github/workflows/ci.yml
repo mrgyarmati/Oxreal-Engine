@@ -114,11 +114,10 @@ jobs:
       # "Known upstream issues".
       VK_LOADER_DRIVERS_SELECT: "*lvp*"
       # Synchronization validation on top of the core checks: missing or wrong barriers become
-      # errors, which fail every GPU test and example. VK_KHRONOS_VALIDATION_VALIDATE_SYNC is the
-      # current layer setting; VK_LAYER_ENABLES is its deprecated form for older layers (Ubuntu
-      # 24.04). The "sync validation is active" step proves the layer applied it.
-      VK_KHRONOS_VALIDATION_VALIDATE_SYNC: "true"
-      VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+      # errors, which fail every GPU test and example. The engine requests it through
+      # VkValidationFeaturesEXT, which every layer version honours, and device creation fails if
+      # the layer can't provide it, so it can't be silently off.
+      OXREAL_VULKAN_SYNC_VALIDATION: "1"
       # Shader code the tests hand to the driver must pass spirv-val (ShaderCode's safety
       # contract), so a missing spirv-val is a failure here.
       OXREAL_REQUIRE_SPIRV_VAL: "1"
@@ -139,16 +138,6 @@ jobs:
           path: .tools/downloads
           key: slang-${{ runner.os }}-${{ hashFiles('tools/slang.json') }}
       - run: cargo xtask slang install
-      # Zero validation errors only means something if the checks ran. The layer lists what it
-      # enabled at instance creation; fail unless synchronization validation is among them.
-      - name: sync validation is active
-        run: |
-          VK_KHRONOS_VALIDATION_DEBUG_ACTION=VK_DBG_LAYER_ACTION_LOG_MSG \
-          VK_KHRONOS_VALIDATION_LOG_FILENAME=stdout \
-          VK_KHRONOS_VALIDATION_REPORT_FLAGS=info,error \
-            cargo test -p oxreal-rhi-vulkan --test device --locked -- --ignored --nocapture \
-            creates_and_destroys_a_device_without_validation_errors | tee /tmp/layer.log
-          grep -E -- "- Synchronization" /tmp/layer.log
       # GPU tests (ignored by default) on Lavapipe with validation enabled. Any validation error
       # fails them (ADR-0012 §5). They include offscreen pixel tests of the first triangle and
       # the regression tests of its unsafe audit.

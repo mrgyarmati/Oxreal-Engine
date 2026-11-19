@@ -25,6 +25,8 @@
 //!
 //! - `OXREAL_GPU`: pick a GPU by index or name ([`oxreal_rhi::GpuSelection`]).
 //! - `OXREAL_VULKAN_VALIDATION=0|1`: force validation layers off or on.
+//! - `OXREAL_VULKAN_SYNC_VALIDATION=1`: also enable synchronization validation (needs the
+//!   validation layers; device creation fails without them).
 //!
 //! [ADR-0012]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0012-vulkan-baseline-bindings-and-memory.md
 //! [ADR-0016]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0016-rhi-resource-and-bind-model.md
@@ -41,4 +43,4 @@ mod retire;
 mod spirv;
 
 pub use device::{VulkanDevice, create_device};
-pub use instance::VALIDATION_ENV_VAR;
+pub use instance::{SYNC_VALIDATION_ENV_VAR, VALIDATION_ENV_VAR};
