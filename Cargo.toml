@@ -7,10 +7,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
+# One unified SemVer version for every Oxreal crate (ADR-0009). `main` carries the next
+# release with a `-dev` suffix; a release commit drops it and is tagged `vX.Y.Z`.
+version = "0.1.0-dev"
 edition = "2024"
+# Equals the toolchain pinned in rust-toolchain.toml; raising it is a `changed` changelog entry.
 rust-version = "1.100"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/mrgyarmati/Oxreal-Engine"
 publish = false
 
 [workspace.dependencies]

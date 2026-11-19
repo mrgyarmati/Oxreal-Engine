@@ -34,7 +34,8 @@ confidentially.
 - New third-party dependencies need an entry in `docs/development/dependencies.md`.
 - `unsafe` requires `// SAFETY:` comments and a minimal surface.
 - Bug fixes include a regression test.
-- User-visible changes get an entry in `CHANGELOG.md` under `[Unreleased]`.
+- User-visible changes get a changelog fragment in `changelog.d/`. See
+  [changelog.d/README.md](changelog.d/README.md). Don't edit `CHANGELOG.md` directly.
 
 ## Checks
 
