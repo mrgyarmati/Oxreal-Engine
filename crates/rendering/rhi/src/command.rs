@@ -189,7 +189,8 @@ impl RenderPass<'_, '_> {
     /// The vertex shader receives each index plus `vertex_offset` as its vertex ID, so meshes
     /// packed into one vertex buffer can share 0-based indices. Every index in the range must lie
     /// inside the bound buffer; misuse is reported when the frame ends. The values themselves
-    /// aren't checked: a shader that pulls vertices with them relies on them being in range
+    /// aren't checked: a shader that pulls vertices with them relies on each index plus
+    /// `vertex_offset` being in `0..=i32::MAX` and naming a vertex in its buffer
     /// ([`crate::ShaderCode::from_spirv_unchecked`]).
     pub fn draw_indexed(&mut self, indices: Range<u32>, vertex_offset: i32, instance_count: u32) {
         self.encoder

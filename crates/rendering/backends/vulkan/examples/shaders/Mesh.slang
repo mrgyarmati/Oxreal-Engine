@@ -2,10 +2,13 @@
 //
 // The vertex shader reads ("pulls") its vertex from a buffer through the address in the push
 // constants (ADR-0016 §2). With indexed draws its vertex ID is the index plus the draw's vertex
-// offset, so it reads whichever vertex the index buffer names. With scalarBlockLayout (a
-// required feature) the buffer uses the same layout as the Rust
+// offset, so it reads whichever vertex the index buffer names.
+//
+// Slang lays out what a pointer points to with its natural (C-like) layout, which
+// scalarBlockLayout (a required feature) permits. So the buffer matches the Rust
 // `#[repr(C)] struct MeshVertex { position: [f32; 3], normal: [f32; 3], uv: [f32; 2] }`:
-// 32 bytes, normal at offset 12, uv at 24.
+// 32 bytes, normal at offset 12, uv at 24. A Slang upgrade or a compiler flag could change
+// that, so tests/shader_layout.rs checks these offsets and the push constants' in the SPIR-V.
 import Bindless;
 
 struct MeshVertex

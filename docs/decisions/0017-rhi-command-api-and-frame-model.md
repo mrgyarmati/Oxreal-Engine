@@ -189,7 +189,9 @@ Only indices use fixed-function hardware, which keeps the post-transform vertex 
 - **Not checkable:** the index *values*. They come from safe buffer writes. Every value is a
   valid index: primitive restart is off, and `fullDrawIndexUint32` is required (ADR-0016 §3).
   A shader that reads vertices by its vertex ID must stay in bounds, which makes index data part
-  of `ShaderCode::from_spirv_unchecked`'s program-wide obligation.
+  of `ShaderCode::from_spirv_unchecked`'s program-wide obligation. That covers every draw made
+  with a pipeline built from the code. Each index plus the vertex offset must be in
+  `0..=i32::MAX` (Vulkan leaves other sums unspecified) and name a vertex in the buffer.
 - **Lifetime and ordering:** as for buffers read by address. A buffer destroyed after it's bound
   stays alive until the encoder's work completes, and `write_buffer` takes effect in submission
   order.
@@ -199,6 +201,13 @@ negative vertex offsets, `0xFFFF` as an ordinary index, misuse, and destruction 
 recording. Deliberately broken versions showed that each of these fails the tests: ignoring the
 vertex offset, the first index or the bind offset, swapping the index type, dropping the range
 check, or turning primitive restart on.
+
+*After the `unsafe` audit* (no soundness bugs found):
+- The `ShaderCode` contract states the vertex-ID range above.
+- Shaders that pull vertices depend on Slang's layout for pointer targets, which neither
+  `spirv-val` nor the validation layers check against the CPU side. `tests/shader_layout.rs`
+  reads `Mesh.slang`'s vertex stride, member offsets and push-constant offsets from its SPIR-V
+  and compares them with the Rust packing. Widening a member makes it fail.
 
 ## Consequences
 

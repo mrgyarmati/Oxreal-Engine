@@ -122,7 +122,10 @@ impl CubeApp {
         // address it's given is the cube's vertex buffer, and the only indices the board's
         // texture and sampler. All of them live until `exiting`, after the last frame, and the
         // board is never rendered into. Every index in the cube's index buffer is below its
-        // vertex count, and it's drawn with a vertex offset of 0 (`cube_mesh`).
+        // vertex count, and it's drawn with a vertex offset of 0 (`cube_mesh`). The shader reads
+        // `MeshVertex` with a 32-byte stride and 4-byte-aligned loads, matching `cube_mesh`'s
+        // packing, and the push constants at the offsets `constants` writes
+        // (tests/shader_layout.rs checks both in the SPIR-V).
         let code = unsafe { ShaderCode::from_spirv_unchecked(&self.spirv) };
         let pipeline = self.device.create_render_pipeline(&RenderPipelineDesc {
             label: "cube",

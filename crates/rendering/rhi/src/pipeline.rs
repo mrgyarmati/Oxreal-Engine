@@ -43,7 +43,9 @@ impl<'a> ShaderCode<'a> {
     ///   (until that encoder's work completes), and never for an encoder created after.
     ///   Indexed draws ([`crate::RenderPass::draw_indexed`]) give the vertex shader each index plus
     ///   the draw's vertex offset as its vertex ID. A shader that reads vertices by that ID makes
-    ///   the index data, and the offset, part of this obligation.
+    ///   the index data and the offset part of this obligation, for **every draw recorded with a
+    ///   pipeline built from this code**: each index plus offset must be in `0..=i32::MAX` and
+    ///   name a vertex inside the buffer (Vulkan leaves a sum outside that range unspecified).
     /// - Shaders that sample through bindless indices ([`crate::Device::texture_index`],
     ///   [`crate::Device::sampler_index`]) must only be given indices those calls returned for
     ///   live objects. A texture index goes to the texture array and a sampler index to the
