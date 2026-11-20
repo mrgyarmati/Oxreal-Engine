@@ -283,3 +283,24 @@ constraints shape them:
   `cargo xtask cook-shaders`.
 - **Not yet:** no crate has a recipe until the renderer arrives (the next slice), so the
   workspace cook writes an empty manifest for now.
+- **Rules added after review:**
+  - Output names must differ in more than case, on every platform, since `Mesh.spv` and
+    `mesh.spv` are one file on Windows. Windows' reserved device names (`CON`, `NUL`, `COM1`
+    and so on) are refused everywhere too.
+  - The compiler's own modules are exempt from the declared-input check only if its
+    installation directory doesn't contain the workspace. Otherwise
+    `OXREAL_SLANGC=~/bin/slangc` would exempt every workspace file. Symlinks are resolved
+    first.
+  - Files of dropped shaders are removed before new files are written, so a rename that only
+    changes case keeps the new file on Windows.
+  - On Windows, replacing or removing a file retries for up to a second while another process
+    briefly holds it (scanners, the indexer). A loader must not keep cooked files open or
+    mapped while a cook may run.
+- **`spirv-val` differs by platform:** CI validates with v2026.4 (Vulkan SDK, Windows), v2026.1
+  (Ubuntu 26.04) and v2025.1 (Ubuntu 24.04). Every cook validates with whatever is installed,
+  and the manifest records which, so a cache is only reused with the validator that produced
+  it. A shader is checked by all three in CI.
+- **Known limitation:** a shader is skipped as unchanged when its declared inputs are. A *new*,
+  undeclared file that shadows an import earlier in the include path doesn't change the key,
+  so it's only caught when the shader next recompiles and the dependency check runs. Keeping
+  module names unique across include directories avoids it.

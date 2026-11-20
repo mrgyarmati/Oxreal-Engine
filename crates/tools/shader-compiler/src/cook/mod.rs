@@ -1,12 +1,12 @@
 //! Cooking shaders into a directory a shipped game loads (ADR-0019 §4).
 //!
-//! [`cook`] compiles every shader the given recipes (`shaders/cook.json`, see [`recipe`]) list
-//! and writes `<name>.spv` files and a [`manifest`]. The manifest is an attestation that
+//! [`cook`] compiles every shader the given recipes (`shaders/cook.json`, see [`CookEntry`]) list
+//! and writes `<name>.spv` files and a [`Manifest`]. The manifest is an attestation that
 //! `ShaderCode::from_spirv_unchecked` relies on, so cooking is strict where compiling isn't:
 //! - the compiler must be **exactly** the pinned Slang ([`SlangCompiler::ensure_pinned`]);
 //! - every module must pass `spirv-val` ([`SpirvValidator`] is required, not optional);
 //! - every workspace file the compiler reads must be a declared input. That makes the
-//!   [`source key`](key) complete, so the renderer can tell a stale cache from a current one.
+//!   [source key](source_key) complete, so the renderer can tell a stale cache from a current one.
 //!
 //! Shaders whose source key, entry points and optimization level are unchanged, and whose
 //! file is intact, are kept rather than recompiled. Files of shaders no recipe lists any more
@@ -17,23 +17,21 @@
 //! cook interrupted while writing leaves the old manifest, whose hashes then fail for the
 //! replaced files: the loader rejects that directory rather than load mismatched shaders.
 
-pub mod key;
-pub mod manifest;
-pub mod paths;
-pub mod recipe;
+mod key;
+mod manifest;
+mod paths;
+mod recipe;
 
 use std::path::{Path, PathBuf};
 
 use oxreal_diagnostics::{debug, info};
 
 pub use key::{SOURCE_KEY_FORMAT, SourceKey, TARGET, source_key};
-pub use manifest::{MANIFEST_FILE, MANIFEST_FORMAT, Manifest, ManifestShader, optimization_name};
-pub use paths::resolve_exact;
-pub use recipe::{
-    CookEntry, RECIPE_FORMAT, WorkspacePath, is_valid_output_name, parse_recipe, read_recipe,
-};
+pub use manifest::{MANIFEST_FILE, MANIFEST_FORMAT, Manifest, ManifestShader};
+pub use recipe::{CookEntry, RECIPE_FORMAT, WorkspacePath, read_recipe};
 
-use self::paths::{DependencyRoots, Location, normalize};
+use self::paths::{DependencyRoots, Location, normalize, resolve_exact};
+use self::recipe::is_valid_output_name;
 use crate::{
     CompileRequest, Optimization, ShaderError, SlangCompiler, SpirvValidator, pinned_version,
 };
@@ -107,6 +105,17 @@ pub enum CookError {
         /// The file.
         dependency: PathBuf,
     },
+    /// The compiler is installed in a directory that contains the workspace. Its own modules
+    /// are exempt from the declared-input check, so every workspace file would be too.
+    #[error(
+        "the Slang compiler's installation directory {compiler_root} contains the workspace, so \
+         the cook couldn't tell its modules from workspace files. Use the pinned Slang \
+         (`cargo xtask slang install`), or point OXREAL_SLANGC at a slangc in its own installation"
+    )]
+    CompilerContainsWorkspace {
+        /// The compiler's installation directory.
+        compiler_root: String,
+    },
     /// The compiler or validator isn't usable for cooking.
     #[error(transparent)]
     Tool(ShaderError),
@@ -146,6 +155,7 @@ pub struct CookRequest<'a> {
 
 /// What a cook did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CookReport {
     /// Shaders compiled.
     pub cooked: Vec<String>,
@@ -173,24 +183,37 @@ pub fn cook(
     for recipe in request.recipes {
         entries.extend(read_recipe(recipe)?);
     }
-    entries.sort_by(|a, b| a.output.cmp(&b.output));
+    // Output names must differ in more than case: on Windows `Mesh.spv` and `mesh.spv` are
+    // one file. The rule holds on every platform, so a recipe can't work only on Linux.
+    entries.sort_by_key(|e| e.output.to_ascii_lowercase());
     for pair in entries.windows(2) {
-        if pair[0].output == pair[1].output {
+        if pair[0].output.eq_ignore_ascii_case(&pair[1].output) {
             return Err(CookError::DuplicateOutput {
-                name: pair[0].output.clone(),
+                name: pair[1].output.clone(),
                 first: pair[0].recipe.clone(),
                 second: pair[1].recipe.clone(),
             });
         }
     }
 
+    // Resolve symlinks before taking the compiler's install directory, so it's where Slang
+    // really is (`/usr/local/bin/slangc` may point into `/opt/slang`).
+    let slangc = std::fs::canonicalize(compiler.path()).map_err(|source| CookError::Io {
+        action: format!("resolving {}", compiler.path().display()),
+        source,
+    })?;
+    let compiler_root = slangc
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new(""));
     let roots = DependencyRoots {
         workspace: normalize(request.workspace)?,
-        compiler: normalize(compiler.install_root())?,
+        compiler: normalize(compiler_root)?,
         // Windows file systems ignore case, so its paths compare without it. This is a
         // property of the host's file system, not engine platform code (CLAUDE.md rule 4).
         ignore_case: cfg!(windows),
     };
+    roots.check()?;
     std::fs::create_dir_all(request.out_dir).map_err(|source| CookError::Io {
         action: format!("creating {}", request.out_dir.display()),
         source,
@@ -198,7 +221,10 @@ pub fn cook(
     let manifest_path = request.out_dir.join(MANIFEST_FILE);
     let previous = std::fs::read_to_string(&manifest_path)
         .ok()
-        .and_then(|text| Manifest::from_previous(&text))
+        .and_then(|text| Manifest::from_previous(&text));
+    // Shaders can be reused only from a manifest made by the same tools.
+    let reusable = previous
+        .as_ref()
         .filter(|m| m.slang_version == slang_version && m.spirv_val_version == validator.version());
 
     // Compile and validate everything first. Files change only once every shader has passed.
@@ -213,7 +239,7 @@ pub fn cook(
             &roots,
             &slang_version,
             entry,
-            previous.as_ref(),
+            reusable,
         )?;
         match spirv {
             Some(bytes) => {
@@ -224,17 +250,18 @@ pub fn cook(
         }
         shaders.push(shader);
     }
-    for (path, bytes) in &writes {
-        write_atomically(path, bytes)?;
-    }
 
+    // Remove dropped shaders' files before writing, so a shader renamed only by case
+    // (`Tint` to `tint`) loses its old file before the new one lands: on Windows they're one
+    // file.
     if let Some(previous) = &previous {
         for old in &previous.shaders {
             let listed = shaders.iter().any(|s| s.name == old.name);
-            // Only remove what this cook would have written, never an arbitrary path.
+            // Only remove what this cook would have written, never an arbitrary path from the
+            // previous manifest.
             if !listed && is_valid_output_name(&old.name) && old.file == spv_file(&old.name) {
                 let path = request.out_dir.join(&old.file);
-                match std::fs::remove_file(&path) {
+                match with_sharing_retries(|| std::fs::remove_file(&path)) {
                     Ok(()) => report.removed.push(old.name.clone()),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(source) => {
@@ -246,6 +273,9 @@ pub fn cook(
                 }
             }
         }
+    }
+    for (path, bytes) in &writes {
+        write_atomically(path, bytes)?;
     }
 
     let manifest = Manifest {
@@ -376,16 +406,117 @@ fn spv_file(name: &str) -> String {
 }
 
 /// Writes `path` through a temporary file and a rename, so a reader never sees half a file.
+/// The temporary file is named after the process, so concurrent cooks don't share it, and it's
+/// removed if the write fails.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CookError> {
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
+    temporary.push(format!(".{}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
-    std::fs::write(&temporary, bytes).map_err(|source| CookError::Io {
-        action: format!("writing {}", temporary.display()),
-        source,
-    })?;
-    std::fs::rename(&temporary, path).map_err(|source| CookError::Io {
-        action: format!("replacing {}", path.display()),
-        source,
-    })
+    let result = std::fs::write(&temporary, bytes)
+        .map_err(|source| CookError::Io {
+            action: format!("writing {}", temporary.display()),
+            source,
+        })
+        .and_then(|()| {
+            with_sharing_retries(|| std::fs::rename(&temporary, path)).map_err(|source| {
+                CookError::Io {
+                    action: format!(
+                        "replacing {} (is a running program holding it open?)",
+                        path.display()
+                    ),
+                    source,
+                }
+            })
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Runs `operation`, retrying for up to a second while it fails with `PermissionDenied`.
+///
+/// On Windows, replacing or deleting a file fails while another process has it open without
+/// delete sharing, and virus scanners and the search indexer open new files briefly. Elsewhere
+/// that error is permanent, so there are no retries. A file a program keeps open fails after
+/// the retries, with the error naming it.
+fn with_sharing_retries(mut operation: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    // A property of Windows file sharing, not engine platform code (CLAUDE.md rule 4).
+    let retries = if cfg!(windows) { 20 } else { 0 };
+    let mut attempt = 0;
+    loop {
+        match operation() {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < retries => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependencies_are_checked_against_the_declared_inputs() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cook");
+        let entry = read_recipe(&workspace.join("shaders/cook.json")).unwrap()[0].clone();
+        // A file outside the workspace, and a separate "compiler installation".
+        let outside =
+            std::env::temp_dir().join(format!("oxreal-cook-outside-{}", std::process::id()));
+        let compiler = outside.join("slang");
+        std::fs::create_dir_all(compiler.join("lib")).unwrap();
+        std::fs::write(outside.join("Stray.slang"), "").unwrap();
+        std::fs::write(compiler.join("lib/core.slang"), "").unwrap();
+        let roots = DependencyRoots {
+            workspace: normalize(&workspace).unwrap(),
+            compiler: normalize(&compiler).unwrap(),
+            ignore_case: cfg!(windows),
+        };
+
+        let declared = [
+            workspace.join("shaders/Tint.slang"),
+            workspace.join("common/Palette.slang"),
+        ];
+        assert!(check_dependencies(&entry, &declared, &roots).is_ok());
+        assert!(
+            check_dependencies(&entry, &[compiler.join("lib/core.slang")], &roots).is_ok(),
+            "the compiler's own modules are exempt"
+        );
+        assert!(matches!(
+            check_dependencies(&entry, &[outside.join("Stray.slang")], &roots),
+            Err(CookError::DependencyOutsideWorkspace { .. })
+        ));
+        match check_dependencies(&entry, &[workspace.join("shaders/cook.json")], &roots) {
+            Err(CookError::UndeclaredDependency { dependency, .. }) => {
+                assert_eq!(dependency, "shaders/cook.json");
+            }
+            other => panic!("expected UndeclaredDependency, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn sharing_retries_stop_at_success_or_a_permanent_error() {
+        let mut calls = 0;
+        let result = with_sharing_retries(|| {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "only PermissionDenied is retried");
+
+        let mut calls = 0;
+        let result = with_sharing_retries(|| {
+            calls += 1;
+            if calls < 2 && cfg!(windows) {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_ok());
+    }
 }

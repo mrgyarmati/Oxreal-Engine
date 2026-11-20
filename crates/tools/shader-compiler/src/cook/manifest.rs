@@ -1,27 +1,4 @@
 //! `manifest.json`: what a cooked shader directory holds (ADR-0019 §4).
-//!
-//! ```json
-//! {
-//!   "format": 1,
-//!   "slang_version": "2026.22",
-//!   "spirv_val_version": "SPIRV-Tools v2026.4 v2026.4-0-gef96ed76",
-//!   "target": "spirv-1.6/vulkan-1.3",
-//!   "shaders": [
-//!     {
-//!       "name": "Mesh",
-//!       "file": "Mesh.spv",
-//!       "entry_points": ["meshVertex", "meshPixel"],
-//!       "optimization": "debug",
-//!       "spirv_sha256": "<64 hex digits>",
-//!       "source_key": "<64 hex digits>"
-//!     }
-//!   ]
-//! }
-//! ```
-//!
-//! This crate writes it. The renderer's loader reads it, strictly and as untrusted input. The
-//! cook reads its own previous manifest only to skip unchanged shaders, and recooks anything it
-//! doesn't fully recognize. Shaders are sorted by name, so equal inputs give equal files.
 
 use serde_json::{Value, json};
 
@@ -36,6 +13,7 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 
 /// One cooked shader, as recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ManifestShader {
     /// The output name.
     pub name: String,
@@ -51,8 +29,32 @@ pub struct ManifestShader {
     pub source_key: String,
 }
 
-/// A whole manifest.
+/// A whole manifest, `manifest.json` in a cooked shader directory:
+///
+/// ```json
+/// {
+///   "format": 1,
+///   "slang_version": "2026.22",
+///   "spirv_val_version": "SPIRV-Tools v2026.4 v2026.4-0-gef96ed76",
+///   "target": "spirv-1.6/vulkan-1.3",
+///   "shaders": [
+///     {
+///       "name": "Mesh",
+///       "file": "Mesh.spv",
+///       "entry_points": ["meshVertex", "meshPixel"],
+///       "optimization": "debug",
+///       "spirv_sha256": "<64 hex digits>",
+///       "source_key": "<64 hex digits>"
+///     }
+///   ]
+/// }
+/// ```
+///
+/// This crate writes it. The renderer's loader reads it, strictly and as untrusted input. The
+/// cook reads its own previous manifest only to skip unchanged shaders, and recooks anything it
+/// doesn't fully recognize. Shaders are sorted by name, so equal inputs give equal files.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Manifest {
     /// The pinned Slang version.
     pub slang_version: String,
@@ -128,7 +130,7 @@ impl Manifest {
 
 /// The manifest's name for an optimization level.
 #[must_use]
-pub fn optimization_name(optimization: Optimization) -> &'static str {
+pub(crate) fn optimization_name(optimization: Optimization) -> &'static str {
     match optimization {
         Optimization::Debug => "debug",
         Optimization::Release => "release",

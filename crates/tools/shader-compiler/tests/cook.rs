@@ -256,3 +256,125 @@ fn a_shader_no_recipe_lists_is_removed() {
     assert!(ws.out_dir().join("Tinted.spv").is_file());
     assert_eq!(ws.manifest().shaders.len(), 1);
 }
+
+/// A second recipe entry, compiled from `shaders/<source>`.
+fn add_entry(ws: &Workspace, output: &str, source: &str) {
+    ws.edit(
+        "shaders/cook.json",
+        "  \"shaders\": [\n",
+        &format!(
+            "  \"shaders\": [\n    {{ \"output\": \"{output}\", \"source\": \"shaders/{source}\", \
+             \"entry_points\": [\"tintVertex\"], \"include_dirs\": [\"common\"], \
+             \"inputs\": [\"shaders/{source}\", \"common/Palette.slang\"] }},\n"
+        ),
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned Slang and spirv-val: cargo xtask slang install, then --ignored"]
+fn a_failing_shader_leaves_every_file_untouched_even_after_others_recompiled() {
+    if validator().is_none() {
+        return;
+    }
+    let ws = Workspace::new();
+    ws.cook(Optimization::Debug).unwrap();
+    let manifest = std::fs::read(ws.out_dir().join(MANIFEST_FILE)).unwrap();
+    let spirv = std::fs::read(ws.out_dir().join("Tint.spv")).unwrap();
+
+    // Tint must recompile (its import changed), and a second shader, sorted after it, is broken.
+    ws.edit(
+        "common/Palette.slang",
+        "float3(1.0, 0.2, 0.2)",
+        "float3(0.8, 0.2, 0.2)",
+    );
+    std::fs::write(
+        ws.root.join("shaders/Zbroken.slang"),
+        "import Palette;\n[shader(\"vertex\")] float4 tintVertex() : SV_Position { return undefinedSymbol; }\n",
+    )
+    .unwrap();
+    add_entry(&ws, "Zbroken", "Zbroken.slang");
+
+    match ws.cook(Optimization::Debug).unwrap_err() {
+        CookError::Shader { output, .. } => assert_eq!(output, "Zbroken"),
+        other => panic!("expected a shader error, got {other}"),
+    }
+    assert_eq!(
+        std::fs::read(ws.out_dir().join(MANIFEST_FILE)).unwrap(),
+        manifest
+    );
+    assert_eq!(std::fs::read(ws.out_dir().join("Tint.spv")).unwrap(), spirv);
+    let leftovers: Vec<_> = std::fs::read_dir(ws.out_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp") || name.starts_with("Zbroken"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+#[ignore = "needs the pinned Slang and spirv-val: cargo xtask slang install, then --ignored"]
+fn outputs_differing_only_in_case_are_refused_on_every_platform() {
+    if validator().is_none() {
+        return;
+    }
+    let ws = Workspace::new();
+    add_entry(&ws, "tint", "Tint.slang");
+    match ws.cook(Optimization::Debug).unwrap_err() {
+        CookError::DuplicateOutput { name, .. } => {
+            assert!(name.eq_ignore_ascii_case("tint"), "{name}");
+        }
+        other => panic!("expected DuplicateOutput, got {other}"),
+    }
+}
+
+#[test]
+#[ignore = "needs the pinned Slang and spirv-val: cargo xtask slang install, then --ignored"]
+fn renaming_a_shader_only_in_case_keeps_its_new_file() {
+    if validator().is_none() {
+        return;
+    }
+    let ws = Workspace::new();
+    ws.cook(Optimization::Debug).unwrap();
+    ws.edit(
+        "shaders/cook.json",
+        "\"output\": \"Tint\"",
+        "\"output\": \"tint\"",
+    );
+    assert_eq!(
+        ws.cook(Optimization::Debug).unwrap(),
+        [names(&["tint"]), vec![], names(&["Tint"])]
+    );
+    // On Windows Tint.spv and tint.spv are one file: removing the old name first keeps it.
+    let files: Vec<String> = std::fs::read_dir(ws.out_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".spv"))
+        .collect();
+    assert_eq!(files, ["tint.spv"]);
+}
+
+#[test]
+#[ignore = "needs the pinned Slang and spirv-val: cargo xtask slang install, then --ignored"]
+fn a_hostile_previous_manifest_never_removes_files_outside_the_directory() {
+    if validator().is_none() {
+        return;
+    }
+    let ws = Workspace::new();
+    ws.cook(Optimization::Debug).unwrap();
+    let victim = ws.root.join("target/cooked/victim.spv");
+    std::fs::write(&victim, b"keep me").unwrap();
+    let path = ws.out_dir().join(MANIFEST_FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let hostile = text.replacen(
+        "\"shaders\": [",
+        "\"shaders\": [\n    { \"name\": \"../victim\", \"file\": \"../victim.spv\", \
+         \"entry_points\": [], \"optimization\": \"debug\", \"spirv_sha256\": \"\", \
+         \"source_key\": \"\" },",
+        1,
+    );
+    assert_ne!(hostile, text);
+    std::fs::write(&path, hostile).unwrap();
+
+    ws.cook(Optimization::Debug).unwrap();
+    assert!(victim.is_file(), "a path from the manifest was removed");
+}

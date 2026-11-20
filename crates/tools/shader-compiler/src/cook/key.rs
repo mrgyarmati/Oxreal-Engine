@@ -1,10 +1,10 @@
 //! The source key (ADR-0019 §4): what a cooked shader was built from.
 //!
-//! The renderer computes the same key in its build script and refuses a cache cooked from
-//! anything else. That build script can't depend on this crate (it's a tool), so it
-//! reimplements this encoding. Both sides are tested against the same golden value, and the
-//! renderer's round-trip test checks they agree. **Any change here is a format change:** bump
-//! [`SOURCE_KEY_FORMAT`] and change both implementations together.
+//! The renderer (ADR-0019 §1) will compute the same key in its build script and refuse a cache
+//! cooked from anything else. That build script can't depend on this crate (it's a tool), so it
+//! will reimplement this encoding, tested against the same golden value, with a round-trip test
+//! checking that both agree. **Any change here is a format change:** bump [`SOURCE_KEY_FORMAT`]
+//! and change both implementations together.
 //!
 //! The key is the SHA-256 of these records, in order. A *field* is its length as a
 //! little-endian `u64`, then its bytes. A *count* is a little-endian `u64`.
@@ -42,7 +42,7 @@ impl fmt::Display for SourceKey {
 /// Computes `entry`'s source key, reading its declared inputs below `workspace`.
 ///
 /// It reads the paths as written. Cooking checks first that each exists with exactly that case
-/// ([`super::resolve_exact`]).
+/// (`resolve_exact`).
 ///
 /// # Errors
 ///

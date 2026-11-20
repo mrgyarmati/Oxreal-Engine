@@ -39,7 +39,11 @@ pub(crate) fn run(cargo: &str, root: &Path, args: &[String]) -> Result<(), Strin
     if plan.recipes.is_empty() {
         println!("cook-shaders: no crate has a shaders/cook.json; writing an empty manifest");
     }
-    crate::slang::ensure_installed(root)?;
+    // A developer's own compiler (OXREAL_SLANGC) replaces the pinned download. The cook still
+    // requires it to report exactly the pinned version.
+    if std::env::var_os("OXREAL_SLANGC").is_none() {
+        crate::slang::ensure_installed(root)?;
+    }
 
     let mut command = Command::new(cargo);
     command
@@ -87,7 +91,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         let slot_taken = match arg.as_str() {
             "--profile" => options.profile.replace(value()?).is_some(),
             "--target" => options.target.replace(value()?).is_some(),
-            "--out" => options.out.replace(value()?.into()).is_some(),
+            // The tool runs in the workspace root, so a relative --out is made absolute against
+            // the directory the developer ran the command in.
+            "--out" => options.out.replace(absolute(value()?.into())?).is_some(),
             other => {
                 return Err(format!(
                     "cook-shaders: unknown option `{other}` (see `cargo xtask help`)"
@@ -99,6 +105,11 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         }
     }
     Ok(options)
+}
+
+/// `path` made absolute against the current directory.
+fn absolute(path: PathBuf) -> Result<PathBuf, String> {
+    std::path::absolute(&path).map_err(|e| format!("cannot resolve {}: {e}", path.display()))
 }
 
 /// Works out the plan from `cargo metadata` output. `exists` says whether a file exists.
@@ -229,10 +240,22 @@ mod tests {
         );
     }
 
+    fn plan_for(words: &str) -> Plan {
+        plan(&metadata(), &options(words), has_recipe).unwrap()
+    }
+
     #[test]
-    fn out_replaces_the_cooked_root() {
+    fn out_replaces_the_cooked_root_and_is_made_absolute() {
         let plan = plan(&metadata(), &options("--out /tmp/game/cooked"), has_recipe).unwrap();
-        assert_eq!(plan.out_dir, Path::new("/tmp/game/cooked/shaders"));
+        let expected = absolute("/tmp/game/cooked".into()).unwrap().join("shaders");
+        assert_eq!(plan.out_dir, expected);
+        assert!(plan.out_dir.is_absolute());
+
+        let relative = plan_for("--out cooked");
+        assert_eq!(
+            relative.out_dir,
+            std::env::current_dir().unwrap().join("cooked/shaders")
+        );
     }
 
     #[test]

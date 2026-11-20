@@ -13,7 +13,7 @@ use super::{CookError, WorkspacePath};
 ///
 /// [`CookError::MissingInput`] if it doesn't exist, [`CookError::CaseMismatch`] if it exists
 /// only with different case, or [`CookError::Io`] if a directory can't be listed.
-pub fn resolve_exact(
+pub(crate) fn resolve_exact(
     workspace: &Path,
     path: &WorkspacePath,
     recipe: &Path,
@@ -75,7 +75,7 @@ fn missing(path: &WorkspacePath, recipe: &Path) -> CookError {
 /// # Errors
 ///
 /// [`CookError::Io`] if it can't be canonicalized (it doesn't exist, for example).
-pub fn normalize(path: &Path) -> Result<String, CookError> {
+pub(crate) fn normalize(path: &Path) -> Result<String, CookError> {
     let canonical = std::fs::canonicalize(path).map_err(|source| CookError::Io {
         action: format!("resolving {}", path.display()),
         source,
@@ -98,7 +98,7 @@ fn normalize_text(path: &str) -> String {
 
 /// Where a dependency `slangc` reported lies.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Location {
+pub(crate) enum Location {
     /// In the workspace, at this workspace-relative path.
     Workspace(String),
     /// In the compiler's own installation (its core modules), which the Slang version covers.
@@ -109,20 +109,20 @@ pub enum Location {
 
 /// Classifies normalized paths against the normalized workspace and compiler roots.
 #[derive(Debug, Clone)]
-pub struct DependencyRoots {
+pub(crate) struct DependencyRoots {
     /// The workspace root, normalized.
-    pub workspace: String,
+    pub(crate) workspace: String,
     /// The compiler's install root, normalized.
-    pub compiler: String,
+    pub(crate) compiler: String,
     /// Whether paths compare without case, as on Windows.
-    pub ignore_case: bool,
+    pub(crate) ignore_case: bool,
 }
 
 impl DependencyRoots {
     /// Classifies `path`, already normalized. The compiler's root is checked first: the pinned
     /// Slang is installed inside the workspace, in `.tools/`.
     #[must_use]
-    pub fn locate(&self, path: &str) -> Location {
+    pub(crate) fn locate(&self, path: &str) -> Location {
         if relative_to(&self.compiler, path, self.ignore_case).is_some() {
             Location::Compiler
         } else if let Some(relative) = relative_to(&self.workspace, path, self.ignore_case) {
@@ -132,9 +132,27 @@ impl DependencyRoots {
         }
     }
 
+    /// Checks that the compiler's installation doesn't contain the workspace. If it did, every
+    /// workspace file would count as one of the compiler's modules, exempt from the
+    /// declared-input check (for example `OXREAL_SLANGC=~/bin/slangc`, whose installation
+    /// directory is `~`). The pinned Slang lives *inside* the workspace, which is fine.
+    ///
+    /// # Errors
+    ///
+    /// [`CookError::CompilerContainsWorkspace`].
+    pub(crate) fn check(&self) -> Result<(), CookError> {
+        if contains(&self.compiler, &self.workspace, self.ignore_case) {
+            Err(CookError::CompilerContainsWorkspace {
+                compiler_root: self.compiler.clone(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Whether `relative` (from [`Location::Workspace`]) is `declared`.
     #[must_use]
-    pub fn matches(&self, relative: &str, declared: &WorkspacePath) -> bool {
+    pub(crate) fn matches(&self, relative: &str, declared: &WorkspacePath) -> bool {
         if self.ignore_case {
             relative.to_lowercase() == declared.as_str().to_lowercase()
         } else {
@@ -145,16 +163,29 @@ impl DependencyRoots {
 
 /// `path` relative to `root`, both normalized, or `None` if it isn't below it.
 fn relative_to(root: &str, path: &str, ignore_case: bool) -> Option<String> {
-    if root.is_empty() || path.len() <= root.len() + 1 {
+    if root.is_empty() {
         return None;
     }
-    let (head, rest) = path.split_at(root.len());
+    // `get` returns `None` where `root.len()` falls inside a multi-byte character of `path`, so
+    // non-ASCII paths can't panic here.
+    let head = path.get(..root.len())?;
+    let rest = path.get(root.len()..)?.strip_prefix('/')?;
     let same = if ignore_case {
         head.to_lowercase() == root.to_lowercase()
     } else {
         head == root
     };
-    (same && rest.starts_with('/')).then(|| rest[1..].to_owned())
+    (same && !rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// Whether `inner` is `outer` or below it, both normalized.
+pub(crate) fn contains(outer: &str, inner: &str, ignore_case: bool) -> bool {
+    let equal = if ignore_case {
+        outer.to_lowercase() == inner.to_lowercase()
+    } else {
+        outer == inner
+    };
+    equal || relative_to(outer, inner, ignore_case).is_some()
 }
 
 #[cfg(test)]
@@ -225,6 +256,54 @@ mod tests {
         let declared = WorkspacePath::new("crates/a.slang").unwrap();
         assert!(roots.matches("crates/a.slang", &declared));
         assert!(!roots.matches("crates/A.slang", &declared));
+    }
+
+    #[test]
+    fn non_ascii_paths_never_panic() {
+        // Byte 13 of the path falls inside `é`: comparing must not split it.
+        assert_eq!(
+            relative_to("/home/dev/abc", "/home/dev/éé/x.slang", false),
+            None
+        );
+        assert_eq!(
+            relative_to("C:/Users/Jürgen", "C:/Users/Jürgen/ws/a.slang", true),
+            Some("ws/a.slang".to_owned())
+        );
+        assert_eq!(
+            windows().locate("E:/Développement/a.slang"),
+            Location::Outside
+        );
+    }
+
+    #[test]
+    fn a_compiler_installed_around_the_workspace_is_refused() {
+        // OXREAL_SLANGC=/home/dev/bin/slangc: the installation directory is /home/dev.
+        let around = DependencyRoots {
+            workspace: "/home/dev/oxreal".to_owned(),
+            compiler: "/home/dev".to_owned(),
+            ignore_case: false,
+        };
+        assert!(matches!(
+            around.check(),
+            Err(CookError::CompilerContainsWorkspace { .. })
+        ));
+        let same = DependencyRoots {
+            compiler: "/home/dev/oxreal".to_owned(),
+            ..around.clone()
+        };
+        assert!(same.check().is_err());
+        // The pinned Slang inside the workspace, and a separate installation, are fine.
+        assert!(windows().check().is_ok());
+        assert!(linux().check().is_ok());
+    }
+
+    #[test]
+    fn containment_includes_the_directory_itself() {
+        assert!(contains("/home/dev", "/home/dev", false));
+        assert!(contains("/home/dev", "/home/dev/oxreal", false));
+        assert!(!contains("/home/dev/oxreal", "/home/dev", false));
+        assert!(contains("C:/Users/Dev", "c:/users/dev/oxreal", true));
+        assert!(!contains("/home/dev", "/home/developer", false));
     }
 
     #[test]

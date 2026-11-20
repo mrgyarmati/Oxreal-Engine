@@ -1,26 +1,4 @@
 //! `shaders/cook.json`: what a crate cooks (ADR-0019 §4).
-//!
-//! ```json
-//! {
-//!   "format": 1,
-//!   "shaders": [
-//!     {
-//!       "output": "Mesh",
-//!       "source": "crates/rendering/renderer/shaders/Mesh.slang",
-//!       "entry_points": ["meshVertex", "meshPixel"],
-//!       "include_dirs": ["crates/rendering/rhi/shaders"],
-//!       "inputs": [
-//!         "crates/rendering/renderer/shaders/Mesh.slang",
-//!         "crates/rendering/rhi/shaders/Bindless.slang"
-//!       ]
-//!     }
-//!   ]
-//! }
-//! ```
-//!
-//! Paths are workspace-relative, `/`-separated and case-exact. They're used as written, never
-//! derived from the file system, so a recipe means the same on every OS and in every checkout.
-//! Unknown fields are errors, so a misspelt field can't be silently ignored.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -43,7 +21,7 @@ impl WorkspacePath {
     /// # Errors
     ///
     /// Why the path isn't acceptable.
-    pub fn new(text: &str) -> Result<Self, String> {
+    pub(crate) fn new(text: &str) -> Result<Self, String> {
         if text.is_empty() {
             return Err("a path is empty".to_owned());
         }
@@ -53,6 +31,13 @@ impl WorkspacePath {
         if text.contains(':') || text.contains('\0') {
             return Err(format!(
                 "`{text}` contains `:` or NUL: paths are workspace-relative"
+            ));
+        }
+        // File names that aren't valid UTF-8 are shown with U+FFFD, so a recipe naming it could
+        // match a file it doesn't really name.
+        if text.contains('\u{FFFD}') {
+            return Err(format!(
+                "`{text}` contains U+FFFD: name files in valid UTF-8"
             ));
         }
         if text.starts_with('/') {
@@ -89,17 +74,25 @@ impl fmt::Display for WorkspacePath {
 }
 
 /// Whether `name` is a valid output name: 1 to 64 ASCII letters, digits, `_` or `-`, starting
-/// with a letter or digit. The cooked file is `<name>.spv`.
+/// with a letter or digit, and not one of Windows' reserved device names (`CON`, `NUL`,
+/// `COM1` and so on, in any case), on every platform. The cooked file is `<name>.spv`.
 #[must_use]
-pub fn is_valid_output_name(name: &str) -> bool {
+pub(crate) fn is_valid_output_name(name: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
     let mut chars = name.chars();
-    name.len() <= 64
+    let well_formed = name.len() <= 64
         && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let upper = name.to_ascii_uppercase();
+    let numbered_device = upper.len() == 4
+        && (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.ends_with(|c: char| c.is_ascii_digit());
+    well_formed && !RESERVED.contains(&upper.as_str()) && !numbered_device
 }
 
 /// One shader to cook.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CookEntry {
     /// The output name. The cooked file is `<output>.spv`.
     pub output: String,
@@ -116,7 +109,29 @@ pub struct CookEntry {
     pub recipe: PathBuf,
 }
 
-/// Reads a recipe file.
+/// Reads a recipe file, `shaders/cook.json`:
+///
+/// ```json
+/// {
+///   "format": 1,
+///   "shaders": [
+///     {
+///       "output": "Mesh",
+///       "source": "crates/rendering/renderer/shaders/Mesh.slang",
+///       "entry_points": ["meshVertex", "meshPixel"],
+///       "include_dirs": ["crates/rendering/rhi/shaders"],
+///       "inputs": [
+///         "crates/rendering/renderer/shaders/Mesh.slang",
+///         "crates/rendering/rhi/shaders/Bindless.slang"
+///       ]
+///     }
+///   ]
+/// }
+/// ```
+///
+/// Paths are workspace-relative, `/`-separated and case-exact. They're used as written, never
+/// derived from the file system, so a recipe means the same on every OS and in every checkout.
+/// Unknown fields are errors, so a misspelt field can't be silently ignored.
 ///
 /// # Errors
 ///
@@ -137,7 +152,7 @@ pub fn read_recipe(path: &Path) -> Result<Vec<CookEntry>, CookError> {
 /// # Errors
 ///
 /// What's wrong with it.
-pub fn parse_recipe(text: &str, recipe: &Path) -> Result<Vec<CookEntry>, String> {
+pub(crate) fn parse_recipe(text: &str, recipe: &Path) -> Result<Vec<CookEntry>, String> {
     let json: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
     let top = object(&json, "the recipe")?;
     only_fields(top, "the recipe", &["format", "shaders"])?;
@@ -289,6 +304,7 @@ mod tests {
             "a/../b.slang",
             "..",
             "a/",
+            "a/\u{FFFD}.slang",
         ] {
             assert!(WorkspacePath::new(bad).is_err(), "`{bad}` was accepted");
         }
@@ -297,10 +313,23 @@ mod tests {
 
     #[test]
     fn checks_output_names() {
-        for good in ["Mesh", "mesh_lit", "a-1", "9"] {
+        for good in ["Mesh", "mesh_lit", "a-1", "9", "Console", "COM", "COM10"] {
             assert!(is_valid_output_name(good), "{good}");
         }
-        for bad in ["", "_x", "-x", "a.b", "a/b", "a b", "ä", &"x".repeat(65)] {
+        for bad in [
+            "",
+            "_x",
+            "-x",
+            "a.b",
+            "a/b",
+            "a b",
+            "ä",
+            &"x".repeat(65),
+            "CON",
+            "nul",
+            "Com1",
+            "LPT9",
+        ] {
             assert!(!is_valid_output_name(bad), "{bad}");
         }
     }

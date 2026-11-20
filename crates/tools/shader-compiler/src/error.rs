@@ -59,6 +59,14 @@ pub enum ShaderError {
          package, so it's on PATH"
     )]
     ValidatorNotFound,
+    /// The `spirv-val` named can't be used.
+    #[error("{path} is not a usable spirv-val: {details}")]
+    ValidatorUnusable {
+        /// The path given.
+        path: PathBuf,
+        /// What's wrong.
+        details: String,
+    },
     /// The compiler isn't exactly the version pinned in `tools/slang.json`. Cooking requires it
     /// (ADR-0019 §4).
     #[error(

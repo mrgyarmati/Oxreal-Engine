@@ -34,12 +34,16 @@ impl SpirvValidator {
     ///
     /// # Errors
     ///
-    /// [`ShaderError::ValidatorNotFound`] if there's no file at `path`, or
-    /// [`ShaderError::Io`] if it can't be run.
+    /// [`ShaderError::ValidatorUnusable`] if there's no file at `path` or it doesn't report a
+    /// version, or [`ShaderError::Io`] if it can't be run.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, ShaderError> {
         let path = path.into();
+        let unusable = |details: String| ShaderError::ValidatorUnusable {
+            path: path.clone(),
+            details,
+        };
         if !path.is_file() {
-            return Err(ShaderError::ValidatorNotFound);
+            return Err(unusable("there is no file there".to_owned()));
         }
         let output = Command::new(&path)
             .arg("--version")
@@ -48,14 +52,20 @@ impl SpirvValidator {
                 action: format!("running {} --version", path.display()),
                 source,
             })?;
+        if !output.status.success() {
+            return Err(unusable(format!("`--version` failed ({})", output.status)));
+        }
         // The first line names the release, for example `SPIRV-Tools v2026.4 v2026.4-0-g...`.
-        // The rest lists every target it knows.
+        // The rest lists every target it knows. Manifests record it, so it must be there.
         let version = String::from_utf8_lossy(&output.stdout)
             .lines()
             .next()
             .unwrap_or_default()
             .trim()
             .to_owned();
+        if version.is_empty() {
+            return Err(unusable("`--version` printed nothing".to_owned()));
+        }
         Ok(Self { path, version })
     }
 
@@ -159,9 +169,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_validator_is_a_typed_error() {
+    fn a_missing_validator_is_a_typed_error_naming_the_path() {
         let err = SpirvValidator::new("definitely/not/spirv-val").unwrap_err();
-        assert!(matches!(err, ShaderError::ValidatorNotFound));
-        assert!(err.to_string().contains("Vulkan SDK"), "{err}");
+        assert!(
+            matches!(err, ShaderError::ValidatorUnusable { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("definitely"), "{err}");
+        assert!(
+            ShaderError::ValidatorNotFound
+                .to_string()
+                .contains("Vulkan SDK")
+        );
     }
 }
