@@ -14,7 +14,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use oxreal_ecs::{Component, Entity, World};
+use oxreal_ecs::{Changed, Component, Entity, Resource, Schedule, Stage, System, World};
 
 #[derive(Clone, Copy)]
 struct Position([f32; 3]);
@@ -81,6 +81,45 @@ fn spread_world(archetypes: usize) -> World {
     world
 }
 
+/// The sum a summing system writes, so its work isn't optimized away.
+struct Sum(f32);
+impl Resource for Sum {}
+
+/// A world of `ENTITIES` moving entities and a schedule whose one system sums the x positions
+/// it visits: only changed ones if `changed_only`, all otherwise. The schedule has run once
+/// (a system's first run sees everything), then every `stride`-th position was written.
+fn summing(changed_only: bool, stride: usize) -> (World, Schedule) {
+    let mut world = World::new();
+    world.insert_resource(Sum(0.0));
+    let entities: Vec<Entity> = (0..ENTITIES).map(|i| world.spawn(moving(i))).collect();
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PostUpdate,
+        System::new("sum", move |ctx| {
+            let sum: f32 = if changed_only {
+                ctx.world
+                    .query_filtered::<&Position, Changed<Position>>()
+                    .map(|p| p.0[0])
+                    .sum()
+            } else {
+                ctx.world.query::<&Position>().map(|p| p.0[0]).sum()
+            };
+            if let Some(mut total) = ctx.resources.get_mut::<Sum>() {
+                total.0 = sum;
+            }
+        })
+        .reads::<Position>()
+        .writes_resource::<Sum>(),
+    );
+    schedule.run(&mut world).expect("the schedule is valid");
+    for &entity in entities.iter().step_by(stride) {
+        if let Some(mut position) = world.get_mut::<Position>(entity) {
+            position.0[0] += 1.0;
+        }
+    }
+    (world, schedule)
+}
+
 fn integrate(world: &mut World) {
     for (mut position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
         for axis in 0..3 {
@@ -128,6 +167,20 @@ fn main() {
             &format!("iterate (&mut Position, &Velocity), {archetypes} archetype(s)"),
             || spread_world(archetypes),
             integrate,
+        );
+    }
+
+    for (name, changed_only, stride) in [
+        ("read every position (no filter)", false, 1),
+        ("read Changed<Position>, 1% changed", true, 100),
+        ("read Changed<Position>, all changed", true, 1),
+    ] {
+        bench(
+            name,
+            || summing(changed_only, stride),
+            |(world, schedule)| {
+                schedule.run(world).expect("the schedule is valid");
+            },
         );
     }
 

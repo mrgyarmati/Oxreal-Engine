@@ -2,6 +2,7 @@
 
 use std::any::{TypeId, type_name};
 
+use crate::change::Tick;
 use crate::component::{Component, ComponentId, Components};
 use crate::storage::Archetype;
 
@@ -12,7 +13,7 @@ use crate::storage::Archetype;
 pub trait Bundle: sealed::BundleImpl + Send + Sync + 'static {}
 
 pub(crate) mod sealed {
-    use super::{Archetype, ComponentId, Components, TypeId};
+    use super::{Archetype, ComponentId, Components, Tick, TypeId};
 
     /// The engine's side of [`super::Bundle`]. Not implementable outside `oxreal-ecs`.
     pub trait BundleImpl {
@@ -20,8 +21,9 @@ pub(crate) mod sealed {
         fn register(components: &mut Components, ids: &mut Vec<ComponentId>);
         /// Appends the bundle's component types, in bundle order, without registering them.
         fn type_ids(ids: &mut Vec<(TypeId, &'static str)>);
-        /// Writes the components into row `row` of `archetype`, which has all of them.
-        fn write(self, archetype: &mut Archetype, row: usize, components: &Components);
+        /// Writes the components into row `row` of `archetype`, which has all of them, at
+        /// `tick`: new values are added then, replaced ones changed.
+        fn write(self, archetype: &mut Archetype, row: usize, components: &Components, tick: Tick);
     }
 }
 
@@ -34,23 +36,14 @@ impl<T: Component> sealed::BundleImpl for T {
         ids.push(components.register::<T>());
     }
 
-    fn write(self, archetype: &mut Archetype, row: usize, components: &Components) {
-        let column = components
-            .id::<T>()
-            .and_then(|id| archetype.column_mut::<T>(id));
-        let Some(column) = column else {
+    fn write(self, archetype: &mut Archetype, row: usize, components: &Components, tick: Tick) {
+        let Some(id) = components.id::<T>() else {
             unreachable!(
-                "an archetype lacks {} from the bundle written to it: a bug in oxreal-ecs",
+                "{} is written before it's registered: a bug in oxreal-ecs",
                 type_name::<T>()
             );
         };
-        if let Some(slot) = column.get_mut(row) {
-            // The entity already had this component: replace it, dropping the old value.
-            *slot = self;
-        } else {
-            debug_assert_eq!(column.len(), row, "bundle rows must be written in order");
-            column.push(self);
-        }
+        archetype.write(id, row, self, tick);
     }
 }
 
@@ -71,9 +64,9 @@ macro_rules! tuple_bundles {
 
             #[allow(unused_variables, reason = "the empty tuple uses no argument")]
             #[allow(non_snake_case, reason = "the bindings reuse the type parameter names")]
-            fn write(self, archetype: &mut Archetype, row: usize, components: &Components) {
+            fn write(self, archetype: &mut Archetype, row: usize, components: &Components, tick: Tick) {
                 let ($($name,)*) = self;
-                $($name.write(archetype, row, components);)*
+                $($name.write(archetype, row, components, tick);)*
             }
         }
 
