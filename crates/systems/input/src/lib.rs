@@ -44,6 +44,8 @@
 //!
 //! [ADR-0018]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0018-input-events-state-and-routing.md
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashSet;
 use std::hash::Hash;
 
@@ -148,7 +150,8 @@ impl InputState {
 
     /// Raw, unaccelerated mouse movement this frame, in device units: x to the right, y
     /// **toward the user** (down the screen). Use it for mouse-look. It's independent of the
-    /// cursor, so it keeps working while the cursor is captured.
+    /// cursor, so it keeps working while the cursor is captured. The units differ by platform
+    /// (see `oxreal_window::DeviceEvent::MouseMotion`), so scale it by a sensitivity setting.
     #[must_use]
     pub fn mouse_motion(&self) -> DVec2 {
         self.mouse_motion
@@ -167,7 +170,9 @@ impl InputState {
     }
 
     /// The cursor's last position over the window, in physical pixels from its top-left corner
-    /// (y down). `None` once it has left the window or focus was lost.
+    /// (y down). `None` once it has left the window or focus was lost. Right after focus
+    /// returns on X11 it can lie outside the window, because X11 reports where the pointer was
+    /// when focus arrived.
     #[must_use]
     pub fn cursor_position(&self) -> Option<DVec2> {
         self.cursor

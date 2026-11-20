@@ -146,10 +146,12 @@ impl CubeApp {
         // address it's given is the cube's vertex buffer, and the only indices the board's
         // texture and sampler. All of them live until `exiting`, after the last frame, and the
         // board is never rendered into. Every index in the cube's index buffer is below its
-        // vertex count, and every draw uses a vertex offset of 0 (`cube_mesh`, `draw`). The shader reads
-        // `MeshVertex` with a 32-byte stride and 4-byte-aligned loads, matching `cube_mesh`'s
-        // packing, and the push constants at the offsets `constants` writes
-        // (tests/shader_layout.rs checks both in the SPIR-V).
+        // vertex count (`cube_mesh`). Every draw covers exactly the whole index buffer
+        // (`0..index_count`, bound at offset 0) with a vertex offset of 0, and writes all
+        // `CONSTANT_BYTES` of push constants first (`draw`). The shader reads `MeshVertex` with a
+        // 32-byte stride and 4-byte-aligned loads, matching `cube_mesh`'s packing, and the push
+        // constants at the offsets `constants` writes (tests/shader_layout.rs checks both in the
+        // SPIR-V).
         let code = unsafe { ShaderCode::from_spirv_unchecked(&self.spirv) };
         let pipeline = self.device.create_render_pipeline(&RenderPipelineDesc {
             label: "cube",
@@ -203,7 +205,9 @@ impl CubeApp {
         self.last_update = now;
         self.camera.update(&self.input, seconds);
 
-        if self.input.mouse_just_pressed(LOOK_BUTTON) {
+        // Only while the button is still down: a press and a release (or focus loss) in the same
+        // frame must not leave a capture behind.
+        if self.input.mouse_just_pressed(LOOK_BUTTON) && self.input.mouse_held(LOOK_BUTTON) {
             self.set_cursor_captured(true);
         }
         // Also true when focus was lost while the button was held (ADR-0018 §2).
@@ -230,13 +234,19 @@ impl CubeApp {
         }
         if captured {
             match window.capture_cursor() {
-                Ok(capture) => info!(?capture, "cursor captured"),
+                Ok(capture) => {
+                    info!(?capture, "cursor captured");
+                    self.cursor_captured = true;
+                }
                 Err(e) => warn!(error = %e, "cursor not captured; looking around still works"),
             }
-        } else if let Err(e) = window.release_cursor() {
-            warn!(error = %e, "cursor release failed");
+        } else {
+            // Counts as released even on failure: the cursor is shown again either way.
+            if let Err(e) = window.release_cursor() {
+                warn!(error = %e, "cursor release failed");
+            }
+            self.cursor_captured = false;
         }
-        self.cursor_captured = captured;
     }
 
     /// World space to clip space, through the fly camera.

@@ -1,6 +1,8 @@
 //! Engine-owned window events (ADR-0015 §3, ADR-0018 §1).
 
-use crate::input::{self, ButtonState, KeyEvent, MouseButton, ScrollDelta};
+use std::hash::Hash;
+
+use crate::input::{self, ButtonState, InputFilter, KeyEvent, MouseButton, ScrollDelta};
 
 /// A size in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -73,8 +75,13 @@ pub enum WindowEvent {
     Scroll(ScrollDelta),
 }
 
-/// Maps a winit event to an engine event. Events the engine doesn't model yet are dropped.
-pub(crate) fn from_winit(event: &winit::event::WindowEvent) -> Option<WindowEvent> {
+/// Maps a winit event for `window` to an engine event, through `filter` (ADR-0018 §1). Events the
+/// engine doesn't model yet are dropped.
+pub(crate) fn from_winit<Id: Eq + Hash>(
+    event: &winit::event::WindowEvent,
+    window: Id,
+    filter: &mut InputFilter<Id>,
+) -> Option<WindowEvent> {
     use winit::event::WindowEvent as W;
     Some(match event {
         W::CloseRequested => WindowEvent::CloseRequested,
@@ -82,13 +89,20 @@ pub(crate) fn from_winit(event: &winit::event::WindowEvent) -> Option<WindowEven
         W::ScaleFactorChanged { scale_factor, .. } => WindowEvent::ScaleFactorChanged {
             scale_factor: *scale_factor,
         },
-        W::Focused(focused) => WindowEvent::Focused(*focused),
+        W::Focused(focused) => {
+            filter.focus(window, *focused);
+            WindowEvent::Focused(*focused)
+        }
+        W::Destroyed => {
+            filter.destroyed(&window);
+            return None;
+        }
         W::RedrawRequested => WindowEvent::RedrawRequested,
         W::KeyboardInput {
             event,
             is_synthetic,
             ..
-        } => WindowEvent::Key(input::key_event_from_winit(
+        } => WindowEvent::Key(filter.key(
             event.physical_key,
             event.state,
             event.repeat,
@@ -113,24 +127,20 @@ mod tests {
     use super::*;
     use winit::event::WindowEvent as W;
 
+    /// Maps one event for window 1 through a fresh filter.
+    fn map(event: &W) -> Option<WindowEvent> {
+        from_winit(event, 1_u32, &mut InputFilter::default())
+    }
+
     #[test]
     fn maps_modelled_events() {
+        assert_eq!(map(&W::CloseRequested), Some(WindowEvent::CloseRequested));
         assert_eq!(
-            from_winit(&W::CloseRequested),
-            Some(WindowEvent::CloseRequested)
-        );
-        assert_eq!(
-            from_winit(&W::Resized(winit::dpi::PhysicalSize::new(1920, 1080))),
+            map(&W::Resized(winit::dpi::PhysicalSize::new(1920, 1080))),
             Some(WindowEvent::Resized(PhysicalSize::new(1920, 1080)))
         );
-        assert_eq!(
-            from_winit(&W::Focused(false)),
-            Some(WindowEvent::Focused(false))
-        );
-        assert_eq!(
-            from_winit(&W::RedrawRequested),
-            Some(WindowEvent::RedrawRequested)
-        );
+        assert_eq!(map(&W::Focused(false)), Some(WindowEvent::Focused(false)));
+        assert_eq!(map(&W::RedrawRequested), Some(WindowEvent::RedrawRequested));
     }
 
     #[test]
@@ -139,7 +149,7 @@ mod tests {
         use winit::event::{DeviceId, ElementState, MouseScrollDelta, TouchPhase};
         let device_id = DeviceId::dummy();
         assert_eq!(
-            from_winit(&W::MouseInput {
+            map(&W::MouseInput {
                 device_id,
                 state: ElementState::Pressed,
                 button: winit::event::MouseButton::Right,
@@ -150,18 +160,18 @@ mod tests {
             })
         );
         assert_eq!(
-            from_winit(&W::CursorMoved {
+            map(&W::CursorMoved {
                 device_id,
                 position: PhysicalPosition::new(12.5, 300.0),
             }),
             Some(WindowEvent::CursorMoved { x: 12.5, y: 300.0 })
         );
         assert_eq!(
-            from_winit(&W::CursorLeft { device_id }),
+            map(&W::CursorLeft { device_id }),
             Some(WindowEvent::CursorLeft)
         );
         assert_eq!(
-            from_winit(&W::MouseWheel {
+            map(&W::MouseWheel {
                 device_id,
                 delta: MouseScrollDelta::LineDelta(0.0, -2.0),
                 phase: TouchPhase::Moved,
@@ -172,8 +182,8 @@ mod tests {
 
     #[test]
     fn drops_events_the_engine_does_not_model_yet() {
-        assert_eq!(from_winit(&W::Destroyed), None);
-        assert_eq!(from_winit(&W::Occluded(true)), None);
+        assert_eq!(map(&W::Destroyed), None);
+        assert_eq!(map(&W::Occluded(true)), None);
     }
 
     #[test]

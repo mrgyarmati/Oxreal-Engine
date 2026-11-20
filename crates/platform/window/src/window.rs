@@ -38,7 +38,9 @@ impl Default for WindowDesc {
 /// How [`Window::capture_cursor`] holds the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CursorCapture {
-    /// Held in place (Windows, Wayland). It reappears where it was captured.
+    /// Held in place (Windows, Wayland). It reappears where it was captured. On Wayland this
+    /// means the lock was **requested**: the compositor applies it once the pointer is over the
+    /// window and the window has focus, and may postpone it.
     Locked,
     /// Kept inside the window, but free to move there while hidden (X11). It reappears where it
     /// drifted to.
@@ -95,7 +97,9 @@ impl Window {
     /// locking isn't supported (X11), confines it to the window. Raw mouse motion
     /// ([`crate::DeviceEvent::MouseMotion`]) keeps arriving either way.
     ///
-    /// Release it with [`Window::release_cursor`], and also when the window loses focus.
+    /// Release it with [`Window::release_cursor`], and also when the window loses focus. Call it
+    /// from the event-loop thread (inside [`crate::App`] callbacks): on Windows it waits for that
+    /// thread, so calling it from a thread the event loop is waiting on would deadlock.
     ///
     /// # Errors
     ///
@@ -119,7 +123,10 @@ impl Window {
     }
 
     /// Shows the cursor again and lets it leave the window. Releasing a cursor that isn't
-    /// captured does nothing.
+    /// captured does nothing. Like [`Window::capture_cursor`], call it from the event-loop thread.
+    ///
+    /// On Wayland, releasing while the pointer is outside the window takes effect when the
+    /// pointer next enters it.
     ///
     /// # Errors
     ///

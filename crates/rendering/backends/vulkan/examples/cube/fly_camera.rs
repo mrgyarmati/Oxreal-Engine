@@ -21,6 +21,8 @@ const PITCH_LIMIT: f32 = 89.0_f32.to_radians();
 const SPEED_STEP: f32 = 1.25;
 const MIN_SPEED: f32 = 0.25;
 const MAX_SPEED: f32 = 100.0;
+/// Touchpad pixels that count as one wheel notch: about one line of text.
+const PIXELS_PER_NOTCH: f64 = 40.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FlyCamera {
@@ -70,7 +72,9 @@ impl FlyCamera {
         self.yaw = (self.yaw - motion.x).rem_euclid(std::f32::consts::TAU);
         self.pitch = (self.pitch - motion.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
-        let notches = input.scroll_lines().y;
+        // Wheels scroll in notches. Touchpads scroll in pixels on Wayland (and in fractional
+        // notches on Windows), so pixels count too. A frame's scroll is far inside f32's range.
+        let notches = input.scroll_lines().y + (input.scroll_pixels().y / PIXELS_PER_NOTCH) as f32;
         if notches != 0.0 {
             self.speed = (self.speed * SPEED_STEP.powf(notches)).clamp(MIN_SPEED, MAX_SPEED);
         }
@@ -231,6 +235,16 @@ mod tests {
         let mut camera = camera();
         camera.update(&input, 0.0);
         assert!((camera.speed() - 4.0 * SPEED_STEP * SPEED_STEP).abs() < 1e-4);
+
+        // A touchpad: one notch's worth of pixels is one step.
+        input.end_frame();
+        let before = camera.speed();
+        input.handle_window_event(&WindowEvent::Scroll(ScrollDelta::Pixels {
+            x: 0.0,
+            y: PIXELS_PER_NOTCH,
+        }));
+        camera.update(&input, 0.0);
+        assert!((camera.speed() - before * SPEED_STEP).abs() < 1e-4);
 
         input.end_frame();
         input.handle_window_event(&WindowEvent::Scroll(ScrollDelta::Lines {

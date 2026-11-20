@@ -1,5 +1,8 @@
 //! Engine-owned keyboard and mouse vocabulary, and its translation from winit (ADR-0018 §1).
 
+use std::collections::HashSet;
+use std::hash::Hash;
+
 /// Whether a key or button went down or came up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ButtonState {
@@ -78,6 +81,11 @@ pub enum ScrollDelta {
 pub enum DeviceEvent {
     /// Raw, unaccelerated mouse movement, for mouse-look. It keeps arriving while the cursor is
     /// captured or at the edge of the screen, unlike cursor positions.
+    ///
+    /// The units differ by platform: mouse counts on Windows, libinput's unaccelerated units
+    /// (normalized to 1000 DPI) on Wayland, and driver-dependent values on X11. The same mouse
+    /// can therefore turn a camera at different speeds, so mouse-look needs a sensitivity
+    /// setting.
     MouseMotion {
         /// Horizontal movement in device units (not pixels), positive to the right.
         dx: f64,
@@ -206,25 +214,82 @@ key_codes! {
     Pause => "Pause",
 }
 
-/// Translates a winit key event. `None` for synthetic events (ADR-0018 §1: only X11 and Windows
-/// produce them, so they're dropped everywhere) and for keys the engine doesn't model.
-pub(crate) fn key_event_from_winit(
-    physical_key: winit::keyboard::PhysicalKey,
-    state: winit::event::ElementState,
-    repeat: bool,
-    is_synthetic: bool,
-) -> Option<KeyEvent> {
-    if is_synthetic {
-        return None;
+/// Evens out winit's per-platform input differences (ADR-0018 §1). `W` identifies a window: the
+/// event loop uses winit's window IDs, and tests use plain numbers.
+#[derive(Debug)]
+pub(crate) struct InputFilter<W> {
+    /// Keys that winit reported as already held when focus arrived (synthetic presses, X11 and
+    /// Windows). A non-synthetic press of one of them is a repeat until the key is released: X11
+    /// forgets which keys were held across focus changes, so its first autorepeat after focus
+    /// returns would otherwise look like a new press.
+    held_at_focus: HashSet<KeyCode>,
+    /// The application's windows that have keyboard focus.
+    focused: HashSet<W>,
+}
+
+impl<W> Default for InputFilter<W> {
+    fn default() -> Self {
+        Self {
+            held_at_focus: HashSet::new(),
+            focused: HashSet::new(),
+        }
     }
-    let winit::keyboard::PhysicalKey::Code(code) = physical_key else {
-        return None;
-    };
-    Some(KeyEvent {
-        key: key_from_winit(code)?,
-        state: button_state_from_winit(state),
-        repeat,
-    })
+}
+
+impl<W: Eq + Hash> InputFilter<W> {
+    /// Translates a winit key event. `None` for synthetic events (only X11 and Windows produce
+    /// them, so they're dropped everywhere) and for keys the engine doesn't model.
+    pub(crate) fn key(
+        &mut self,
+        physical_key: winit::keyboard::PhysicalKey,
+        state: winit::event::ElementState,
+        repeat: bool,
+        is_synthetic: bool,
+    ) -> Option<KeyEvent> {
+        let winit::keyboard::PhysicalKey::Code(code) = physical_key else {
+            return None;
+        };
+        let key = key_from_winit(code)?;
+        let state = button_state_from_winit(state);
+        if is_synthetic {
+            match state {
+                ButtonState::Pressed => self.held_at_focus.insert(key),
+                ButtonState::Released => self.held_at_focus.remove(&key),
+            };
+            return None;
+        }
+        let repeat = match state {
+            ButtonState::Pressed => repeat || self.held_at_focus.contains(&key),
+            ButtonState::Released => {
+                self.held_at_focus.remove(&key);
+                repeat
+            }
+        };
+        Some(KeyEvent { key, state, repeat })
+    }
+
+    /// Records that `window` gained or lost keyboard focus.
+    pub(crate) fn focus(&mut self, window: W, focused: bool) {
+        if focused {
+            self.focused.insert(window);
+        } else {
+            self.focused.remove(&window);
+            // Synthetic presses come after focus arrives (in any window), so start afresh.
+            self.held_at_focus.clear();
+        }
+    }
+
+    /// Forgets a destroyed window, which may have had focus.
+    pub(crate) fn destroyed(&mut self, window: &W) {
+        self.focused.remove(window);
+    }
+
+    /// Whether device events may reach the application: only while one of its windows has
+    /// keyboard focus. winit enforces that on Windows and X11, but on Wayland raw motion follows
+    /// pointer focus instead.
+    pub(crate) fn device_events_allowed(&self) -> bool {
+        !self.focused.is_empty()
+    }
 }
 
 pub(crate) fn button_state_from_winit(state: winit::event::ElementState) -> ButtonState {
@@ -303,7 +368,7 @@ mod tests {
         use winit::event::ElementState;
         use winit::keyboard::{KeyCode as W, PhysicalKey};
         assert_eq!(
-            key_event_from_winit(
+            InputFilter::<u32>::default().key(
                 PhysicalKey::Code(W::KeyW),
                 ElementState::Pressed,
                 true,
@@ -316,7 +381,7 @@ mod tests {
             })
         );
         assert_eq!(
-            key_event_from_winit(
+            InputFilter::<u32>::default().key(
                 PhysicalKey::Code(W::ShiftLeft),
                 ElementState::Released,
                 false,
@@ -331,21 +396,79 @@ mod tests {
     }
 
     #[test]
+    fn a_key_held_when_focus_arrives_is_a_repeat_until_released() {
+        use winit::event::ElementState::{Pressed, Released};
+        use winit::keyboard::{KeyCode as W, PhysicalKey};
+        let w = PhysicalKey::Code(W::KeyW);
+        let mut filter = InputFilter::<u32>::default();
+        filter.focus(1, true);
+        // X11 and Windows report the held key synthetically. X11's first autorepeat afterwards
+        // has `repeat == false`.
+        assert_eq!(filter.key(w, Pressed, false, true), None);
+        let first = filter.key(w, Pressed, false, false);
+        assert_eq!(first.map(|e| e.repeat), Some(true));
+        // Once it's released, the next press is a real one.
+        let release = filter.key(w, Released, false, false);
+        assert_eq!(release.map(|e| e.state), Some(ButtonState::Released));
+        let again = filter.key(w, Pressed, false, false);
+        assert_eq!(again.map(|e| e.repeat), Some(false));
+    }
+
+    #[test]
+    fn losing_focus_forgets_keys_held_at_focus() {
+        use winit::event::ElementState::{Pressed, Released};
+        use winit::keyboard::{KeyCode as W, PhysicalKey};
+        let w = PhysicalKey::Code(W::KeyW);
+        let mut filter = InputFilter::<u32>::default();
+        filter.focus(1, true);
+        filter.key(w, Pressed, false, true);
+        // The key comes up while the window is in the background, so no release is delivered.
+        filter.focus(1, false);
+        filter.focus(1, true);
+        let press = filter.key(w, Pressed, false, false);
+        assert_eq!(press.map(|e| e.repeat), Some(false));
+        // A synthetic release also clears it.
+        filter.key(w, Pressed, false, true);
+        filter.key(w, Released, false, true);
+        assert_eq!(
+            filter.key(w, Pressed, false, false).map(|e| e.repeat),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn device_events_need_a_focused_window() {
+        let mut filter = InputFilter::<u32>::default();
+        assert!(!filter.device_events_allowed());
+        filter.focus(1, true);
+        assert!(filter.device_events_allowed());
+        // Focus moving between the application's own windows: the loss may arrive last.
+        filter.focus(2, true);
+        filter.focus(1, false);
+        assert!(filter.device_events_allowed());
+        filter.focus(2, false);
+        assert!(!filter.device_events_allowed());
+        filter.focus(3, true);
+        filter.destroyed(&3);
+        assert!(!filter.device_events_allowed());
+    }
+
+    #[test]
     fn synthetic_unidentified_and_unmodelled_keys_are_dropped() {
         use winit::event::ElementState;
         use winit::keyboard::{KeyCode as W, NativeKeyCode, PhysicalKey};
         let w = PhysicalKey::Code(W::KeyW);
         // Synthetic presses and releases (X11 and Windows on focus changes) are dropped.
         assert_eq!(
-            key_event_from_winit(w, ElementState::Pressed, false, true),
+            InputFilter::<u32>::default().key(w, ElementState::Pressed, false, true),
             None
         );
         assert_eq!(
-            key_event_from_winit(w, ElementState::Released, false, true),
+            InputFilter::<u32>::default().key(w, ElementState::Released, false, true),
             None
         );
         assert_eq!(
-            key_event_from_winit(
+            InputFilter::<u32>::default().key(
                 PhysicalKey::Unidentified(NativeKeyCode::Xkb(0x1234)),
                 ElementState::Pressed,
                 false,
@@ -354,7 +477,7 @@ mod tests {
             None
         );
         assert_eq!(
-            key_event_from_winit(
+            InputFilter::<u32>::default().key(
                 PhysicalKey::Code(W::MediaPlayPause),
                 ElementState::Pressed,
                 false,
