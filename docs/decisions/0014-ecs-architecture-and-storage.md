@@ -105,7 +105,10 @@ Writing such a component in place (`get_mut`, `&mut T` in a query) runs no hook.
    - *Refined with `World::modify`:* it can also be **edited in place through `World::modify`**,
      which runs `on_replace` before the edit and `on_insert` after it (`HookCause::Modify`).
      What immutability guarantees is that every change passes through the hooks. `modify`
-     keeps that guarantee, without moving or copying the value.
+     keeps that guarantee, without moving or copying the value. So "never written in place"
+     above means **never written in place without its hooks**. Likewise, the by-ID paths below
+     may change an immutable component through a by-ID `modify` that runs its hooks around the
+     write, as well as by replacing it.
    - Typed Rust code that writes one in place fails **when it's built**. This covers
      `get_mut`, `&mut T` and `Option<&mut T>` query data, and `System::writes`. The check is
      an inline `const` assertion: a post-monomorphization error.
@@ -654,13 +657,21 @@ amendment and ADR-0005's amendment.
 
 ## Implementation notes (2026-11-20, in-place modify and wide parents)
 
-- **`World::modify::<T>(entity, edit)`** runs `T`'s `on_replace` hooks, calls `edit` on the
-  value in place, then runs its `on_insert` hooks, with cause `Modify`. It then applies their
-  commands, as every structural change does. It works on immutable components, which is its
-  purpose (§3 amendment, item 1, refined).
+- **`World::modify::<T, _>(entity, edit)`** runs `T`'s `on_replace` hooks, calls `edit` on the
+  value in place, runs its `on_insert` hooks (cause `Modify`), then applies their commands. It
+  works on immutable components, which is its purpose (§3 amendment, item 1, refined).
   - It returns `None`, without calling `edit`, for a dead entity, a missing component or an
     entity being despawned.
-  - It's on `World` only. Systems reach it through `Commands::run`.
+  - The hook commands run before it returns, or, when it's called from a command, right after
+    that command, as for every structural change made there.
+  - **`edit` gets a `Mut<T>`**, not a raw `&mut T`, so change detection (§6) can mark the value
+    changed without an API change.
+  - **A panic in `edit`:** a guard discards the commands `on_replace` queued. Otherwise a
+    caught panic would leave them to run during a later, unrelated change: for a relation, half
+    an edit. `on_insert` doesn't run, and the value keeps what `edit` did. A test with a paired
+    replace and insert covers it.
+  - It's on `World` only. Systems reach it through `Commands::run`. A by-ID form for
+    reflection and the C ABI comes with them.
 - **`Children` is edited in place.** The hierarchy edits it with `modify`, instead of copying
   and replacing it on every attach and detach.
 - **`Children`'s validation is O(1).** Each parent carries a stamp in a component private to
@@ -670,8 +681,17 @@ amendment and ADR-0005's amendment.
   - A list taken off another entity has another owner. A list put back after the entity's list
     changed, or straight after its removal detached the children, has an old stamp. Either is
     rebuilt from the links, as before.
-  - Edits no longer drop entries whose link moved: the moved child's own removal follows in the
-    same flush, and the stamp check no longer looks at entries.
+  - **Invariant:** the stamp outlives `Children` and must never be removed, reset or copied
+    while the entity lives. If it were removed, numbering would restart and an old list could
+    match again.
+    - It stays on former parents on purpose: 8 bytes, and an archetype of their own.
+    - Paths that copy or remove components by ID (reflection, scene loading, entity cloning)
+      must skip the stamp and `Children` both. They must never serialize them, and must rebuild
+      `Children` from the `ChildOf` links on load.
+  - **Dropped entries:** edits no longer drop entries whose link moved. The moved child's own
+    removal follows in the same flush, and the stamp check doesn't look at entries.
+  - **Lists awaiting a rebuild:** a list that came from another entity and is already queued
+    for a rebuild is left alone by edits. The rebuild reads the links anyway.
 - **Measured back to back** on the same machine (Ryzen 9 5950X, release):
 
   | Workload | Before | After |
@@ -683,14 +703,17 @@ amendment and ADR-0005's amendment.
 
   Despawning a parent of 10,000 children takes 3.4 ms (unchanged). What still grows with the
   number of siblings is a linear duplicate check on each attach (about 1.4 µs per attach at
-  10,000 siblings), which protects against a repair racing a pending attach.
+  10,000 siblings), which protects against a rebuild racing a pending attach.
 - **Tests:**
   - ECS: `modify` on an immutable component (hooks see old then new values), the `Modify`
-    cause, hook commands applied before it returns, and refusal while despawning.
+    cause, hook commands applied before it returns, refusal while despawning, and a panicking
+    edit.
   - The hierarchy's 23 tests, both randomized tests included, pass unchanged. A new case puts a
     removed list straight back.
 
   These deliberately broken versions each fail the tests:
   - the stamp check skipped when the owner matches;
-  - the stamp not bumped on removal;
-  - `modify` skipping `on_insert`.
+  - the stamp not bumped on removal (the first version of the tests missed this, hence the new
+    case);
+  - `modify` skipping `on_insert`;
+  - `modify` without its panic guard.

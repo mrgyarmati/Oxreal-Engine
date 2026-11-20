@@ -34,7 +34,7 @@ pub trait Component: Send + Sync + 'static {
     /// - `&mut T` or `Option<&mut T>` in a query;
     /// - declaring `.writes::<T>()` on a system.
     ///
-    /// Each fails the build with an error that says to use `insert`.
+    /// Each fails the build with an error that says to use `insert` or `World::modify` instead.
     ///
     /// Know the limits of this check:
     /// - It's a post-monomorphization error: `cargo check`, clippy and rust-analyzer don't report
@@ -57,7 +57,7 @@ pub trait Component: Send + Sync + 'static {
     ///
     /// let mut world = World::new();
     /// let e = world.spawn(Link(1));
-    /// let _ = world.get_mut::<Link>(e); // Fails the build: use `insert` instead.
+    /// let _ = world.get_mut::<Link>(e); // Fails the build: use `insert` or `modify` instead.
     /// ```
     const MUTABLE: bool = true;
 }
@@ -143,7 +143,7 @@ pub(crate) const fn assert_mutable<T: Component>() {
     assert!(
         T::MUTABLE,
         "this component is immutable (`Component::MUTABLE` is false): replace it with `insert`, \
-         so its hooks run, instead of writing it in place"
+         or edit it with `World::modify`, so its hooks run, instead of writing it in place"
     );
 }
 
@@ -318,8 +318,9 @@ struct ComponentInfo {
     new_column: fn() -> Box<dyn AnyColumn>,
     hooks: ComponentHooks,
     /// `Component::MUTABLE`, for paths that write by component ID (reflection, the editor's
-    /// Details panel, the C ABI). They must check it at run time and replace immutable
-    /// components with `insert` instead of writing fields (ADR-0014, §3 amendment).
+    /// Details panel, the C ABI). They must check it at run time, and change an immutable
+    /// component only by replacing it or by a by-ID `modify` that runs its hooks around the
+    /// write, never by writing fields (ADR-0014, §3 amendment).
     #[expect(
         dead_code,
         reason = "read by the by-ID access paths, which come with reflection"

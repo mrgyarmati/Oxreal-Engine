@@ -39,6 +39,10 @@ pub enum OnParentDespawn {
 /// - the chain above the parent is deeper than [`MAX_DEPTH`].
 ///
 /// [`set_parent`] reports these cases as errors instead, before changing anything.
+///
+/// Replacing a link with an identical one, by `insert` or `World::modify`, still moves the child to
+/// the end of its siblings: the hooks remove it and add it back. [`set_parent`] with the current
+/// parent changes nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChildOf {
     parent: Entity,
@@ -397,6 +401,12 @@ fn child_of_replaced(world: &mut HookWorld<'_>, context: HookContext) {
 /// bumps it too. So a list taken off an entity and put back later carries an old stamp, and a
 /// list taken off another entity carries another owner: [`children_inserted`] detects both in
 /// constant time, without looking at the children.
+///
+/// **Invariant:** it outlives `Children` and must never be removed, reset or copied while the
+/// entity lives: it stays on former parents on purpose (8 bytes, and their own archetype). If it
+/// were removed, numbering would restart and an old list could match again. Paths that copy or
+/// remove components by ID (reflection, scene loading, entity cloning, ADR-0014 §3) must skip it
+/// and `Children` both, and rebuild `Children` from the `ChildOf` links instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChildrenStamp(u64);
 
@@ -419,9 +429,14 @@ fn edit_children(world: &mut World, parent: Entity, edit: impl FnOnce(&mut Vec<E
     if !world.contains(parent) || world.is_despawning(parent) {
         return;
     }
-    if world.has::<Children>(parent) {
+    if let Some(children) = world.get::<Children>(parent) {
+        if children.owner != parent {
+            // A foreign list, already queued for a rebuild from the links: editing it would only
+            // trigger a second rebuild. The rebuild sees this change's link anyway.
+            return;
+        }
         let stamp = next_stamp(world, parent);
-        let empty = world.modify::<Children, _>(parent, |children| {
+        let empty = world.modify::<Children, _>(parent, |mut children| {
             edit(&mut children.list);
             children.stamp = stamp;
             children.list.is_empty()
@@ -437,8 +452,8 @@ fn edit_children(world: &mut World, parent: Entity, edit: impl FnOnce(&mut Vec<E
         return;
     }
     let stamp = next_stamp(world, parent);
-    // Can't fail: the parent is alive and not despawning. The stamp goes in first, in the same
-    // bundle, so the list's hook finds them matching.
+    // Can't fail: the parent is alive and not despawning. Stamp and list go in as one bundle,
+    // and hooks run after the whole bundle is written, so the list's hook finds them matching.
     let _ = world.insert(
         parent,
         (
