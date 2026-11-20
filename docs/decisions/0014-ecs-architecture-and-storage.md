@@ -192,13 +192,29 @@ The first slice (`oxreal-ecs`) covers:
 Commands and stages, relations and hooks, and change detection and dynamic queries follow as
 separate slices.
 
-- **The storage has no `unsafe` code.** §10 expected type-erased columns to need `unsafe`. Here
-  each column is a `Vec<T>` behind a small trait object. The trait is used only for whole-table
-  operations: moving or dropping a row, and creating a column. Queries iterate the `Vec<T>`
-  slices directly, so the dynamic dispatch happens once per archetype per query, not once per
-  entity. The crate is `#![forbid(unsafe_code)]`, so the Miri job and the `unsafe` audit that
-  §10 planned have nothing to check yet. They come back if benchmarks justify raw columns,
-  which §1 allows without an API change.
+- **The columns are typed, not layout-erased, and have no `unsafe` code.** This deviates from §2
+  and §10:
+  - §2 describes type-erased columns, with layout, drop and clone through the component
+    registry, and §10 expected them to need `unsafe`.
+  - Here each column is a `Vec<T>` behind a small trait object, and the registry knows
+    components only by Rust `TypeId`. There's no clone hook yet.
+  - The trait is used only for whole-table operations: moving or dropping a row, and creating
+    a column. Queries iterate the `Vec<T>` slices directly, so the dynamic dispatch happens once
+    per archetype per query, not once per entity.
+  - The crate is `#![forbid(unsafe_code)]`.
+
+  The slice that adds **dynamic queries and components without a Rust type** must bring back
+  layout-erased columns. Those are components defined by C# and C++ (TAD §5.8) or by scripts
+  (ADR-0008 §3.5). That slice also brings:
+  - `unsafe` code, with the Miri job and an `unsafe-auditor` review that §10 requires;
+  - a registry path keyed on something other than `TypeId`.
+
+  Storage is private (§1), so this changes no API.
+- **Mutable access goes through `Mut<T>`, never a raw `&mut T`.** `&mut T` query items and
+  `World::get_mut` yield `Mut<'w, T>`, a smart pointer used like `&mut T`. For now it passes
+  writes straight through. It exists so §6's rule (a value is changed only when it's
+  dereferenced mutably) can be added without a breaking change. A named iterator wraps each
+  value, so iteration costs the same as over `&mut T`.
 - **Query and bundle traits are sealed.** Callers name `QueryData`, `QueryFilter` and `Bundle`,
   but only `oxreal-ecs` implements them, so no internal storage type is public. Custom bundle
   types (a derive) come with reflection (D-02).
@@ -206,7 +222,24 @@ separate slices.
   and also accesses it another way panics, naming the component (ADR-0010: a caller bug).
   Reading one component twice is allowed.
 - **`World::has` is constant time:** each archetype keeps a component bitset (ADR-0008 §3.6).
-- **Handles never alias.** An index whose generation would wrap is retired, never reused.
+- **Handles never alias within a world.** An index whose generation would wrap is retired,
+  never reused. Handles carry **no world identity**, so a handle from another world isn't
+  detected and may name an unrelated entity. Adding a world tag would change §3's bit layout,
+  so it needs an ADR. Decide it before the editor holds two worlds (editor and PIE).
+- **Notes for the next slices** (internal, so these change no API):
+  - The access check is keyed by Rust type, and filters and resources declare nothing. The
+    scheduler (§5) and dynamic queries (§7) need it keyed by component ID, with filter and
+    resource access, and cached in a query state.
+  - Typed Rust callers get panics for caller bugs: aliasing queries and duplicate bundles
+    (ADR-0010). Dynamic and C-ABI paths build component sets from data, so they must
+    **return errors** instead, because panics never cross FFI (TAD §5.8). Commands should check
+    bundles when they're recorded, so a panic points at the call site and not at the sync
+    point.
+  - Component IDs are assigned per world, in first-use order. Copying a world for PIE, and
+    C-ABI callers, need per-world resolution or a registry shared between worlds. Decide this
+    with dynamic queries.
+  - A component `Drop` that panics leaves a world inconsistent but memory-safe. This is
+    documented on `Component`. Hooks will make re-entrancy likelier, so revisit it then.
 - **Tests:**
   - behaviour tests for every public operation;
   - drop accounting: each component value is dropped exactly once;
@@ -221,8 +254,8 @@ separate slices.
   `benchmarks/ecs`, so they build and lint with the crate. Transform propagation joins them
   with relations.
 
-  First results: AMD Ryzen 9 5950X, 64 GB, Windows 11, release build, median of 11 runs,
-  100k entities.
+  First results: AMD Ryzen 9 5950X, 64 GB, Windows 11, rustc 1.100.0, release build, PR #32's
+  final commit, median of 11 runs, 100k entities.
 
   | Workload | Time |
   |---|---|
@@ -232,5 +265,8 @@ separate slices.
   | insert + remove a tag on 10k entities | 1.5 ms |
   | `get` through 100k shuffled handles | 3.3 ms |
 
-  Iteration cost barely changes from 1 to 100 archetypes. Random access (about 33 ns per
-  lookup) and spawning are the first places to optimize if profiling points there.
+  Iteration cost barely changes from 1 to 100 archetypes. If profiling points at the ECS, the
+  first places to optimize are:
+  - random access, at about 33 ns per lookup (a type-ID hash lookup on each call);
+  - spawning;
+  - the small allocation each query makes per archetype.

@@ -62,7 +62,7 @@ fn get_mut_changes_one_entity() {
     let mut world = World::new();
     let a = world.spawn(Health(10));
     let b = world.spawn(Health(20));
-    if let Some(health) = world.get_mut::<Health>(a) {
+    if let Some(mut health) = world.get_mut::<Health>(a) {
         health.0 = 11;
     }
     assert_eq!(world.get::<Health>(a), Some(&Health(11)));
@@ -76,14 +76,14 @@ fn insert_adds_new_components_and_replaces_existing_ones() {
     let b = world.spawn(Position(2.0));
     world
         .insert(a, (Velocity(5.0), Position(9.0)))
-        .unwrap_or_default();
+        .expect("the entity is alive");
     assert_eq!(world.get::<Position>(a), Some(&Position(9.0)));
     assert_eq!(world.get::<Velocity>(a), Some(&Velocity(5.0)));
     // `b` was moved into `a`'s old row when `a` changed archetype.
     assert_eq!(world.get::<Position>(b), Some(&Position(2.0)));
 
     // Same archetype: replaced in place.
-    world.insert(a, Velocity(6.0)).unwrap_or_default();
+    world.insert(a, Velocity(6.0)).expect("the entity is alive");
     assert_eq!(world.get::<Velocity>(a), Some(&Velocity(6.0)));
 }
 
@@ -109,7 +109,7 @@ fn despawned_handles_fail_everywhere() {
     assert!(!world.despawn(a));
     assert!(!world.contains(a));
     assert_eq!(world.get::<Health>(a), None);
-    assert_eq!(world.get_mut::<Health>(a), None);
+    assert!(world.get_mut::<Health>(a).is_none());
     assert!(!world.has::<Health>(a));
     assert_eq!(world.remove::<Health>(a), None);
     assert_eq!(world.insert(a, Health(9)), Err(EcsError::NoSuchEntity(a)));
@@ -154,7 +154,7 @@ fn mutable_queries_write_through() {
     let a = world.spawn((Position(0.0), Velocity(2.0)));
     let b = world.spawn((Position(10.0), Velocity(-1.0), Player));
     let still = world.spawn(Position(5.0));
-    for (position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
+    for (mut position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
         position.0 += velocity.0;
     }
     assert_eq!(world.get::<Position>(a), Some(&Position(2.0)));
@@ -187,7 +187,7 @@ fn optional_components_match_every_entity() {
     seen.sort_by_key(|(e, _)| *e);
     assert_eq!(seen, [(a, Some(Velocity(1.0))), (b, None)]);
 
-    for velocity in world.query_mut::<Option<&mut Velocity>>().flatten() {
+    for mut velocity in world.query_mut::<Option<&mut Velocity>>().flatten() {
         velocity.0 = 7.0;
     }
     assert_eq!(world.get::<Velocity>(a), Some(&Velocity(7.0)));
@@ -218,7 +218,7 @@ fn filters_select_by_presence() {
             .count(),
         1
     );
-    for health in world.query_filtered_mut::<&mut Health, With<Player>>() {
+    for mut health in world.query_filtered_mut::<&mut Health, With<Player>>() {
         health.0 += 100;
     }
     let mut all: Vec<u32> = world.query::<&Health>().map(|h| h.0).collect();
@@ -301,9 +301,9 @@ fn every_component_value_is_dropped_exactly_once() {
 
         world.despawn(a);
         assert_eq!(count(), 1, "despawn drops");
-        world.insert(b, tracked()).unwrap_or_default();
+        world.insert(b, tracked()).expect("the entity is alive");
         assert_eq!(count(), 2, "replacing drops the old value");
-        world.insert(b, Velocity(1.0)).unwrap_or_default();
+        world.insert(b, Velocity(1.0)).expect("the entity is alive");
         assert_eq!(count(), 2, "moving between archetypes doesn't drop");
         let taken = world.remove::<Tracked>(c);
         assert_eq!(count(), 2, "remove hands the value over");
@@ -402,14 +402,14 @@ fn random_operations_match_a_reference_model() {
             }
             3 => {
                 let e = live[rng.below(live.len())];
-                world.insert(e, Health(step)).unwrap_or_default();
+                world.insert(e, Health(step)).expect("the entity is alive");
                 model.entry(e).and_modify(|m| m.2 = Some(Health(step)));
             }
             4 => {
                 let e = live[rng.below(live.len())];
                 world
                     .insert(e, (Velocity(value), Player))
-                    .unwrap_or_default();
+                    .expect("the entity is alive");
                 model.entry(e).and_modify(|m| {
                     m.1 = Some(Velocity(value));
                     m.3 = true;
@@ -427,7 +427,7 @@ fn random_operations_match_a_reference_model() {
                 }
             }
             _ => {
-                for health in world.query_filtered_mut::<&mut Health, With<Player>>() {
+                for mut health in world.query_filtered_mut::<&mut Health, With<Player>>() {
                     health.0 += 1;
                 }
                 for m in model.values_mut() {

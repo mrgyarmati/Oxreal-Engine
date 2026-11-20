@@ -72,7 +72,7 @@ fn spread_world(archetypes: usize) -> World {
         macro_rules! tag {
             ($($bit:literal),*) => {$(
                 if mask & (1 << $bit) != 0 {
-                    world.insert(entity, Tag::<$bit>).unwrap_or_default();
+                    world.insert(entity, Tag::<$bit>).expect("the entity is alive");
                 }
             )*};
         }
@@ -82,7 +82,7 @@ fn spread_world(archetypes: usize) -> World {
 }
 
 fn integrate(world: &mut World) {
-    for (position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
+    for (mut position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
         for axis in 0..3 {
             position.0[axis] += velocity.0[axis] * (1.0 / 60.0);
         }
@@ -140,7 +140,7 @@ fn main() {
         },
         |(world, entities)| {
             for &entity in entities.iter().step_by(10) {
-                world.insert(entity, Toggled).unwrap_or_default();
+                world.insert(entity, Toggled).expect("the entity is alive");
             }
             for &entity in entities.iter().step_by(10) {
                 black_box(world.remove::<Toggled>(entity));

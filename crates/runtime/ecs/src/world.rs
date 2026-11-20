@@ -4,6 +4,7 @@ use std::any::TypeId;
 use std::fmt;
 
 use crate::bundle::{self, Bundle};
+use crate::change::Mut;
 use crate::component::{Component, Components};
 use crate::entity::{Entities, Entity, Location};
 use crate::query::{self, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
@@ -14,11 +15,8 @@ use crate::storage::{self, ArchetypeId, Archetypes};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum EcsError {
-    /// The entity isn't alive in this world: it was despawned, or the handle belongs to another
-    /// world.
-    #[error(
-        "{0:?} doesn't exist in this world: it was despawned, or the handle comes from another world"
-    )]
+    /// The entity isn't alive: it was despawned.
+    #[error("{0:?} doesn't exist: it was despawned")]
     NoSuchEntity(Entity),
 }
 
@@ -176,14 +174,16 @@ impl World {
             .get(location.row)
     }
 
-    /// `entity`'s component `T`, mutably. `None` if `entity` isn't alive or doesn't have a `T`.
-    pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+    /// `entity`'s component `T`, for writing through [`Mut`]. `None` if `entity` isn't alive or
+    /// doesn't have a `T`.
+    pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
         let location = self.entities.location(entity)?;
         let id = self.components.id::<T>()?;
         self.archetypes
             .get_mut(location.archetype)
             .column_mut::<T>(id)?
             .get_mut(location.row)
+            .map(Mut::new)
     }
 
     /// Whether `entity` is alive and has a component `T`. Constant time: use it for role tests,
@@ -246,7 +246,7 @@ impl World {
     ///
     /// let mut world = World::new();
     /// let ball = world.spawn((Position(0.0), Velocity(2.0)));
-    /// for (position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
+    /// for (mut position, velocity) in world.query_mut::<(&mut Position, &Velocity)>() {
     ///     position.0 += velocity.0;
     /// }
     /// assert_eq!(world.get::<Position>(ball).map(|p| p.0), Some(2.0));

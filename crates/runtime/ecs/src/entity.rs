@@ -129,7 +129,8 @@ impl Entities {
         Some(location)
     }
 
-    /// Where a live entity is stored. `None` for despawned or foreign handles.
+    /// Where a live entity is stored. `None` for despawned handles. A handle from another world
+    /// isn't detected: it may name an unrelated entity here.
     pub(crate) fn location(&self, entity: Entity) -> Option<Location> {
         let slot = self.slots.get(entity.index() as usize)?;
         if slot.generation.get() == entity.generation() {
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn handles_round_trip_through_bits() {
-        let entity = Entity::new(7, NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN));
+        let entity = Entity::new(7, NonZeroU32::new(3).expect("3 is not zero"));
         assert_eq!(entity.index(), 7);
         assert_eq!(entity.generation(), 3);
         assert_eq!(Entity::from_bits(entity.to_bits()), Some(entity));

@@ -4,6 +4,7 @@ use std::any::{TypeId, type_name};
 use std::fmt;
 use std::marker::PhantomData;
 
+use crate::change::Mut;
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
 use crate::storage::{Archetype, TableView};
@@ -13,8 +14,8 @@ use crate::storage::{Archetype, TableView};
 /// | Query data | Item | Matches |
 /// |---|---|---|
 /// | `&T` | `&T` | entities with `T` |
-/// | `&mut T` | `&mut T` | entities with `T` (needs [`crate::World::query_mut`]) |
-/// | `Option<&T>`, `Option<&mut T>` | `Option<..>` | every entity |
+/// | `&mut T` | [`Mut<T>`](crate::Mut) | entities with `T` (needs [`crate::World::query_mut`]) |
+/// | `Option<&T>`, `Option<&mut T>` | `Option<&T>`, `Option<Mut<T>>` | every entity |
 /// | [`Entity`] | the entity | every entity |
 /// | a tuple of up to 12 of these | a tuple | entities matching every element |
 ///
@@ -62,24 +63,34 @@ pub(crate) mod sealed {
     }
 }
 
+/// How a query uses a component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessKind {
+    Read,
+    Write,
+}
+
 /// The components a query reads and writes, checked for conflicting borrows.
+///
+/// Keyed by Rust type for now. The scheduler and dynamic queries will need it keyed by
+/// component ID, with filter and resource access too (ADR-0014 implementation notes).
 #[derive(Debug, Default)]
 pub struct Access {
-    entries: Vec<(TypeId, &'static str, bool)>,
+    entries: Vec<(TypeId, &'static str, AccessKind)>,
 }
 
 impl Access {
-    fn add<T: 'static>(&mut self, write: bool) {
+    fn add<T: 'static>(&mut self, kind: AccessKind) {
         let id = TypeId::of::<T>();
-        if let Some(&(_, name, other_write)) = self.entries.iter().find(|entry| entry.0 == id)
-            && (write || other_write)
+        if let Some(&(_, name, other)) = self.entries.iter().find(|entry| entry.0 == id)
+            && (kind == AccessKind::Write || other == AccessKind::Write)
         {
             panic!(
                 "a query accesses {name} mutably and also another way; that would alias. \
                  Read it once, or split the work into two queries"
             );
         }
-        self.entries.push((id, type_name::<T>(), write));
+        self.entries.push((id, type_name::<T>(), kind));
     }
 }
 
@@ -97,7 +108,7 @@ impl<T: Component> sealed::Fetch for &T {
     type Iter<'w> = std::slice::Iter<'w, T>;
 
     fn declare(access: &mut Access) {
-        access.add::<T>(false);
+        access.add::<T>(AccessKind::Read);
     }
 
     fn prepare(components: &Components) -> Self::State {
@@ -121,11 +132,11 @@ impl<T: Component> ReadOnlyQueryData for &T {}
 
 impl<T: Component> sealed::Fetch for &mut T {
     type State = Option<ComponentId>;
-    type Item<'w> = &'w mut T;
-    type Iter<'w> = std::slice::IterMut<'w, T>;
+    type Item<'w> = Mut<'w, T>;
+    type Iter<'w> = MutIter<'w, T>;
 
     fn declare(access: &mut Access) {
-        access.add::<T>(true);
+        access.add::<T>(AccessKind::Write);
     }
 
     fn prepare(components: &Components) -> Self::State {
@@ -137,14 +148,35 @@ impl<T: Component> sealed::Fetch for &mut T {
     }
 
     fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
-        state
-            .and_then(|id| view.take_slice_mut::<T>(id))
-            .unwrap_or_default()
-            .iter_mut()
+        MutIter(
+            state
+                .and_then(|id| view.take_slice_mut::<T>(id))
+                .unwrap_or_default()
+                .iter_mut(),
+        )
     }
 }
 
 impl<T: Component> QueryData for &mut T {}
+
+/// Iterates a column, wrapping each value in [`Mut`]. A named type rather than a `Map` over a
+/// function pointer, so the wrapping inlines.
+#[derive(Debug)]
+pub struct MutIter<'w, T>(std::slice::IterMut<'w, T>);
+
+impl<'w, T> Iterator for MutIter<'w, T> {
+    type Item = Mut<'w, T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(Mut::new)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
 
 /// Yields `Some` items from an iterator, or `None` a fixed number of times when the archetype
 /// lacks the component.
@@ -175,7 +207,7 @@ impl<T: Component> sealed::Fetch for Option<&T> {
     type Iter<'w> = Maybe<std::slice::Iter<'w, T>>;
 
     fn declare(access: &mut Access) {
-        access.add::<T>(false);
+        access.add::<T>(AccessKind::Read);
     }
 
     fn prepare(components: &Components) -> Self::State {
@@ -202,11 +234,11 @@ impl<T: Component> ReadOnlyQueryData for Option<&T> {}
 
 impl<T: Component> sealed::Fetch for Option<&mut T> {
     type State = Option<ComponentId>;
-    type Item<'w> = Option<&'w mut T>;
-    type Iter<'w> = Maybe<std::slice::IterMut<'w, T>>;
+    type Item<'w> = Option<Mut<'w, T>>;
+    type Iter<'w> = Maybe<MutIter<'w, T>>;
 
     fn declare(access: &mut Access) {
-        access.add::<T>(true);
+        access.add::<T>(AccessKind::Write);
     }
 
     fn prepare(components: &Components) -> Self::State {
@@ -222,7 +254,7 @@ impl<T: Component> sealed::Fetch for Option<&mut T> {
         Maybe {
             inner: state
                 .and_then(|id| view.take_slice_mut::<T>(id))
-                .map(<[T]>::iter_mut),
+                .map(|slice| MutIter(slice.iter_mut())),
             missing: rows,
         }
     }
