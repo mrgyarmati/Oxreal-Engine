@@ -255,6 +255,8 @@ impl App for Player {
         info!(display_server = ?ctx.display_server(), ?size, "window ready");
         ctx.set_continuous(true);
         self.window = Some(window);
+        // A window can start minimized (zero size): then sleep until it's restored.
+        self.set_minimized(ctx, size.width == 0 || size.height == 0);
     }
 
     fn window_event(&mut self, ctx: &Context<'_>, _window: WindowId, event: WindowEvent) {

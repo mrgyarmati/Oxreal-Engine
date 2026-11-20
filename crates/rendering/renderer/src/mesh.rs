@@ -346,7 +346,7 @@ impl MeshPool {
     }
 
     /// Whether no more meshes fit: every slot that may exist does, and none is free. It's true
-    /// exactly when [`Self::insert`] would return `None`.
+    /// exactly when [`Self::insert`] would give the mesh back.
     pub(crate) fn is_full(&self) -> bool {
         self.free.is_empty()
             && usize::try_from(self.slot_limit).is_ok_and(|limit| self.slots.len() >= limit)
