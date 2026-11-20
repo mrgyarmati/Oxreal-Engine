@@ -808,7 +808,8 @@ impl<'w, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, D, F> {
                     // exactly one item per row (`sealed::Fetch::iter`).
                     debug_assert_eq!(
                         self.row, self.table_len,
-                        "query data yielded a different number of items than its table has rows: \n                         a bug in oxreal-ecs"
+                        "query data yielded a different number of items than its table has rows: \
+                         a bug in oxreal-ecs"
                     );
                 }
             }
