@@ -1,6 +1,8 @@
 //! Deferred structural changes (ADR-0014 §5).
 
+use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
 use oxreal_diagnostics::warn;
 
@@ -9,41 +11,83 @@ use crate::component::Component;
 use crate::entity::{Entities, Entity};
 use crate::world::World;
 
-/// A recorded change, applied at a sync point. The `&str` is the name of the system that
-/// recorded it, for diagnostics.
-type Command = Box<dyn FnOnce(&mut World, &str) + Send>;
+/// Who recorded a command, for diagnostics.
+#[derive(Debug, Clone)]
+pub(crate) enum Source {
+    /// A system, by name.
+    System(Arc<str>),
+    /// A component's lifecycle hook.
+    Hook {
+        component: &'static str,
+        hook: &'static str,
+    },
+    /// The world itself: the step that finishes a despawn after its hooks' commands.
+    Despawn,
+}
 
-/// Commands recorded during a stage, in order, with the index of the system that recorded each.
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Source::System(name) => write!(f, "system `{name}`"),
+            Source::Hook { component, hook } => write!(f, "the {hook} hook of {component}"),
+            Source::Despawn => f.write_str("a despawn"),
+        }
+    }
+}
+
+/// A recorded change, applied later with the source that recorded it.
+pub(crate) type Command = Box<dyn FnOnce(&mut World, &Source) + Send>;
+
+/// The world's commands.
+///
+/// - **Recorded** commands come from systems during a stage, and from hooks during a structural
+///   change.
+/// - **Pending** commands are waiting in the command loop. Recorded commands are promoted to the
+///   *front* of the pending list, in recording order, so the commands a change caused run before
+///   anything that was already waiting (depth-first) without recursion.
 #[derive(Default)]
 pub(crate) struct CommandQueue {
-    commands: Vec<(usize, Command)>,
+    recorded: Vec<(Source, Command)>,
+    pending: VecDeque<(Source, Command)>,
 }
 
 impl fmt::Debug for CommandQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommandQueue")
-            .field("commands", &self.commands.len())
+            .field("recorded", &self.recorded.len())
+            .field("pending", &self.pending.len())
             .finish()
     }
 }
 
 impl CommandQueue {
-    /// Applies every command in recording order, then empties the queue. `name` gives the name
-    /// of the system with a given index.
-    pub(crate) fn apply<'n>(&mut self, world: &mut World, name: impl Fn(usize) -> &'n str) {
-        world.flush_reservations();
-        for (system, command) in self.commands.drain(..) {
-            command(world, name(system));
-        }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.recorded.is_empty() && self.pending.is_empty()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.commands.is_empty()
+    /// Records a command.
+    pub(crate) fn record(&mut self, source: Source, command: Command) {
+        self.recorded.push((source, command));
+    }
+
+    /// Moves the recorded commands to the front of the pending list, keeping their order.
+    /// Returns whether anything is pending.
+    pub(crate) fn promote_recorded(&mut self) -> bool {
+        for command in self.recorded.drain(..).rev() {
+            self.pending.push_front(command);
+        }
+        !self.pending.is_empty()
+    }
+
+    /// The next pending command.
+    pub(crate) fn next_pending(&mut self) -> Option<(Source, Command)> {
+        self.pending.pop_front()
     }
 
     /// Discards every command without applying it.
     pub(crate) fn clear(&mut self) {
-        self.commands.clear();
+        self.recorded.clear();
+        self.pending.clear();
     }
 }
 
@@ -79,28 +123,28 @@ impl CommandQueue {
 pub struct Commands<'a> {
     entities: &'a Entities,
     queue: &'a mut CommandQueue,
-    system: usize,
+    source: Source,
 }
 
 impl fmt::Debug for Commands<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Commands")
-            .field("queued", &self.queue.commands.len())
+            .field("queue", &self.queue)
             .finish_non_exhaustive()
     }
 }
 
 impl<'a> Commands<'a> {
-    pub(crate) fn new(entities: &'a Entities, queue: &'a mut CommandQueue, system: usize) -> Self {
+    pub(crate) fn new(entities: &'a Entities, queue: &'a mut CommandQueue, source: Source) -> Self {
         Self {
             entities,
             queue,
-            system,
+            source,
         }
     }
 
-    fn push(&mut self, command: impl FnOnce(&mut World, &str) + Send + 'static) {
-        self.queue.commands.push((self.system, Box::new(command)));
+    fn push(&mut self, command: impl FnOnce(&mut World, &Source) + Send + 'static) {
+        self.queue.record(self.source.clone(), Box::new(command));
     }
 
     /// Spawns an entity with `bundle` at the sync point. The handle is valid **now**: it can be
@@ -113,11 +157,10 @@ impl<'a> Commands<'a> {
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         bundle::check_duplicates::<B>();
         let entity = self.entities.reserve();
-        self.push(move |world, system| {
+        self.push(move |world, source| {
             if !world.spawn_reserved(entity, bundle) {
                 unreachable!(
-                    "{entity:?}, reserved by system `{system}`, couldn't be spawned: a bug in \
-                     oxreal-ecs"
+                    "{entity:?}, reserved by {source}, couldn't be spawned: a bug in oxreal-ecs"
                 );
             }
         });
@@ -132,17 +175,18 @@ impl<'a> Commands<'a> {
     }
 
     /// Adds `bundle` to `entity` at the sync point, replacing components it already has. If the
-    /// entity is gone by then, the bundle is dropped and a warning names the system.
+    /// entity is gone by then, the bundle is dropped and a warning names the system or hook that
+    /// recorded it.
     ///
     /// # Panics
     ///
     /// If `bundle` contains a component type twice.
     pub fn insert<B: Bundle>(&mut self, entity: Entity, bundle: B) {
         bundle::check_duplicates::<B>();
-        self.push(move |world, system| {
+        self.push(move |world, source| {
             if let Err(error) = world.insert(entity, bundle) {
                 warn!(
-                    system,
+                    source = %source,
                     %error,
                     bundle = std::any::type_name::<B>(),
                     "a command's insert was dropped"
