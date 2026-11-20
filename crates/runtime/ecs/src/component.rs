@@ -1,12 +1,12 @@
 //! Components and their registry.
 
 use std::any::{TypeId, type_name};
-use std::collections::HashMap;
 use std::fmt;
 
 use crate::entity::Entity;
 use crate::hook::HookWorld;
 use crate::storage::{AnyColumn, new_column};
+use crate::type_map::TypeIdMap;
 
 /// Data attached to an entity.
 ///
@@ -23,6 +23,36 @@ pub trait Component: Send + Sync + 'static {
     /// Functions the world calls when a component of this type is added, inserted, replaced or
     /// removed. None by default.
     const HOOKS: ComponentHooks = ComponentHooks::NONE;
+
+    /// Whether the component can be written in place. `false` makes it **immutable**: it can only
+    /// be replaced with `insert` (or removed), so its hooks see every change. Use it for components
+    /// whose hooks keep an invariant, such as a relation's link.
+    ///
+    /// Writing an immutable component in place is refused at compile time: `get_mut`, and `&mut T`
+    /// or `Option<&mut T>` in a query, don't compile for it.
+    ///
+    /// ```compile_fail
+    /// use oxreal_ecs::{Component, World};
+    ///
+    /// struct Link(u32);
+    /// impl Component for Link {
+    ///     const MUTABLE: bool = false;
+    /// }
+    ///
+    /// let mut world = World::new();
+    /// let e = world.spawn(Link(1));
+    /// let _ = world.get_mut::<Link>(e); // Doesn't compile: use `insert` instead.
+    /// ```
+    const MUTABLE: bool = true;
+}
+
+/// Refuses, at compile time, to write component `T` in place if it's immutable.
+pub(crate) const fn assert_mutable<T: Component>() {
+    assert!(
+        T::MUTABLE,
+        "this component is immutable (`Component::MUTABLE` is false): replace it with `insert`, \
+         so its hooks run, instead of writing it in place"
+    );
 }
 
 /// A lifecycle hook: called with the change that triggered it (ADR-0014 §4).
@@ -197,7 +227,7 @@ struct ComponentInfo {
 /// The component types a world has seen.
 #[derive(Debug, Default)]
 pub struct Components {
-    ids: HashMap<TypeId, ComponentId>,
+    ids: TypeIdMap<ComponentId>,
     infos: Vec<ComponentInfo>,
 }
 

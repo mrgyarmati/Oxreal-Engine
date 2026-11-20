@@ -94,6 +94,23 @@ exposed registry.
 - The authoring hierarchy (ADR-0005) is built on the `ChildOf`/`Children` relation, with ordered
   children. Transform propagation is a scheduled system, as before.
 
+#### Amendment (2026-11-20, immutable components)
+
+Relations stay consistent only if every change to their components passes through hooks.
+Writing such a component in place (`get_mut`, `&mut T` in a query) runs no hook. So:
+
+1. **A component type can be immutable** (`Component::MUTABLE = false`). It can be read,
+   inserted (which replaces it and runs `on_replace` and `on_insert`) and removed, but never
+   written in place. The ECS refuses in-place writes **at compile time**: `get_mut`, `&mut T`
+   and `Option<&mut T>` don't compile for an immutable type.
+2. **A relation's link component is immutable**, for example `ChildOf`. Its inverse (for
+   example `Children`) is read-only outside the crate that owns it: no public constructor or
+   mutator.
+3. **A component that needs another** adds it in its own `on_add` hook, through a command, as
+   the hierarchy's `LocalTransform` does with `WorldTransform`. This costs an extra archetype
+   move per spawn. A declared "required components" mechanism that avoids the move is added
+   when profiling or ergonomics call for it.
+
 ### 4. Lifecycle hooks
 - Per-component-type hooks: `on_add`, `on_insert`, `on_replace` and `on_remove`. They run
   synchronously as structural changes are applied, and they may only queue further changes
@@ -474,3 +491,29 @@ The decisions are in §4's amendment. These notes cover how they're implemented.
   - despawn finishing before its hooks' commands;
   - inserting into a despawning entity;
   - the hook panic guard disabled.
+
+## Implementation notes (2026-11-20, foundations for relations)
+
+- **Immutable components** (§3 amendment): `Component::MUTABLE` defaults to `true`. The write
+  paths call a `const fn` assertion in an inline `const` block, which the compiler evaluates
+  when it instantiates the generic code: `get_mut` on the world, the system view and the hook
+  view, and the `&mut T` and `Option<&mut T>` query data. So misuse is a compile error that
+  names the rule ("replace it with `insert`, so its hooks run"), not a runtime panic. A
+  `compile_fail` doc test, plus a manual check of all three paths, shows the error is this one.
+- **`World::is_despawning` and `HookWorld::is_despawning`** report an entity whose despawn has
+  started (§4 amendment, item 5). Such an entity still counts as alive, so relations need this
+  to treat it as gone.
+- **Faster `TypeId` lookups:** component, resource and bundle maps hash `TypeId` with a
+  pass-through hasher instead of SipHash. A `TypeId` is already a compiler-chosen hash, so
+  SipHash's flood resistance buys nothing there. A test checks that hashes vary in both the top
+  7 bits (the map's tag) and the low bits (its bucket).
+
+  Measured back to back on the same machine (100k entities, release):
+
+  | Workload | Before | After |
+  |---|---|---|
+  | spawn | 6.5 ms | 5.1 ms |
+  | `get` through 100k shuffled handles | 3.2 ms | 2.0 ms |
+  | insert + remove a tag on 10k entities | 1.53 ms | 1.38 ms |
+
+  Iteration and despawn are unchanged.

@@ -1,7 +1,7 @@
 //! Resources: typed singletons stored in a world (ADR-0014 §8).
 
+use crate::type_map::TypeIdMap;
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
 
 /// A value a world holds exactly one of, such as the frame's input or time.
 ///
@@ -10,7 +10,7 @@ pub trait Resource: Send + Sync + 'static {}
 
 #[derive(Debug, Default)]
 pub(crate) struct Resources {
-    values: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    values: TypeIdMap<Box<dyn Any + Send + Sync>>,
 }
 
 impl Resources {

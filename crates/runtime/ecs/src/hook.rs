@@ -1,5 +1,6 @@
 //! What a lifecycle hook can reach (ADR-0014 §4).
 
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::change::Mut;
@@ -21,6 +22,7 @@ pub struct HookWorld<'w> {
     components: &'w Components,
     entities: &'w Entities,
     resources: &'w mut Resources,
+    despawning: &'w HashSet<Entity>,
     commands: Commands<'w>,
 }
 
@@ -37,6 +39,7 @@ impl<'w> HookWorld<'w> {
             components: parts.components,
             entities: parts.entities,
             resources: parts.resources,
+            despawning: parts.despawning,
             commands: Commands::new(parts.entities, parts.queue, source),
         }
     }
@@ -58,10 +61,18 @@ impl<'w> HookWorld<'w> {
         world::has_component::<T>(self.entities, self.components, self.archetypes, entity)
     }
 
-    /// Whether `entity` is alive.
+    /// Whether `entity` is alive. An entity whose despawn has started still counts: see
+    /// [`HookWorld::is_despawning`].
     #[must_use]
     pub fn contains(&self, entity: Entity) -> bool {
         self.entities.location(entity).is_some()
+    }
+
+    /// Whether `entity`'s despawn has started but not finished. Its components can't change
+    /// any more, so a relation should treat it like a dead entity.
+    #[must_use]
+    pub fn is_despawning(&self, entity: Entity) -> bool {
+        !self.despawning.is_empty() && self.despawning.contains(&entity)
     }
 
     /// The resource of type `R`, if the world has one.

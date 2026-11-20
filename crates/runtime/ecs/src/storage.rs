@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
+use crate::type_map::TypeIdMap;
 
 /// A type-erased column of one component type.
 pub(crate) trait AnyColumn: Send + Sync {
@@ -104,7 +105,7 @@ pub struct Archetype {
     columns: Vec<Box<dyn AnyColumn>>,
     entities: Vec<Entity>,
     /// Where inserting a bundle of a given type leads, filled in as it's used.
-    insert_edges: HashMap<TypeId, ArchetypeId>,
+    insert_edges: TypeIdMap<ArchetypeId>,
     /// Whether any of its components has a lifecycle hook, so changes without hooks skip them.
     hooked: bool,
     /// Where removing a component leads, filled in as it's used.
@@ -136,7 +137,7 @@ impl Archetype {
             components,
             membership,
             entities: Vec::new(),
-            insert_edges: HashMap::new(),
+            insert_edges: TypeIdMap::default(),
             hooked,
             remove_edges: HashMap::new(),
         }
