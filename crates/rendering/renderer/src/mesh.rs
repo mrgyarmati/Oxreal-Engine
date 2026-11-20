@@ -219,6 +219,19 @@ pub struct MeshHandle {
     generation: u32,
 }
 
+impl MeshHandle {
+    /// A handle that never names a mesh, in any renderer: its slot index is reserved and never
+    /// issued. Draws with it are skipped and counted like any stale handle. Use it where a
+    /// handle is needed before a mesh exists, such as in tests that run without a GPU.
+    pub const DANGLING: Self = Self {
+        index: RESERVED_INDEX,
+        generation: 0,
+    };
+}
+
+/// The slot index [`MeshHandle::DANGLING`] uses. The pool never issues it.
+const RESERVED_INDEX: u32 = u32::MAX;
+
 /// A mesh's GPU buffers.
 #[derive(Debug)]
 pub(crate) struct GpuMesh {
@@ -254,7 +267,9 @@ impl MeshPool {
                 generation: slot.generation,
             });
         }
-        let index = u32::try_from(self.slots.len()).ok()?;
+        let index = u32::try_from(self.slots.len())
+            .ok()
+            .filter(|&index| index != RESERVED_INDEX)?;
         self.slots.push(Slot {
             generation: 0,
             mesh: Some(mesh),
@@ -300,9 +315,10 @@ impl MeshPool {
         handles.into_iter().filter_map(|h| self.remove(h)).collect()
     }
 
-    /// Whether no more meshes fit: every slot index is taken and none is free.
+    /// Whether no more meshes fit: every slot index but the reserved one is taken and none is
+    /// free.
     pub(crate) fn is_full(&self) -> bool {
-        self.free.is_empty() && u32::try_from(self.slots.len()).is_err()
+        self.free.is_empty() && self.slots.len() >= RESERVED_INDEX as usize
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -411,6 +427,17 @@ mod tests {
         );
         assert_eq!(pool.get(second).unwrap().address, 3);
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn the_dangling_handle_names_nothing() {
+        let mut pool = MeshPool::default();
+        assert!(pool.get(MeshHandle::DANGLING).is_none());
+        let handles: Vec<MeshHandle> = (0..4).map(|i| pool.insert(gpu_mesh(i)).unwrap()).collect();
+        assert!(!handles.contains(&MeshHandle::DANGLING));
+        assert!(pool.get(MeshHandle::DANGLING).is_none());
+        assert!(pool.remove(MeshHandle::DANGLING).is_none());
+        assert_eq!(pool.len(), 4, "removing it removed nothing");
     }
 
     #[test]

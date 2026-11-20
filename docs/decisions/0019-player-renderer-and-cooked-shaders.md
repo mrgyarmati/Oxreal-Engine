@@ -380,3 +380,49 @@ constraints shape them:
   - **The safety argument's layout step holds for sources that pass
     `tests/shader_layout.rs`,** which CI and `cargo xtask ci` run. Editing the shader means
     running it.
+
+## Implementation notes (2026-11-20, third slice: the bridge and the player)
+
+- **`oxreal-render-bridge`** (gameplay layer) provides:
+  - the `Camera` (projection settings) and `MeshInstance` (a mesh handle) components, both
+    placed by the entity's `WorldTransform`;
+  - the `ExtractedWorld` resource: the `RenderWorld` the application renders, plus the camera
+    entity it's seen from. The application inserts it and sets its background; extraction sets
+    the camera and draws;
+  - the `extract render world` system in `Extract`, added by `add_systems`.
+
+  Choices it makes:
+  - **Which camera:** the one with the smallest `Entity`, so the choice is stable. A camera
+    whose world transform has no orientation (zero scale) is passed over. The camera's scale is
+    dropped, since cameras are rigid. Choosing between cameras deliberately waits for the
+    gameplay camera (ADR-0020).
+  - **No camera, no draws:** the target is only cleared, and a warning is logged.
+  - Camera-count changes are logged once, not every frame.
+- **`oxreal-player`** (`applications/player`, app-runtime layer) is the cube example's frame
+  loop on top of the renderer and the bridge:
+  - It holds the device only as `Arc<dyn Device>`, shared with the renderer. `create_device`
+    in `run` is the only place the Vulkan backend is named.
+  - It resolves the cooked root as §4 says (`cooked.rs`). An empty `OXREAL_COOKED_DIR` counts as
+    unset, like Oxreal's other variables. Errors name where the root came from.
+  - The demo scene (`scene.rs`) and the fly camera (`fly_camera.rs`) moved from the example
+    with their tests. The fly camera now writes its entity's `LocalTransform`, which places the
+    entity's bridge `Camera`, rather than being read by a hand-written extraction.
+  - Validation follows `Validation::Automatic` (on in debug builds). The player fails on any
+    validation error, and with `--frames`, if frames stop arriving.
+- **`MeshHandle::DANGLING`** was added to the renderer: a handle that never names a mesh,
+  because the pool never issues its slot index. The scene's and the bridge's tests use it to
+  run without a GPU, and draws with it are skipped like any stale handle.
+- **The cube example retired**, with the backend's test-only dependencies on the ECS, the
+  hierarchy and input. **Correction to the second slice's note:** no backend GPU test used the
+  example's copy of `Mesh.slang`. Only the backend's `tests/shader_layout.rs` read it, checking a
+  shader nothing ran any more. Both were removed. The renderer's own layout test checks the
+  shader that is drawn with, and `SpirvLayouts` keeps its unit tests.
+- **CI:** the Lavapipe jobs cook the shaders, then run the player for 120 frames under Xvfb,
+  instead of the cube example. Job names didn't change.
+- **Tested:**
+  - unit tests: the bridge's extraction (placement through parents, camera choice, no camera,
+    zero scale, missing resource), the cooked-root resolution (including real Windows paths on
+    Windows and Unix paths on Unix), the command line, the scene and the fly camera;
+  - on Windows 11 with an AMD Radeon RX 9070 XT: the player ran 300 frames with validation and
+    synchronization validation on and reported no errors. A wrong `--cooked` gives the cook
+    hint.

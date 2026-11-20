@@ -17,6 +17,10 @@ members = [
     "crates/rendering/renderer",
     # systems
     "crates/systems/input",
+    # gameplay
+    "crates/gameplay/render-bridge",
+    # app-runtime
+    "applications/player",
     # tools
     "crates/tools/shader-compiler",
     "applications/shader-tool",
@@ -90,6 +94,8 @@ oxreal-input = { path = "crates/systems/input" }
 oxreal-shader-compiler = { path = "crates/tools/shader-compiler" }
 oxreal-rhi = { path = "crates/rendering/rhi" }
 oxreal-rhi-vulkan = { path = "crates/rendering/backends/vulkan" }
+oxreal-render-bridge = { path = "crates/gameplay/render-bridge" }
+oxreal-renderer = { path = "crates/rendering/renderer" }
 oxreal-window = { path = "crates/platform/window" }
 
 # Lint policy: docs/development/coding-standards.md. CI runs clippy with `-D warnings`, so every

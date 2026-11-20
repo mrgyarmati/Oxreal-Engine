@@ -42,6 +42,13 @@ tools. It has Unreal Engine-class ambitions and an editor that Unreal developers
 cargo xtask ci     # fmt check + clippy + tests + rustdoc + layer check
 ```
 
+Run the player, the game executable, with its demo scene:
+
+```sh
+cargo xtask cook-shaders      # after a fresh checkout or shader changes (needs spirv-val)
+cargo run -p oxreal-player    # hold the right mouse button to look; W A S D, E / Q to move
+```
+
 See [setup](docs/development/setup.md) for platform prerequisites.
 
 ## License

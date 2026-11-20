@@ -1093,6 +1093,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxreal-player"
+version = "0.1.0-dev"
+dependencies = [
+ "oxreal-diagnostics",
+ "oxreal-ecs",
+ "oxreal-hierarchy",
+ "oxreal-input",
+ "oxreal-math",
+ "oxreal-render-bridge",
+ "oxreal-renderer",
+ "oxreal-rhi",
+ "oxreal-rhi-vulkan",
+ "oxreal-window",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "oxreal-render-bridge"
+version = "0.1.0-dev"
+dependencies = [
+ "oxreal-diagnostics",
+ "oxreal-ecs",
+ "oxreal-hierarchy",
+ "oxreal-math",
+ "oxreal-renderer",
+]
+
+[[package]]
 name = "oxreal-renderer"
 version = "0.1.0-dev"
 dependencies = [
@@ -1123,9 +1151,6 @@ dependencies = [
  "ash-window",
  "gpu-allocator",
  "oxreal-diagnostics",
- "oxreal-ecs",
- "oxreal-hierarchy",
- "oxreal-input",
  "oxreal-math",
  "oxreal-rhi",
  "oxreal-shader-compiler",
