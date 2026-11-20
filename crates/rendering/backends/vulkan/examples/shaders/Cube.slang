@@ -1,5 +1,5 @@
-// A unit cube, textured on every face (tests/depth.rs). The cube example draws a real mesh
-// instead (Mesh.slang).
+// A unit cube, textured on every face (tests/depth.rs). The renderer draws real meshes with
+// `oxreal-renderer`'s `shaders/Mesh.slang` instead.
 //
 // The 36 vertices come from the vertex index, so there's no vertex buffer. In object space the
 // cube spans [-0.5, 0.5] on each axis. Faces wind counter-clockwise seen from outside

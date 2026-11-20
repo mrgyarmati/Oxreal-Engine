@@ -4,8 +4,12 @@
 //! forward, left, back and right, `E` and `Q` move up and down, and the wheel changes speed.
 //! With the button up, the camera ignores input, so keys stay free for other uses.
 //!
-//! This is example code. A gameplay camera comes with the gameplay capabilities (ADR-0020).
+//! It lives in the player with the demo scene, and goes when the gameplay camera arrives with
+//! the gameplay capabilities (ADR-0019 §3, ADR-0020). The `fly camera` system in `scene.rs`
+//! copies its [`FlyCamera::transform`] into the entity's `LocalTransform`, which places the
+//! entity's render-bridge `Camera`.
 
+use oxreal_ecs::Component;
 use oxreal_input::{InputState, KeyCode, MouseButton};
 use oxreal_math::{Quat, Transform, Vec3, axes};
 
@@ -96,6 +100,8 @@ impl FlyCamera {
         Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch)
     }
 }
+
+impl Component for FlyCamera {}
 
 #[cfg(test)]
 mod tests {

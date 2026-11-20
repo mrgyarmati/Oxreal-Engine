@@ -380,3 +380,80 @@ constraints shape them:
   - **The safety argument's layout step holds for sources that pass
     `tests/shader_layout.rs`,** which CI and `cargo xtask ci` run. Editing the shader means
     running it.
+
+## Implementation notes (2026-11-20, third slice: the bridge and the player)
+
+- **`oxreal-render-bridge`** (gameplay layer) provides:
+  - the `Camera` (projection settings) and `MeshInstance` (a mesh handle) components, both
+    placed by the entity's `WorldTransform`;
+  - the `ExtractedWorld` resource: the `RenderWorld` the application renders
+    (`render_world()`) and the camera entity it's seen from (`camera_entity()`). Its fields are
+    private, so the split of ownership is the type's: the application sets the background
+    (`set_background`), and extraction rewrites the camera and the draws every frame. The
+    resource has to be a wrapper anyway: the orphan rule keeps the bridge from making the
+    renderer's `RenderWorld` a resource;
+  - the `extract render world` system in `Extract`, added by `add_systems`.
+
+  Choices it makes:
+  - **Which camera:** a usable one (valid projection, and a world transform with an
+    orientation, so not zero scale), the same one every frame while the set of cameras doesn't
+    change. Only that is promised; `camera_entity()` reports which. The implementation takes the
+    smallest `Entity`, which means nothing across runs. The camera's scale is dropped, since
+    cameras are rigid. Choosing deliberately between cameras, which the editor viewport (M2)
+    will also need, waits for the gameplay camera (ADR-0020).
+  - **No usable camera, no draws:** the render world gets the default camera and no draws, so
+    the target is only cleared, with a warning. Nothing from an earlier frame is left behind.
+  - A change in the number of cameras or in the one chosen is logged once, not every frame.
+  - The draw list is refilled in place, so its memory is reused from frame to frame.
+- **`oxreal-player`** (`applications/player`, app-runtime layer) is the cube example's frame
+  loop on top of the renderer and the bridge:
+  - It holds the device only as `Arc<dyn Device>`, shared with the renderer. `create_device`
+    in `run` is the only place the Vulkan backend is named.
+  - It resolves the cooked root as §4 says (`cooked.rs`). An empty `OXREAL_COOKED_DIR` counts as
+    unset, like Oxreal's other variables, and an empty `--cooked` is refused. "Next to the
+    executable" follows `current_exe`: through a symbolic link, Linux reports the real file and
+    Windows the link. `cargo xtask cook-shaders` now also honours `CARGO_BUILD_TARGET`, so the
+    cook lands next to the binary cargo builds.
+  - Its errors are a typed `PlayerError` that keeps each cause as a `#[source]` (ADR-0010), so
+    the message at exit shows the whole chain, for example why a camera or a cooked file was
+    refused.
+  - While the window has zero size (minimized on Windows), no frame can be shown, so the event
+    loop sleeps until the next event instead of spinning, except under `--frames`, whose
+    timeout must keep running. A restore arrives as a resize.
+  - The demo scene (`scene.rs`) and the fly camera (`fly_camera.rs`) moved from the example
+    with their tests. The fly camera now writes its entity's `LocalTransform`, which places the
+    entity's bridge `Camera`, rather than being read by a hand-written extraction. §3 names
+    ADR-0008 as where the gameplay camera comes from; ADR-0020 has superseded it since.
+  - Validation follows `Validation::Automatic` (on in debug builds). The player fails on any
+    validation error, and with `--frames`, if frames stop arriving.
+- **`MeshHandle::DANGLING`** was added to the renderer: a handle that never names a mesh,
+  because the pool never issues its slot index. The scene's and the bridge's tests use it to
+  run without a GPU, and draws with it are skipped like any stale handle. It isn't an "absent
+  mesh" value; that's `Option<MeshHandle>`. The pool's index limit can be lowered in its unit
+  tests, which check that "full" and "can't insert" agree at the limit, including after a slot
+  is retired. Registering a mesh that doesn't fit now destroys its buffers instead of dropping
+  them (a path the capacity check already made unreachable).
+- **The cube example retired**, with the backend's test-only dependencies on the ECS, the
+  hierarchy and input. **Correction to the second slice's note:** no backend GPU test used the
+  example's copy of `Mesh.slang`. Only the backend's `tests/shader_layout.rs` read it, checking a
+  shader nothing ran any more. Both were removed. The renderer's own layout test checks the
+  shader that is drawn with, and `SpirvLayouts` keeps its unit tests.
+- **CI:** the Lavapipe jobs cook the shaders, then run the player for 120 frames under Xvfb,
+  instead of the cube example. Job names didn't change.
+- **Tested:**
+  - unit tests: the bridge's extraction (placement through parents, camera choice and its
+    stability, no camera, losing the camera, unusable cameras, missing resource), the
+    cooked-root resolution (including real Windows paths on Windows and Unix paths on Unix),
+    the command line, the scene, the fly camera, the mesh pool at its limit, and
+    `CARGO_BUILD_TARGET` in the cook;
+  - on Windows 11 with an AMD Radeon RX 9070 XT: the player ran 300 frames with validation and
+    synchronization validation on and reported no errors. A wrong `--cooked` gives the cook
+    hint.
+  - CI runs the player on Linux (X11 under Xvfb, Lavapipe). It never runs it on Windows (no GPU
+    on the hosted runners) or on Wayland.
+- **Follow-up, not verified:** on Wayland, a compositor stops sending frame callbacks to a
+  hidden window, and Mesa's FIFO present can then block inside the driver, which would freeze
+  the event loop (no close, no timeout). Wayland doesn't report minimizing, so the player can't
+  avoid it. If a manual test on GNOME and KDE confirms it, the fix belongs in the backend or
+  the window layer (for example a bounded acquire, or a present mode with frame pacing done by
+  the application), decided in an ADR.

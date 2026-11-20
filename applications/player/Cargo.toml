@@ -1,0 +1,28 @@
+[package]
+name = "oxreal-player"
+description = "The Oxreal player: the M1 game executable. Window, input, the Vulkan device, the frame loop, the ECS world and schedule, and the renderer, with no shader compiler (ADR-0019)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "app-runtime"
+
+[dependencies]
+oxreal-diagnostics = { workspace = true, features = ["application"] }
+oxreal-ecs.workspace = true
+oxreal-hierarchy.workspace = true
+oxreal-input.workspace = true
+oxreal-math.workspace = true
+oxreal-render-bridge.workspace = true
+oxreal-renderer.workspace = true
+oxreal-rhi.workspace = true
+oxreal-rhi-vulkan.workspace = true
+oxreal-window.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

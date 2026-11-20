@@ -4,8 +4,10 @@
 //! out what to cook and where, then runs `oxreal-shader-tool cook`, which owns the cook logic:
 //! - **recipes:** every workspace crate's `shaders/cook.json`;
 //! - **output:** `<target dir>[/<triple>]/<profile dir>/cooked/shaders`, from `cargo metadata`,
-//!   so `CARGO_TARGET_DIR` and `--target` are honoured. `--out <dir>` replaces the cooked root
-//!   (the directory that contains `shaders/`);
+//!   so `CARGO_TARGET_DIR` and `--target` are honoured. Without `--target`,
+//!   `CARGO_BUILD_TARGET` is used, as cargo does. (`build.target` in a cargo config file isn't
+//!   read: pass `--target` then.) `--out <dir>` replaces the cooked root (the directory that
+//!   contains `shaders/`);
 //! - **optimization:** release for `--profile release`, debug for every other profile.
 
 use std::path::{Path, PathBuf};
@@ -33,7 +35,10 @@ pub(crate) struct Options {
 }
 
 pub(crate) fn run(cargo: &str, root: &Path, args: &[String]) -> Result<(), String> {
-    let options = parse_options(args)?;
+    let options = with_build_target(
+        parse_options(args)?,
+        std::env::var("CARGO_BUILD_TARGET").ok(),
+    );
     let metadata = crate::layers::cargo_metadata(cargo, root)?;
     let plan = plan(&metadata, &options, |path| path.is_file())?;
     if plan.recipes.is_empty() {
@@ -106,6 +111,15 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         }
     }
     Ok(options)
+}
+
+/// `options` with `build_target` (`CARGO_BUILD_TARGET`) as the target when `--target` wasn't
+/// given, so the shaders land where `cargo run` puts the binary. Empty counts as unset.
+fn with_build_target(mut options: Options, build_target: Option<String>) -> Options {
+    if options.target.is_none() {
+        options.target = build_target.filter(|triple| !triple.is_empty());
+    }
+    options
 }
 
 /// `path` made absolute against the current directory.
@@ -207,6 +221,26 @@ mod tests {
             ],
             "only crates with a recipe, sorted"
         );
+    }
+
+    #[test]
+    fn cargo_build_target_is_used_unless_target_is_given() {
+        let triple = "x86_64-unknown-linux-gnu";
+        let from_env = with_build_target(options(""), Some(triple.to_owned()));
+        assert_eq!(from_env.target.as_deref(), Some(triple));
+        let explicit = with_build_target(
+            options("--target aarch64-unknown-linux-gnu"),
+            Some(triple.to_owned()),
+        );
+        assert_eq!(
+            explicit.target.as_deref(),
+            Some("aarch64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            with_build_target(options(""), Some(String::new())).target,
+            None
+        );
+        assert_eq!(with_build_target(options(""), None).target, None);
     }
 
     #[test]

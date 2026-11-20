@@ -29,6 +29,16 @@
   Each crate lists its shaders in `shaders/cook.json`, including every file they import: the
   cook fails if a shader reads an undeclared file. `cargo xtask ci` runs the cook tests, which
   skip without `spirv-val`. CI requires it on every platform.
+  `cargo run -p oxreal-player` finds the cooked directory next to its executable, which for
+  `target/<profile>/oxreal-player` is `target/<profile>/cooked/`: exactly where the cook
+  writes. Cook the build you run:
+  - `cargo run --release -p oxreal-player`: `cargo xtask cook-shaders --profile release`;
+  - `--target <triple>` (or `CARGO_BUILD_TARGET`): the cook uses the same, giving
+    `target/<triple>/<profile>/cooked/`;
+  - `CARGO_TARGET_DIR` is honoured by both.
+
+  Point the player elsewhere with `--cooked <dir>` or `OXREAL_COOKED_DIR`. A missing or stale
+  directory is a startup error that says to cook again.
 - Minimum: a Vulkan 1.3 driver with dynamic rendering, synchronization2 and maintenance4
   ([ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md)). Tested hardware is listed
   in [gpu-support.md](gpu-support.md). Reference development setup: SDK 1.4.363.1.

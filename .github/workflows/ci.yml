@@ -254,9 +254,15 @@ jobs:
       - name: textured example (Lavapipe, X11 under Xvfb)
         timeout-minutes: 10
         run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example textured --locked -- --frames 120
-      - name: cube example (Lavapipe, X11 under Xvfb)
+      # The game executable end to end (ADR-0019 §5): cook the shaders, then run the player,
+      # which loads them from `cooked/` next to itself and fails on any validation error or if
+      # frames stop arriving.
+      - name: Cook shaders
         timeout-minutes: 10
-        run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example cube --locked -- --frames 120
+        run: cargo xtask cook-shaders
+      - name: player (Lavapipe, X11 under Xvfb)
+        timeout-minutes: 10
+        run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-player --locked -- --frames 120
       # Misusing the frame loop (second begin_frame, dropped frame, tampered Frame, ...) is
       # refused or recovered, never undefined behaviour.
       - name: frame_protocol checks (Lavapipe, X11 under Xvfb)

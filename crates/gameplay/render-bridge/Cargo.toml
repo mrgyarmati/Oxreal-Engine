@@ -1,0 +1,22 @@
+[package]
+name = "oxreal-render-bridge"
+description = "Oxreal render bridge: the Camera and MeshInstance components and the Extract system that fills the renderer's RenderWorld from the ECS world (ADR-0019)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "gameplay"
+
+[dependencies]
+oxreal-diagnostics.workspace = true
+oxreal-ecs.workspace = true
+oxreal-hierarchy.workspace = true
+oxreal-math.workspace = true
+oxreal-renderer.workspace = true
+
+[lints]
+workspace = true
