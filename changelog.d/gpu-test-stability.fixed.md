@@ -1,4 +1,5 @@
-- `oxreal-rhi-vulkan`: creating a Vulkan instance no longer fails with
-  `vkEnumerateInstanceExtensionProperties` returning `VK_INCOMPLETE`. Some drivers (seen on AMD's
-  Windows driver) return it when other threads create and destroy instances at the same time;
-  the backend now asks again, up to four times, as the code means.
+- `oxreal-rhi-vulkan`: creating a device no longer fails when a Vulkan enumeration
+  (`vkEnumerateInstanceExtensionProperties` and similar) returns `VK_INCOMPLETE` from its count
+  call. It was seen on Windows with AMD's driver installed while other threads created and
+  destroyed instances. `VK_INCOMPLETE` is a success code, so the backend now asks again, up to
+  four times.

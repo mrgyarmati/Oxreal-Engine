@@ -325,21 +325,28 @@ fn resolve_validation(
     }
 }
 
-/// How many times a loader enumeration is attempted before `VK_INCOMPLETE` is reported.
+/// How many times a loader enumeration is attempted before `VK_INCOMPLETE` is reported. The
+/// observed failure is transient (about 1 call sequence in 9 test runs fails once), so four
+/// consecutive failures would mean something persistent, which deserves the error.
 const ENUMERATION_ATTEMPTS: u32 = 4;
 
-/// Runs a loader-level enumeration (layers, instance extensions) until it returns a complete
-/// list.
+/// Runs a loader-assembled enumeration (layers, instance and device extensions, physical
+/// devices) until it returns a complete list.
 ///
-/// These lists are two calls: one for the count, one to fill. The loader assembles them from
-/// every driver and layer manifest, and can return `VK_INCOMPLETE` when what it found changed
-/// between, or during, the two. ash retries when the fill call returns it, but its count call
-/// treats every non-`VK_SUCCESS` code as an error. AMD's Windows driver has been seen returning
-/// `VK_INCOMPLETE` from the count call while other threads create and destroy instances (about 1
-/// run in 9 of the parallel GPU tests). `VK_INCOMPLETE` is a success code and means "ask again",
-/// so the enumeration starts over. A bounded number of attempts keeps a driver that never
-/// completes from hanging instance creation: that one still gets the error.
-fn enumerate_complete<T>(mut enumerate: impl FnMut() -> VkResult<Vec<T>>) -> VkResult<Vec<T>> {
+/// These lists are two calls: one for the count, one to fill. ash retries when the fill call
+/// returns `VK_INCOMPLETE` (the array was too small because the list grew in between), but its
+/// count call treats every non-`VK_SUCCESS` code as an error. The specification doesn't expect
+/// `VK_INCOMPLETE` from a count-only call. Still, on Windows with AMD's driver installed it was
+/// seen there, while other threads created and destroyed instances (about 1 run in 9 of the
+/// parallel GPU tests); the loader, the driver and its implicit layers all take part in these
+/// calls, so which one returns it isn't known. `VK_INCOMPLETE` is a success code, so the
+/// enumeration starts over instead of failing.
+///
+/// The bound applies to `VK_INCOMPLETE` from the count call: after [`ENUMERATION_ATTEMPTS`] the
+/// error is reported. ash's own retry of the fill call is not bounded by this.
+pub(crate) fn enumerate_complete<T>(
+    mut enumerate: impl FnMut() -> VkResult<Vec<T>>,
+) -> VkResult<Vec<T>> {
     let mut attempt = 1;
     loop {
         match enumerate() {

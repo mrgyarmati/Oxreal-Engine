@@ -281,9 +281,10 @@ constraints shape them:
   replaced through a temporary file and a rename, and the manifest is written last.
 - **Windows CI** gets `spirv-val` from the LunarG Vulkan SDK 1.4.363.1 installer, pinned by
   SHA-256 and installed copy-only. The hash was computed from the download after checking its
-  LunarG code signature. Linux uses the distro's `spirv-tools`. The cook tests run on all three
-  build jobs with `OXREAL_REQUIRE_SPIRV_VAL=1`, and every build job also runs
-  `cargo xtask cook-shaders`.
+  LunarG code signature. Linux uses the distro's `spirv-tools`; its Lavapipe jobs take only
+  the validation layer from the matching Linux SDK archive (ADR-0012, implementation notes). The
+  cook tests run on all three build jobs with `OXREAL_REQUIRE_SPIRV_VAL=1`, and every build job
+  also runs `cargo xtask cook-shaders`.
 - **Not yet:** no crate has a recipe until the renderer arrives (the next slice), so the
   workspace cook writes an empty manifest for now.
 - **Rules added after review:**
