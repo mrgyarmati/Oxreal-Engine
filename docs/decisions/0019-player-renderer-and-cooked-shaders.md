@@ -288,9 +288,9 @@ constraints shape them:
     `mesh.spv` are one file on Windows. Windows' reserved device names (`CON`, `NUL`, `COM1`
     and so on) are refused everywhere too.
   - The compiler's own modules are exempt from the declared-input check only if its
-    installation directory doesn't contain the workspace. Otherwise
-    `OXREAL_SLANGC=~/bin/slangc` would exempt every workspace file. Symlinks are resolved
-    first.
+    installation directory (symlinks resolved) can't be mistaken for workspace sources: it
+    must not contain the workspace (`OXREAL_SLANGC=~/bin/slangc` would exempt every workspace
+    file), and inside the workspace it must be under `.tools/`, where the pinned Slang lives.
   - Files of dropped shaders are removed before new files are written, so a rename that only
     changes case keeps the new file on Windows.
   - On Windows, replacing or removing a file retries for up to a second while another process

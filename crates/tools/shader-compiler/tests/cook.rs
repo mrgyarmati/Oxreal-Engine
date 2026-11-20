@@ -365,9 +365,12 @@ fn a_hostile_previous_manifest_never_removes_files_outside_the_directory() {
     std::fs::write(&victim, b"keep me").unwrap();
     let path = ws.out_dir().join(MANIFEST_FILE);
     let text = std::fs::read_to_string(&path).unwrap();
+    // A hostile name, and a valid name with a hostile file: both guards are exercised.
     let hostile = text.replacen(
         "\"shaders\": [",
         "\"shaders\": [\n    { \"name\": \"../victim\", \"file\": \"../victim.spv\", \
+         \"entry_points\": [], \"optimization\": \"debug\", \"spirv_sha256\": \"\", \
+         \"source_key\": \"\" },\n    { \"name\": \"victim\", \"file\": \"../victim.spv\", \
          \"entry_points\": [], \"optimization\": \"debug\", \"spirv_sha256\": \"\", \
          \"source_key\": \"\" },",
         1,

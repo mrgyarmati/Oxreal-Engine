@@ -81,6 +81,13 @@ pub enum ShaderError {
         /// The version it reported.
         found: String,
     },
+    /// The compiler isn't inside an installation directory (`<root>/bin/slangc`), so its own
+    /// modules can't be told apart.
+    #[error("{path} is not inside a Slang installation (expected <installation>/bin/slangc)")]
+    NotInAnInstallation {
+        /// The compiler, symlinks resolved.
+        path: PathBuf,
+    },
     /// `spirv-val` rejected the generated SPIR-V.
     #[error("spirv-val rejected {source_file}:\n{diagnostics}")]
     Validation {

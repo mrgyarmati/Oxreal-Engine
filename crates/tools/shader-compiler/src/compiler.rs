@@ -11,7 +11,8 @@ use crate::spirv::{self, Capability};
 use crate::{ShaderError, depfile};
 
 /// Environment variable naming a different `slangc` to use instead of the pinned one, for
-/// experiments. It's logged as a warning (ADR-0013 §3).
+/// experiments. It's logged as a warning (ADR-0013 §3). `tools/xtask/src/cook.rs` names it too
+/// (xtask depends on no engine crate): change both together.
 pub const SLANGC_ENV_VAR: &str = "OXREAL_SLANGC";
 
 /// How much the compiler optimizes.
@@ -154,14 +155,20 @@ impl SlangCompiler {
         }
     }
 
-    /// The directory the compiler is installed in: the parent of its `bin` directory. Slang's
-    /// own core modules live there.
-    #[must_use]
-    pub fn install_root(&self) -> &Path {
-        self.slangc
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or_else(|| Path::new(""))
+    /// The directory the compiler is really installed in: the parent of its `bin` directory,
+    /// with symlinks resolved first (`/usr/local/bin/slangc` may point into `/opt/slang`).
+    /// Slang's own core modules live there.
+    ///
+    /// # Errors
+    ///
+    /// [`ShaderError::Io`] if the path can't be resolved, or
+    /// [`ShaderError::NotInAnInstallation`] if it has no `bin` directory above it.
+    pub fn install_root(&self) -> Result<PathBuf, ShaderError> {
+        let slangc = std::fs::canonicalize(&self.slangc).map_err(|source| ShaderError::Io {
+            action: format!("resolving {}", self.slangc.display()),
+            source,
+        })?;
+        install_root_of(&slangc).ok_or(ShaderError::NotInAnInstallation { path: slangc })
     }
 
     /// Compiles `request` to SPIR-V.
@@ -285,6 +292,12 @@ impl SlangCompiler {
     }
 }
 
+/// The grandparent of `slangc` (`<root>/bin/slangc`), if it has one.
+fn install_root_of(slangc: &Path) -> Option<PathBuf> {
+    let root = slangc.parent()?.parent()?;
+    (!root.as_os_str().is_empty()).then(|| root.to_owned())
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, ShaderError> {
     std::fs::read(path).map_err(|source| ShaderError::Io {
         action: format!("reading {}", path.display()),
@@ -374,7 +387,12 @@ mod tests {
         let err = compiler.ensure_pinned().unwrap_err();
         assert!(matches!(err, ShaderError::UnpinnedCompiler { .. }), "{err}");
         assert!(err.to_string().contains(&pinned_version()), "{err}");
-        assert_eq!(compiler.install_root(), Path::new("/opt/slang"));
+        assert_eq!(
+            install_root_of(&compiler.slangc).as_deref(),
+            Some(Path::new("/opt/slang"))
+        );
+        assert_eq!(install_root_of(Path::new("/slangc")), None);
+        assert_eq!(install_root_of(Path::new("bin/slangc")), None);
 
         let pinned = SlangCompiler {
             version: pinned_version(),

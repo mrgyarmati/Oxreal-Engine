@@ -105,16 +105,20 @@ pub enum CookError {
         /// The file.
         dependency: PathBuf,
     },
-    /// The compiler is installed in a directory that contains the workspace. Its own modules
-    /// are exempt from the declared-input check, so every workspace file would be too.
+    /// The compiler's installation overlaps the workspace's sources: it contains the workspace,
+    /// or lies inside it somewhere other than `.tools/`. Its own modules are exempt from the
+    /// declared-input check, so workspace files would be too.
     #[error(
-        "the Slang compiler's installation directory {compiler_root} contains the workspace, so \
-         the cook couldn't tell its modules from workspace files. Use the pinned Slang \
-         (`cargo xtask slang install`), or point OXREAL_SLANGC at a slangc in its own installation"
+        "the Slang compiler's installation directory {} overlaps the workspace, so the cook \
+         couldn't tell its modules from workspace files. Use the pinned Slang \
+         (`cargo xtask slang install`), or point OXREAL_SLANGC at a slangc in its own \
+         installation outside the workspace",
+        compiler_root.display()
     )]
-    CompilerContainsWorkspace {
-        /// The compiler's installation directory.
-        compiler_root: String,
+    CompilerOverlapsWorkspace {
+        /// The compiler's installation directory, normalized (`/`-separated, symlinks
+        /// resolved).
+        compiler_root: PathBuf,
     },
     /// The compiler or validator isn't usable for cooking.
     #[error(transparent)]
@@ -196,19 +200,10 @@ pub fn cook(
         }
     }
 
-    // Resolve symlinks before taking the compiler's install directory, so it's where Slang
-    // really is (`/usr/local/bin/slangc` may point into `/opt/slang`).
-    let slangc = std::fs::canonicalize(compiler.path()).map_err(|source| CookError::Io {
-        action: format!("resolving {}", compiler.path().display()),
-        source,
-    })?;
-    let compiler_root = slangc
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or_else(|| Path::new(""));
+    let compiler_root = compiler.install_root().map_err(CookError::Tool)?;
     let roots = DependencyRoots {
         workspace: normalize(request.workspace)?,
-        compiler: normalize(compiler_root)?,
+        compiler: normalize(&compiler_root)?,
         // Windows file systems ignore case, so its paths compare without it. This is a
         // property of the host's file system, not engine platform code (CLAUDE.md rule 4).
         ignore_case: cfg!(windows),
@@ -463,9 +458,19 @@ mod tests {
     fn dependencies_are_checked_against_the_declared_inputs() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cook");
         let entry = read_recipe(&workspace.join("shaders/cook.json")).unwrap()[0].clone();
+        /// Removes the directory even if an assertion fails.
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
         // A file outside the workspace, and a separate "compiler installation".
-        let outside =
-            std::env::temp_dir().join(format!("oxreal-cook-outside-{}", std::process::id()));
+        let temp = TempDir(
+            std::env::temp_dir().join(format!("oxreal-cook-outside-{}", std::process::id())),
+        );
+        let outside = &temp.0;
         let compiler = outside.join("slang");
         std::fs::create_dir_all(compiler.join("lib")).unwrap();
         std::fs::write(outside.join("Stray.slang"), "").unwrap();
@@ -495,7 +500,6 @@ mod tests {
             }
             other => panic!("expected UndeclaredDependency, got {other:?}"),
         }
-        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

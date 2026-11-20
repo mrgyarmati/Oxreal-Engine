@@ -132,18 +132,25 @@ impl DependencyRoots {
         }
     }
 
-    /// Checks that the compiler's installation doesn't contain the workspace. If it did, every
-    /// workspace file would count as one of the compiler's modules, exempt from the
-    /// declared-input check (for example `OXREAL_SLANGC=~/bin/slangc`, whose installation
-    /// directory is `~`). The pinned Slang lives *inside* the workspace, which is fine.
+    /// Checks that the compiler's installation can't be mistaken for workspace sources. Its
+    /// files are exempt from the declared-input check, so an installation that contains the
+    /// workspace (`OXREAL_SLANGC=~/bin/slangc`, installed in `~`) would exempt every workspace
+    /// file. Inside the workspace it must be under `.tools/`, where the pinned Slang lives.
     ///
     /// # Errors
     ///
-    /// [`CookError::CompilerContainsWorkspace`].
+    /// [`CookError::CompilerOverlapsWorkspace`].
     pub(crate) fn check(&self) -> Result<(), CookError> {
-        if contains(&self.compiler, &self.workspace, self.ignore_case) {
-            Err(CookError::CompilerContainsWorkspace {
-                compiler_root: self.compiler.clone(),
+        // A compiler installed inside the workspace may only be under `.tools/`, the
+        // git-ignored tool directory that holds no sources. Anywhere else (for example
+        // `OXREAL_SLANGC=<workspace>/crates/foo/bin/slangc`) would exempt that crate's shaders.
+        let tools = format!("{}/.tools", self.workspace);
+        let around = contains(&self.compiler, &self.workspace, self.ignore_case);
+        let among_sources = contains(&self.workspace, &self.compiler, self.ignore_case)
+            && !contains(&tools, &self.compiler, self.ignore_case);
+        if around || among_sources {
+            Err(CookError::CompilerOverlapsWorkspace {
+                compiler_root: PathBuf::from(&self.compiler),
             })
         } else {
             Ok(())
@@ -276,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn a_compiler_installed_around_the_workspace_is_refused() {
+    fn a_compiler_overlapping_the_workspace_sources_is_refused() {
         // OXREAL_SLANGC=/home/dev/bin/slangc: the installation directory is /home/dev.
         let around = DependencyRoots {
             workspace: "/home/dev/oxreal".to_owned(),
@@ -285,13 +292,24 @@ mod tests {
         };
         assert!(matches!(
             around.check(),
-            Err(CookError::CompilerContainsWorkspace { .. })
+            Err(CookError::CompilerOverlapsWorkspace { .. })
         ));
         let same = DependencyRoots {
             compiler: "/home/dev/oxreal".to_owned(),
             ..around.clone()
         };
         assert!(same.check().is_err());
+        // Inside the workspace, but among sources: a crate's shaders would be exempt.
+        let inside = DependencyRoots {
+            compiler: "/home/dev/oxreal/crates/foo".to_owned(),
+            ..around.clone()
+        };
+        assert!(inside.check().is_err());
+        let tools_lookalike = DependencyRoots {
+            compiler: "/home/dev/oxreal/.toolsmith/slang".to_owned(),
+            ..around.clone()
+        };
+        assert!(tools_lookalike.check().is_err());
         // The pinned Slang inside the workspace, and a separate installation, are fine.
         assert!(windows().check().is_ok());
         assert!(linux().check().is_ok());

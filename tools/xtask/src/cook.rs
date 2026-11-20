@@ -40,7 +40,8 @@ pub(crate) fn run(cargo: &str, root: &Path, args: &[String]) -> Result<(), Strin
         println!("cook-shaders: no crate has a shaders/cook.json; writing an empty manifest");
     }
     // A developer's own compiler (OXREAL_SLANGC) replaces the pinned download. The cook still
-    // requires it to report exactly the pinned version.
+    // requires it to report exactly the pinned version. The name is `SLANGC_ENV_VAR` in
+    // oxreal-shader-compiler, which xtask can't depend on: change both together.
     if std::env::var_os("OXREAL_SLANGC").is_none() {
         crate::slang::ensure_installed(root)?;
     }
