@@ -24,8 +24,9 @@ pub trait Component: Send + Sync + 'static {
     /// removed. None by default.
     const HOOKS: ComponentHooks = ComponentHooks::NONE;
 
-    /// Whether the component can be written in place. `false` makes it **immutable**: it can only
-    /// be replaced with `insert` (or removed), so its hooks see every change. Use it for components
+    /// Whether the component can be written in place. `false` makes it **immutable**: it changes
+    /// only through `insert` (replacing it), [`crate::World::modify`] (editing it in place) or
+    /// `remove`, all of which run its hooks, so its hooks see every change. Use it for components
     /// whose hooks keep an invariant, such as a relation's link.
     ///
     /// Writing an immutable component in place is refused **when the code is built**:
@@ -176,6 +177,9 @@ pub enum HookCause {
     /// The entity is being despawned. Lets a relation tell "my owner is going away" from "the
     /// relation was removed".
     Despawn,
+    /// It was edited in place with [`crate::World::modify`]: `on_replace` sees the value before
+    /// the edit, and `on_insert` the value after it.
+    Modify,
 }
 
 /// The lifecycle hooks of a component type. Build it from [`ComponentHooks::NONE`]:

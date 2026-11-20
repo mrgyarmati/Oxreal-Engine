@@ -102,6 +102,10 @@ Writing such a component in place (`get_mut`, `&mut T` in a query) runs no hook.
 1. **A component type can be immutable** (`Component::MUTABLE = false`).
    - It can be read, inserted (which replaces it and runs `on_replace` and `on_insert`) and
      removed, but never written in place.
+   - *Refined with `World::modify`:* it can also be **edited in place through `World::modify`**,
+     which runs `on_replace` before the edit and `on_insert` after it (`HookCause::Modify`).
+     What immutability guarantees is that every change passes through the hooks. `modify`
+     keeps that guarantee, without moving or copying the value.
    - Typed Rust code that writes one in place fails **when it's built**. This covers
      `get_mut`, `&mut T` and `Option<&mut T>` query data, and `System::writes`. The check is
      an inline `const` assertion: a post-monomorphization error.
@@ -647,3 +651,46 @@ amendment and ADR-0005's amendment.
   - a stale `WorldTransform` kept;
   - an orphaned child left linked;
   - stale entries kept in an edited list.
+
+## Implementation notes (2026-11-20, in-place modify and wide parents)
+
+- **`World::modify::<T>(entity, edit)`** runs `T`'s `on_replace` hooks, calls `edit` on the
+  value in place, then runs its `on_insert` hooks, with cause `Modify`. It then applies their
+  commands, as every structural change does. It works on immutable components, which is its
+  purpose (§3 amendment, item 1, refined).
+  - It returns `None`, without calling `edit`, for a dead entity, a missing component or an
+    entity being despawned.
+  - It's on `World` only. Systems reach it through `Commands::run`.
+- **`Children` is edited in place.** The hierarchy edits it with `modify`, instead of copying
+  and replacing it on every attach and detach.
+- **`Children`'s validation is O(1).** Each parent carries a stamp in a component private to
+  `oxreal-hierarchy`, so no other code can name, change or remove it. Every legitimate edit
+  bumps the stamp and stamps the list to match, and removing `Children` bumps it too.
+  - The `on_insert` hook compares owner and stamp, instead of checking every child's link.
+  - A list taken off another entity has another owner. A list put back after the entity's list
+    changed, or straight after its removal detached the children, has an old stamp. Either is
+    rebuilt from the links, as before.
+  - Edits no longer drop entries whose link moved: the moved child's own removal follows in the
+    same flush, and the stamp check no longer looks at entries.
+- **Measured back to back** on the same machine (Ryzen 9 5950X, release):
+
+  | Workload | Before | After |
+  |---|---|---|
+  | attach 1,000 children to one parent, one by one | 8 ms | 0.5 ms |
+  | attach 10,000 children to one parent, one by one | 750 ms | **14.5 ms** |
+  | build the 111,100-entity trees (10 children per parent) | 85 ms | 60 ms |
+  | propagate 111,100 entities | 5.1 ms | 5.2–5.3 ms |
+
+  Despawning a parent of 10,000 children takes 3.4 ms (unchanged). What still grows with the
+  number of siblings is a linear duplicate check on each attach (about 1.4 µs per attach at
+  10,000 siblings), which protects against a repair racing a pending attach.
+- **Tests:**
+  - ECS: `modify` on an immutable component (hooks see old then new values), the `Modify`
+    cause, hook commands applied before it returns, and refusal while despawning.
+  - The hierarchy's 23 tests, both randomized tests included, pass unchanged. A new case puts a
+    removed list straight back.
+
+  These deliberately broken versions each fail the tests:
+  - the stamp check skipped when the owner matches;
+  - the stamp not bumped on removal;
+  - `modify` skipping `on_insert`.

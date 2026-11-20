@@ -589,3 +589,78 @@ fn hook_commands_of_several_changes_in_one_command_keep_their_order() {
     schedule.run(&mut world).expect("valid");
     assert_eq!(lines(&mut world), ["after a", "after b", "after c"]);
 }
+
+#[test]
+fn modify_edits_in_place_with_hooks_even_when_immutable() {
+    let mut world = world();
+    let e = world.spawn(Locked(1));
+    lines(&mut world);
+    assert_eq!(
+        world.modify::<Locked, _>(e, |l| {
+            l.0 = 5;
+            "done"
+        }),
+        Some("done")
+    );
+    assert_eq!(world.get::<Locked>(e), Some(&Locked(5)));
+    assert_eq!(lines(&mut world), ["replace Some(1)", "insert Some(5)"]);
+
+    // Not called for a missing component, a dead entity, or one being despawned.
+    let plain = world.spawn(Plain);
+    assert_eq!(world.modify::<Locked, _>(plain, |_| unreachable!()), None);
+    world.despawn(plain);
+    assert_eq!(world.modify::<Locked, _>(plain, |_| unreachable!()), None);
+}
+
+/// Logs the cause its hooks see, and queues a command from on_insert.
+#[derive(Debug, Clone, Copy)]
+struct Counter(u32);
+impl Component for Counter {
+    const MUTABLE: bool = false;
+    const HOOKS: ComponentHooks = ComponentHooks::NONE
+        .on_replace(|w, ctx| log(w, format!("replace {:?}", ctx.cause)))
+        .on_insert(|w, ctx| {
+            log(w, format!("insert {:?}", ctx.cause));
+            w.commands().run(|world| {
+                if let Some(mut log) = world.resource_mut::<Log>() {
+                    log.0.push("hook command ran".into());
+                }
+            });
+        });
+}
+
+#[test]
+fn modify_tells_hooks_why_and_applies_their_commands_before_returning() {
+    let mut world = world();
+    let e = world.spawn(Counter(0));
+    lines(&mut world);
+    world.modify::<Counter, _>(e, |c| c.0 += 1);
+    assert_eq!(
+        lines(&mut world),
+        ["replace Modify", "insert Modify", "hook command ran"]
+    );
+}
+
+#[test]
+fn modify_cannot_change_a_despawning_entity() {
+    let mut world = world();
+    let f = world.spawn(Locked(1));
+    lines(&mut world);
+    // A hook queues a command that tries to modify the entity while it's being despawned.
+    #[derive(Debug, Clone, Copy)]
+    struct Tries;
+    impl Component for Tries {
+        const HOOKS: ComponentHooks = ComponentHooks::NONE.on_remove(|w, ctx| {
+            let entity = ctx.entity;
+            w.commands().run(move |world| {
+                let changed = world.modify::<Locked, _>(entity, |l| l.0 = 99).is_some();
+                if let Some(mut log) = world.resource_mut::<Log>() {
+                    log.0.push(format!("modified while despawning: {changed}"));
+                }
+            });
+        });
+    }
+    world.insert(f, Tries).expect("alive");
+    world.despawn(f);
+    assert!(lines(&mut world).contains(&"modified while despawning: false".to_owned()));
+}

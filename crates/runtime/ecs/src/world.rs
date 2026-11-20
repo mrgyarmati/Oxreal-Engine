@@ -253,6 +253,61 @@ impl World {
         Ok(())
     }
 
+    /// Edits `entity`'s component `T` in place, running its hooks: `on_replace` sees the value
+    /// before `edit`, and `on_insert` the value after it (cause [`HookCause::Modify`]). The
+    /// commands the hooks queue run before this returns. Returns what `edit` returns, or `None`
+    /// (without calling it) if `entity` isn't alive, doesn't have a `T`, or is being despawned.
+    ///
+    /// Because every change still passes through the hooks, this works on **immutable**
+    /// components too ([`Component::MUTABLE`]). It's the in-place counterpart of replacing one
+    /// with `insert`, without moving or copying it. For a mutable component without hooks it's
+    /// the same as [`World::get_mut`].
+    ///
+    /// ```
+    /// use oxreal_ecs::{Component, World};
+    ///
+    /// struct Score(Vec<u32>);
+    /// impl Component for Score {
+    ///     const MUTABLE: bool = false;
+    /// }
+    ///
+    /// let mut world = World::new();
+    /// let e = world.spawn(Score(vec![1]));
+    /// let len = world.modify::<Score, _>(e, |score| {
+    ///     score.0.push(2);
+    ///     score.0.len()
+    /// });
+    /// assert_eq!(len, Some(2));
+    /// ```
+    pub fn modify<T: Component, R>(
+        &mut self,
+        entity: Entity,
+        edit: impl FnOnce(&mut T) -> R,
+    ) -> Option<R> {
+        let location = self.entities.location(entity)?;
+        let id = self.components.id::<T>()?;
+        if !self.archetypes.get(location.archetype).contains(id) || self.is_despawning(entity) {
+            return None;
+        }
+        let hooked = self.components.hooks(id).any();
+        if hooked {
+            self.run_hooks(HookKind::Replace, entity, &[id], HookCause::Modify);
+        }
+        // Hooks can't change structure, so the entity is still where it was. Reached through the
+        // column directly: the in-place-write guard doesn't apply, because the hooks run.
+        let value = self
+            .archetypes
+            .get_mut(location.archetype)
+            .column_mut::<T>(id)?
+            .get_mut(location.row)?;
+        let result = edit(value);
+        if hooked {
+            self.run_hooks(HookKind::Insert, entity, &[id], HookCause::Modify);
+        }
+        self.apply_commands();
+        Some(result)
+    }
+
     /// Takes component `T` off `entity` and returns it. `None` if `entity` isn't alive, doesn't
     /// have a `T`, or is being despawned.
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
