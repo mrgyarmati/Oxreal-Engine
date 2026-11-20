@@ -142,9 +142,8 @@ separate store.
   folders) may live outside that world, and it stays out of cooked runtime data.
 - **Levels are instantiated into worlds:** loading resolves assets, spawns entities and links
   relations. Play in Editor gets **its own world**, instantiated from the edited world (unsaved
-  edits included, as in Unreal). Stopping it
-  discards that world, so the edited world is untouched. Runtime changes never silently write
-  back to authored data.
+  edits included, as in Unreal). Stopping it discards that world, so the edited world is
+  untouched. Runtime changes never silently write back to authored data.
 - The level file format, and how the editor world is saved and loaded, are decided with D-07,
   within these rules.
 
