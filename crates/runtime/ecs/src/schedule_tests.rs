@@ -19,7 +19,7 @@ impl Resource for Log {}
 /// A system that appends `name` to the `Log` resource.
 fn logger(name: &'static str) -> System {
     System::new(name, move |ctx| {
-        if let Some(log) = ctx.resources.get_mut::<Log>() {
+        if let Some(mut log) = ctx.resources.get_mut::<Log>() {
             log.0.push(name);
         }
     })
@@ -80,7 +80,7 @@ fn systems_keep_their_state_between_runs() {
         Stage::PrePhysics,
         System::new("counter", move |ctx| {
             runs += 1;
-            if let Some(log) = ctx.resources.get_mut::<Log>() {
+            if let Some(mut log) = ctx.resources.get_mut::<Log>() {
                 log.0.push(if runs == 1 { "first" } else { "again" });
             }
         })
@@ -277,7 +277,7 @@ fn commands_apply_in_recording_order() {
             ctx.commands.despawn(gone);
             ctx.commands.insert(gone, Armor(9));
             ctx.commands.despawn(gone);
-            ctx.commands.run_exclusive(|world| {
+            ctx.commands.run(|world| {
                 world.spawn(Armor(100));
             });
         }),
@@ -308,7 +308,7 @@ fn command_spawns_reuse_despawned_slots() {
             // Five reuse the free slots and three are fresh.
             let mut new: Vec<Entity> = (0..8).map(|i| ctx.commands.spawn(Health(i))).collect();
             // A direct spawn in between, from an exclusive command.
-            ctx.commands.run_exclusive(|world| {
+            ctx.commands.run(|world| {
                 world.spawn(Armor(1));
             });
             new.push(ctx.commands.spawn(Health(99)));
@@ -348,4 +348,51 @@ fn a_duplicate_bundle_panics_when_recorded() {
         }),
     );
     let _ = schedule.run(&mut world);
+}
+
+#[test]
+fn a_panicking_system_discards_its_stage_commands_and_the_schedule_recovers() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut world = World::new();
+    let spawned = Arc::new(Mutex::new(Vec::<Entity>::new()));
+    let fail = Arc::new(AtomicBool::new(true));
+    let mut schedule = Schedule::new();
+    let s = spawned.clone();
+    schedule.add(
+        Stage::PrePhysics,
+        System::new("spawner", move |ctx| {
+            let entity = ctx.commands.spawn(Health(1));
+            s.lock().expect("lock").push(entity);
+        }),
+    );
+    let f = fail.clone();
+    schedule.add(
+        Stage::PrePhysics,
+        System::new("faulty", move |_| {
+            assert!(!f.load(Ordering::Relaxed), "a deliberate test panic");
+        })
+        .after("spawner"),
+    );
+
+    let result = catch_unwind(AssertUnwindSafe(|| schedule.run(&mut world)));
+    assert!(result.is_err(), "the system's panic propagates");
+    let first = spawned.lock().expect("lock")[0];
+    assert!(
+        !world.contains(first),
+        "the abandoned stage's spawn was discarded"
+    );
+    assert_eq!(world.len(), 0);
+
+    fail.store(false, Ordering::Relaxed);
+    schedule.run(&mut world).expect("the schedule recovers");
+    let second = spawned.lock().expect("lock")[1];
+    assert!(world.contains(second));
+    assert!(
+        !world.contains(first),
+        "the discarded handle never becomes live"
+    );
+    assert_ne!(second.index(), first.index(), "its slot isn't reused");
+    assert_eq!(world.len(), 1);
 }

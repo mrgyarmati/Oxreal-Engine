@@ -133,6 +133,8 @@ impl Entities {
         // `before` is 0, -1, -2, ...: the 1st, 2nd, 3rd fresh index past the end.
         let fresh = self.slots.len() as u64 + before.unsigned_abs();
         let Ok(index) = u32::try_from(fresh) else {
+            // Undo this reservation, so a later flush doesn't try to create the slot.
+            self.cursor.fetch_add(1, Ordering::Relaxed);
             panic!("entity limit reached: a world holds at most 2^32 entities");
         };
         Entity::new(index, NonZeroU32::MIN)

@@ -276,8 +276,8 @@ impl World {
     }
 
     /// The resource of type `R`, mutably.
-    pub fn resource_mut<R: Resource>(&mut self) -> Option<&mut R> {
-        self.resources.get_mut()
+    pub fn resource_mut<R: Resource>(&mut self) -> Option<Mut<'_, R>> {
+        self.resources.get_mut().map(Mut::new)
     }
 
     /// Spawns `bundle` as `entity`, a handle reserved by [`crate::Commands::spawn`]. Returns

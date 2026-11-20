@@ -15,6 +15,10 @@
 //! 2. Read the state while running the frame.
 //! 3. Call [`InputState::end_frame`] once the frame has read its input.
 //!
+//! In an ECS application `InputState` is a resource. The application feeds it events between
+//! frames and calls `end_frame` after `Schedule::run`, as the `cube` example does. When input
+//! contexts arrive (ADR-0018 §3), routing and the frame-edge reset move into the `Input` stage.
+//!
 //! ```
 //! use oxreal_input::{ButtonState, InputState, KeyCode, KeyEvent};
 //! use oxreal_window::WindowEvent;

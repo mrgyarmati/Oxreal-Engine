@@ -40,6 +40,11 @@ impl CommandQueue {
     pub(crate) fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
+
+    /// Discards every command without applying it.
+    pub(crate) fn clear(&mut self) {
+        self.commands.clear();
+    }
 }
 
 /// Records structural changes for the next sync point: the end of the current stage.
@@ -156,7 +161,7 @@ impl<'a> Commands<'a> {
 
     /// Runs `f` with exclusive access to the world at the sync point, in order with the other
     /// commands. For changes the other commands can't express.
-    pub fn run_exclusive(&mut self, f: impl FnOnce(&mut World) + Send + 'static) {
+    pub fn run(&mut self, f: impl FnOnce(&mut World) + Send + 'static) {
         self.push(move |world, _| f(world));
     }
 }

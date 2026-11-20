@@ -19,7 +19,11 @@ use crate::world::{self, World};
 /// When in a frame a system runs: Unreal's tick groups, preceded by input (ADR-0008 §1,
 /// ADR-0014 §5). Each stage ends with a **sync point**, where the commands its systems recorded
 /// are applied.
+///
+/// More stages may be added (for example a fixed-step sub-stage), so matches need a wildcard
+/// arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Stage {
     /// Devices are read and input is routed, before gameplay sees the frame.
     Input,
@@ -36,9 +40,12 @@ pub enum Stage {
     Extract,
 }
 
+/// How many stages there are. Private, so adding a stage changes no public type.
+const STAGE_COUNT: usize = 6;
+
 impl Stage {
     /// Every stage, in the order they run.
-    pub const ALL: [Stage; 6] = [
+    pub const ALL: &'static [Stage] = &[
         Stage::Input,
         Stage::PrePhysics,
         Stage::DuringPhysics,
@@ -50,7 +57,31 @@ impl Stage {
     const fn index(self) -> usize {
         self as usize
     }
+
+    /// The stage's name, as written in docs and messages.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Stage::Input => "Input",
+            Stage::PrePhysics => "PrePhysics",
+            Stage::DuringPhysics => "DuringPhysics",
+            Stage::PostPhysics => "PostPhysics",
+            Stage::PostUpdate => "PostUpdate",
+            Stage::Extract => "Extract",
+        }
+    }
 }
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+const _: () = assert!(
+    Stage::ALL.len() == STAGE_COUNT,
+    "STAGE_COUNT is out of date"
+);
 
 /// Type IDs and names a system declared, with how it may use each.
 #[derive(Debug, Default, Clone)]
@@ -383,9 +414,9 @@ impl SystemResources<'_> {
     ///
     /// If the system didn't declare writing `R`.
     #[track_caller]
-    pub fn get_mut<R: Resource>(&mut self) -> Option<&mut R> {
+    pub fn get_mut<R: Resource>(&mut self) -> Option<Mut<'_, R>> {
         self.check::<R>(AccessKind::Write);
-        self.resources.get_mut()
+        self.resources.get_mut().map(Mut::new)
     }
 }
 
@@ -409,8 +440,8 @@ pub enum ScheduleError {
     },
     /// A system is ordered relative to a system in another stage.
     #[error(
-        "system `{system}` ({stage:?}) is ordered relative to `{other}`, which runs in \
-         {other_stage:?}; stages already run in order, so order systems only within a stage"
+        "system `{system}` ({stage}) is ordered relative to `{other}`, which runs in \
+         {other_stage}; stages already run in order, so order systems only within a stage"
     )]
     AcrossStages {
         /// The system with the constraint.
@@ -423,7 +454,7 @@ pub enum ScheduleError {
         other_stage: Stage,
     },
     /// Ordering constraints form a cycle, so no order satisfies them.
-    #[error("the systems of {stage:?} are ordered in a cycle: {}", cycle.join(" → "))]
+    #[error("the systems of {stage} are ordered in a cycle: {}", cycle.join(" → "))]
     Cycle {
         /// The stage.
         stage: Stage,
@@ -440,9 +471,9 @@ pub enum ScheduleError {
 /// are added ([`Schedule::validate`] checks it earlier).
 #[derive(Debug, Default)]
 pub struct Schedule {
-    stages: [Vec<System>; 6],
+    stages: [Vec<System>; STAGE_COUNT],
     /// Per stage, indices into `stages` in run order. `None` until validated.
-    order: Option<[Vec<usize>; 6]>,
+    order: Option<[Vec<usize>; STAGE_COUNT]>,
     queue: CommandQueue,
 }
 
@@ -490,20 +521,36 @@ impl Schedule {
 
     /// Runs every stage once, in order: each stage's systems, then its sync point.
     ///
+    /// Commands are applied per system in the stage's run order, and each system's commands in
+    /// the order it recorded them (ADR-0014 §5).
+    ///
     /// # Errors
     ///
     /// As for [`Schedule::validate`]. Nothing runs if the schedule is invalid.
+    ///
+    /// # Panics
+    ///
+    /// A panic in a system, or in a command at the sync point, propagates. For the stage it
+    /// interrupts:
+    /// - component values already written stay written;
+    /// - none of the stage's remaining commands are applied: they're discarded, with a warning;
+    /// - handles that discarded `spawn` commands reserved never become live, and their slots are
+    ///   never reused, so they can't alias.
+    ///
+    /// The schedule and the world stay usable for the next run.
     pub fn run(&mut self, world: &mut World) -> Result<(), ScheduleError> {
+        oxreal_diagnostics::profile_function!();
         self.validate()?;
         let Some(order) = &self.order else {
             return Ok(());
         };
-        if !self.queue.is_empty() {
-            // Only possible if a system panicked during the previous run, abandoning its stage.
-            warn!("discarding the commands of a stage abandoned by a panic");
-            self.queue = CommandQueue::default();
-        }
-        for stage in Stage::ALL {
+        debug_assert!(
+            self.queue.is_empty(),
+            "commands left over from a previous run"
+        );
+        let queue = DiscardOnPanic(&mut self.queue);
+        for &stage in Stage::ALL {
+            oxreal_diagnostics::profile_scope!("ecs stage");
             let systems = &mut self.stages[stage.index()];
             for &index in &order[stage.index()] {
                 let System {
@@ -526,21 +573,35 @@ impl Schedule {
                         declared,
                         system: name,
                     },
-                    commands: Commands::new(entities, &mut self.queue, index),
+                    commands: Commands::new(entities, &mut *queue.0, index),
                 };
                 run(&mut ctx);
             }
-            self.queue
-                .apply(world, |index| systems[index].name.as_str());
+            queue.0.apply(world, |index| systems[index].name.as_str());
         }
         Ok(())
     }
 }
 
+/// Empties the command queue if a panic unwinds through [`Schedule::run`], so an abandoned
+/// stage's commands are never applied later.
+struct DiscardOnPanic<'a>(&'a mut CommandQueue);
+
+impl Drop for DiscardOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() && !self.0.is_empty() {
+            warn!("a panic interrupted a stage; discarding its commands");
+            self.0.clear();
+        }
+    }
+}
+
 /// Checks names and constraints and orders each stage's systems.
-fn compute_order(stages: &[Vec<System>; 6]) -> Result<[Vec<usize>; 6], ScheduleError> {
+fn compute_order(
+    stages: &[Vec<System>; STAGE_COUNT],
+) -> Result<[Vec<usize>; STAGE_COUNT], ScheduleError> {
     let mut where_is: HashMap<&str, (Stage, usize)> = HashMap::new();
-    for stage in Stage::ALL {
+    for &stage in Stage::ALL {
         for (index, system) in stages[stage.index()].iter().enumerate() {
             if where_is
                 .insert(system.name.as_str(), (stage, index))
@@ -552,8 +613,8 @@ fn compute_order(stages: &[Vec<System>; 6]) -> Result<[Vec<usize>; 6], ScheduleE
             }
         }
     }
-    let mut order: [Vec<usize>; 6] = Default::default();
-    for stage in Stage::ALL {
+    let mut order: [Vec<usize>; STAGE_COUNT] = Default::default();
+    for &stage in Stage::ALL {
         order[stage.index()] = order_stage(stage, &stages[stage.index()], &where_is)?;
     }
     Ok(order)

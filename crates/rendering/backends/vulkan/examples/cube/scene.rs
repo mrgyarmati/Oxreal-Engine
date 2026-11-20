@@ -119,7 +119,7 @@ pub(crate) fn schedule() -> Schedule {
                     .query::<&FlyCamera>()
                     .next()
                     .map(FlyCamera::transform);
-                let Some(list) = ctx.resources.get_mut::<DrawList>() else {
+                let Some(mut list) = ctx.resources.get_mut::<DrawList>() else {
                     return;
                 };
                 list.camera = camera.unwrap_or(Transform::IDENTITY);
@@ -144,7 +144,7 @@ mod tests {
     fn frame(world: &mut World, schedule: &mut Schedule, seconds: f32) -> DrawList {
         world.insert_resource(FrameTime(seconds));
         schedule.run(world).expect("the schedule is valid");
-        if let Some(input) = world.resource_mut::<InputState>() {
+        if let Some(mut input) = world.resource_mut::<InputState>() {
             input.end_frame();
         }
         world.resource::<DrawList>().cloned().unwrap_or_default()
@@ -168,7 +168,7 @@ mod tests {
         let mut world = world();
         let mut schedule = schedule();
         let before = frame(&mut world, &mut schedule, 0.0).camera;
-        if let Some(input) = world.resource_mut::<InputState>() {
+        if let Some(mut input) = world.resource_mut::<InputState>() {
             input.handle_window_event(&WindowEvent::MouseButton {
                 button: MouseButton::Right,
                 state: ButtonState::Pressed,

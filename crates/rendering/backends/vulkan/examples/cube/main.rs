@@ -233,7 +233,7 @@ impl CubeApp {
                 "camera speed"
             );
         }
-        if let Some(input) = self.world.resource_mut::<InputState>() {
+        if let Some(mut input) = self.world.resource_mut::<InputState>() {
             input.end_frame();
         }
         Ok(())
@@ -390,7 +390,7 @@ impl App for CubeApp {
     }
 
     fn window_event(&mut self, ctx: &Context<'_>, _window: WindowId, event: WindowEvent) {
-        if let Some(input) = self.world.resource_mut::<InputState>() {
+        if let Some(mut input) = self.world.resource_mut::<InputState>() {
             input.handle_window_event(&event);
         }
         match event {
@@ -411,7 +411,7 @@ impl App for CubeApp {
     }
 
     fn device_event(&mut self, _ctx: &Context<'_>, event: DeviceEvent) {
-        if let Some(input) = self.world.resource_mut::<InputState>() {
+        if let Some(mut input) = self.world.resource_mut::<InputState>() {
             input.handle_device_event(&event);
         }
     }

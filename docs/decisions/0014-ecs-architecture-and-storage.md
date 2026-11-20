@@ -124,6 +124,23 @@ exposed registry.
   declared access to avoid conflicts comes once profiling justifies it, with no API change,
   because access is declared from day one.
 
+#### Amendment (2026-11-20, with the second implementation slice)
+
+These choices bind gameplay code, ADR-0008's system level and the future C ABI, so they're
+part of the decision, not only implementation notes:
+
+1. **Systems are explicit descriptors:** a unique name, declared component and resource
+   access, `before`/`after` constraints by name, and the work to run. Access isn't inferred from
+   function parameter types. Touching data a system didn't declare is a caller bug: typed Rust
+   callers get a panic naming the declaration to add, and the C-ABI path will return an error
+   instead.
+2. **Ordering constraints exist only within a stage.** A constraint naming a system in another
+   stage is an error, because stages already run in order. Unknown names, duplicate names and
+   cycles are errors reported before anything runs.
+3. **Commands apply in a defined order:** system by system in the stage's run order, and each
+   system's commands in the order it recorded them. This order doesn't depend on how systems
+   are executed, so a parallel executor keeps it by buffering commands per system.
+
 ### 6. Change detection
 - Each component value records **added** and **changed** ticks (32-bit, with wraparound handled
   by periodic clamping). Queries can filter by added or changed since the system last ran.
@@ -275,11 +292,15 @@ separate slices.
 
 - **Systems are explicit descriptors:** a name, declared reads and writes of components and
   resources, `before`/`after` constraints, and a closure (`System::new(..).reads::<T>()`).
-  - They aren't Bevy-style functions whose parameter types imply their access. The descriptor
-    is plain data that a C ABI can express (TAD §5.8). It also states access without generic
-    machinery, and a parallel executor can read it (§5).
+  - They aren't Bevy-style functions whose parameter types imply their access. A descriptor
+    states access without generic machinery, and a parallel executor can read it (§5).
+  - It maps onto a C-ABI descriptor (TAD §5.8) once two things change: access must be keyed by
+    `ComponentId` or a stable type ID (D-02) rather than Rust `TypeId`, and access violations
+    need a path that doesn't panic. The declarations are private, so both changes are
+    internal.
   - Touching undeclared data panics, naming the declaration to add. A declared write includes
     reading.
+  - The decision itself is recorded in §5's amendment.
 - **The system context is split into three fields:**
   - `ctx.world`: queries and lookups;
   - `ctx.resources`;
@@ -291,11 +312,22 @@ separate slices.
 - **`Commands::spawn` returns a real handle at once.** `Entities` reserves it through a shared
   reference, by moving an atomic cursor over the free list, then into fresh indices. The free
   list only changes through `&mut`, after a flush turns reservations into reserved slots, so
-  despawned slots are reused by command spawns too. This works unchanged under a parallel
-  executor.
+  despawned slots are reused by command spawns too.
+  - The scheme stays sound under a parallel executor. Which reserved index each system gets
+    then depends on thread timing, which is acceptable because handles are runtime-only (§3).
   - Every reservation queues the spawn that consumes it.
-  - Reservations are lost only when a system panics: its stage's queue is discarded on the next
-    run, with a warning. A lost reservation can't alias, because its slot is never reused.
+  - Reservations are lost only when a system or command panics. A drop guard in
+    `Schedule::run` then discards the interrupted stage's commands immediately, with a warning.
+    Component values already written stay written. A lost reservation never becomes live, and
+    its slot is never reused, so it can't alias. A regression test covers it.
+  - A reservation that would pass the 2³² limit is undone before panicking, so the next flush
+    doesn't try to create its slot.
+- **Resource writes also go through `Mut<R>`** (`World::resource_mut`,
+  `ctx.resources.get_mut`), like component writes. Resources can then get change detection
+  without a breaking change.
+- **`Stage` is `#[non_exhaustive]`, and `Stage::ALL` is a slice,** so adding a stage changes
+  no public type. Examples of stages that might be added: Unreal's StartPhysics and EndPhysics
+  groups, a fixed-step sub-stage, or editor stages.
 - **Bundles are checked for duplicates when they're recorded** (`Commands::spawn`, `insert`), so
   the panic points at the call site.
 - **Commands targeting gone entities:**
@@ -311,6 +343,16 @@ separate slices.
   - `DuringPhysics` runs once per `Schedule::run` until physics brings the fixed-step clock
     (D-10).
   - Events (§8) come with the gameplay framework.
+  - **The command queue lives in `Schedule` for now.** Hooks (§4) must queue commands even
+    during a direct `World::spawn` outside any schedule, so the hooks slice moves the queue into
+    `World`. That's internal.
+  - **Per-system profiling zones.** `Schedule::run` has a function zone and one zone per stage,
+    but `profile_scope!` only takes a literal name. `oxreal-diagnostics` needs a zone with a
+    run-time name before the parallel executor, so each system can show up by name.
+  - **Behaviours (ADR-0008 §2) can be built on this:** a driver system per stage wraps
+    `ctx.world` and `ctx.commands` into an `ActorCtx`. Two additions are planned for that:
+    - an entity-row view, so a behaviour can reach its own actor's other components;
+    - declaration by `ComponentId`, for the union of reflected behaviour types.
 - **The first consumer:** the cube example.
   - The camera, the spinning cube and the scenery are entities, and `InputState` and the frame
     time are resources.
