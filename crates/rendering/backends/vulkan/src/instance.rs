@@ -2,8 +2,9 @@
 
 use std::ffi::{CStr, CString};
 
+use ash::prelude::VkResult;
 use ash::vk;
-use oxreal_diagnostics::{info, warn};
+use oxreal_diagnostics::{debug, info, warn};
 use oxreal_rhi::{RhiError, Validation};
 
 use crate::debug::{DebugState, messenger_create_info};
@@ -68,9 +69,11 @@ impl VulkanInstance {
             });
         }
 
-        // SAFETY: `entry` is a loaded loader.
-        let layers = unsafe { entry.enumerate_instance_layer_properties() }
-            .map_err(|e| from_vk("vkEnumerateInstanceLayerProperties", e))?;
+        let layers = enumerate_complete(|| {
+            // SAFETY: `entry` is a loaded loader.
+            unsafe { entry.enumerate_instance_layer_properties() }
+        })
+        .map_err(|e| from_vk("vkEnumerateInstanceLayerProperties", e))?;
         let layer_available = layers
             .iter()
             .any(|l| l.layer_name_as_c_str().is_ok_and(|n| n == VALIDATION_LAYER));
@@ -101,11 +104,11 @@ impl VulkanInstance {
                 if !validation {
                     return Err(unavailable());
                 }
-                // SAFETY: `entry` is a loaded loader, and the layer name is a valid C string of
-                // an available layer.
-                let layer_extensions = unsafe {
-                    entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER))
-                }
+                let layer_extensions = enumerate_complete(|| {
+                    // SAFETY: `entry` is a loaded loader, and the layer name is a valid C string
+                    // of an available layer.
+                    unsafe { entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER)) }
+                })
                 .map_err(|e| from_vk("vkEnumerateInstanceExtensionProperties", e))?;
                 let has_features = layer_extensions.iter().any(|e| {
                     e.extension_name_as_c_str()
@@ -119,9 +122,11 @@ impl VulkanInstance {
             Some(false) | None => false,
         };
 
-        // SAFETY: `entry` is a loaded loader. `None` lists the implementation's extensions.
-        let extensions = unsafe { entry.enumerate_instance_extension_properties(None) }
-            .map_err(|e| from_vk("vkEnumerateInstanceExtensionProperties", e))?;
+        let extensions = enumerate_complete(|| {
+            // SAFETY: `entry` is a loaded loader. `None` lists the implementation's extensions.
+            unsafe { entry.enumerate_instance_extension_properties(None) }
+        })
+        .map_err(|e| from_vk("vkEnumerateInstanceExtensionProperties", e))?;
         let available = |name: &CStr| {
             extensions
                 .iter()
@@ -313,6 +318,36 @@ fn resolve_validation(
     }
 }
 
+/// How many times a loader enumeration is attempted before `VK_INCOMPLETE` is reported.
+const ENUMERATION_ATTEMPTS: u32 = 4;
+
+/// Runs a loader-level enumeration (layers, instance extensions) until it returns a complete
+/// list.
+///
+/// These lists are two calls: one for the count, one to fill. The loader assembles them from
+/// every driver and layer manifest, and can return `VK_INCOMPLETE` when what it found changed
+/// between, or during, the two. ash retries when the fill call returns it, but its count call
+/// treats every non-`VK_SUCCESS` code as an error. AMD's Windows driver has been seen returning
+/// `VK_INCOMPLETE` from the count call while other threads create and destroy instances (about 1
+/// run in 9 of the parallel GPU tests). `VK_INCOMPLETE` is a success code and means "ask again",
+/// so the enumeration starts over. A bounded number of attempts keeps a driver that never
+/// completes from hanging instance creation: that one still gets the error.
+fn enumerate_complete<T>(mut enumerate: impl FnMut() -> VkResult<Vec<T>>) -> VkResult<Vec<T>> {
+    let mut attempt = 1;
+    loop {
+        match enumerate() {
+            Err(vk::Result::INCOMPLETE) if attempt < ENUMERATION_ATTEMPTS => {
+                debug!(
+                    attempt,
+                    "Vulkan loader enumeration was incomplete; asking again"
+                );
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 pub(crate) fn format_version(version: u32) -> String {
     format!(
         "{}.{}.{}",
@@ -336,6 +371,50 @@ fn engine_version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An enumeration that answers with `results` in turn, counting its calls.
+    fn scripted(
+        results: Vec<VkResult<Vec<u8>>>,
+    ) -> (
+        impl FnMut() -> VkResult<Vec<u8>>,
+        std::rc::Rc<std::cell::Cell<u32>>,
+    ) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = std::rc::Rc::clone(&calls);
+        let mut results = results.into_iter();
+        let enumerate = move || {
+            counter.set(counter.get() + 1);
+            results.next().expect("called more often than scripted")
+        };
+        (enumerate, calls)
+    }
+
+    #[test]
+    fn an_incomplete_enumeration_is_asked_again() {
+        let (enumerate, calls) = scripted(vec![Err(vk::Result::INCOMPLETE), Ok(vec![7])]);
+        assert_eq!(enumerate_complete(enumerate), Ok(vec![7]));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn an_enumeration_that_never_completes_is_an_error() {
+        let (enumerate, calls) = scripted(vec![
+            Err(vk::Result::INCOMPLETE);
+            ENUMERATION_ATTEMPTS as usize
+        ]);
+        assert_eq!(enumerate_complete(enumerate), Err(vk::Result::INCOMPLETE));
+        assert_eq!(calls.get(), ENUMERATION_ATTEMPTS);
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        let (enumerate, calls) = scripted(vec![Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY)]);
+        assert_eq!(
+            enumerate_complete(enumerate),
+            Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY)
+        );
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn automatic_validation_follows_the_build_profile() {
