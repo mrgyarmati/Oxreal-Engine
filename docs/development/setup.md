@@ -87,7 +87,7 @@ Vulkan runtime and tools (needed from the first rendering code):
 
 | Distro | Command |
 |---|---|
-| Ubuntu / Debian | `sudo apt install libvulkan1 vulkan-tools vulkan-validationlayers mesa-vulkan-drivers` |
+| Ubuntu / Debian | `sudo apt install libvulkan1 vulkan-tools vulkan-validationlayers mesa-vulkan-drivers` (on Ubuntu 24.04, use the SDK validation layer instead: see [Known upstream issues](#known-upstream-issues)) |
 | Fedora | `sudo dnf install vulkan-loader vulkan-tools vulkan-validation-layers mesa-vulkan-drivers` |
 | Arch | `sudo pacman -S vulkan-icd-loader vulkan-tools vulkan-validation-layers` |
 
@@ -123,6 +123,44 @@ xvfb-run -a cargo run -p oxreal-window --example smoke -- --frames 120   # headl
   `VK_LOADER_DRIVERS_SELECT='*lvp*'` for Lavapipe, as CI does. Your GPU's manifest name is in
   `/usr/share/vulkan/icd.d/`. The setting can go from CI once every runner image ships loader
   1.4.350 or later. It still documents which driver the job tests.
+- **Validation layer crash with several devices on parallel threads, layer 1.3.275 (Ubuntu
+  24.04's `vulkan-validationlayers`).** When one device is destroyed while another thread uses a
+  *different* device, this layer corrupts its own object tracking. The parallel GPU tests then
+  crash inside `libVkLayer_khronos_validation.so`, or the layer reports live objects as unknown
+  ("Couldn't find VkDevice Object"). A focused stress test crashed or misreported in 6 of 30
+  runs with it, and in none of 30 with the SDK 1.4.363.1 layer on the same machine, or of 60 with
+  Ubuntu 26.04's 1.4.341 layer. The calls involved are legal, so the fault is inside the layer.
+  No matching upstream report was found. CI therefore validates with the SDK's layer on every
+  job (ADR-0012, implementation notes); this entry can go when no supported distribution ships
+  1.3.275.
+
+  On Ubuntu 24.04, use the layer from the LunarG Vulkan SDK, the same version as on Windows.
+  Download the archive, check it against the pinned hash (the one CI uses), extract just the
+  layer, and point the loader at it with an absolute path:
+
+  ```sh
+  curl -fLO https://sdk.lunarg.com/sdk/download/1.4.363.1/linux/vulkansdk-linux-x86_64-1.4.363.1.tar.xz
+  echo "b7867d8ca658563813af666f34b93db87f1b1c7d9d69d97e924c210c7ba33eb8  vulkansdk-linux-x86_64-1.4.363.1.tar.xz" \
+    | sha256sum --check
+  mkdir -p ~/.local/vulkan-validation-layer
+  tar -xJf vulkansdk-linux-x86_64-1.4.363.1.tar.xz -C ~/.local/vulkan-validation-layer --strip-components=1 \
+    1.4.363.1/x86_64/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json \
+    1.4.363.1/x86_64/lib/libVkLayer_khronos_validation.so
+  export VK_LAYER_PATH="$HOME/.local/vulkan-validation-layer/x86_64/share/vulkan/explicit_layer.d"
+  ```
+
+  Put the `export` in your shell profile (or your IDE's test environment) so every test run gets
+  it. `VK_LAYER_PATH` *replaces* the loader's explicit-layer search path, which is what makes
+  the choice certain. If you use other explicit layers (for example `VK_LAYER_LUNARG_api_dump`),
+  append their directories, separated by `:`, such as `:/usr/share/vulkan/explicit_layer.d`,
+  after the SDK's. Instance creation logs the version that ran (`validation_layer=` in "Vulkan
+  instance created").
+- **`VK_INCOMPLETE` from a count-only enumeration (Windows, seen with AMD's driver
+  installed).** While other threads created and destroyed instances,
+  `vkEnumerateInstanceExtensionProperties` returned `VK_INCOMPLETE` for its count call, which
+  the specification doesn't expect there. The backend handles it: loader enumerations start over,
+  up to four times (`enumerate_complete` in `oxreal-rhi-vulkan`), with a `debug` log line each
+  time. Nothing to do locally; it's listed so the log line can be explained.
 
 ## Unreal Engine source (UX reference, optional)
 

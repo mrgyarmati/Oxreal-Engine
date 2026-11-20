@@ -21,7 +21,7 @@ use crate::bindless::{Bindless, BindlessSlots, DescriptorLimits, capacities};
 use crate::buffers::Buffer;
 use crate::error::from_vk;
 use crate::features::{self, FeatureSet};
-use crate::instance::{VulkanInstance, format_version};
+use crate::instance::{VulkanInstance, enumerate_complete, format_version};
 use crate::present::{Surface, Texture};
 use crate::resources::{Pipeline, Retired, Sampler, create_pipeline_layout};
 use crate::retire::RetireQueue;
@@ -59,9 +59,11 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
     let instance = VulkanInstance::new(&desc.app_name, desc.validation)?;
     let selection = GpuSelection::from_env_or(desc.gpu.clone())?;
 
-    // SAFETY: `instance.instance` is a live instance.
-    let physical_devices = unsafe { instance.instance.enumerate_physical_devices() }
-        .map_err(|e| from_vk("vkEnumeratePhysicalDevices", e))?;
+    let physical_devices = enumerate_complete(|| {
+        // SAFETY: `instance.instance` is a live instance.
+        unsafe { instance.instance.enumerate_physical_devices() }
+    })
+    .map_err(|e| from_vk("vkEnumeratePhysicalDevices", e))?;
     let probes: Vec<Probe> = physical_devices
         .iter()
         .map(|&pd| probe(&instance.instance, pd))
@@ -92,12 +94,14 @@ pub fn create_device(desc: &DeviceDesc) -> Result<VulkanDevice, RhiError> {
 
     // Presentation needs VK_KHR_swapchain. A device without it still works headless, and
     // `create_surface` reports the limitation.
-    // SAFETY: `probe.physical_device` belongs to the live instance.
-    let device_extensions = unsafe {
-        instance
-            .instance
-            .enumerate_device_extension_properties(probe.physical_device)
-    }
+    let device_extensions = enumerate_complete(|| {
+        // SAFETY: `probe.physical_device` belongs to the live instance.
+        unsafe {
+            instance
+                .instance
+                .enumerate_device_extension_properties(probe.physical_device)
+        }
+    })
     .map_err(|e| from_vk("vkEnumerateDeviceExtensionProperties", e))?;
     let swapchain_available = instance.surface_support()
         && device_extensions.iter().any(|e| {

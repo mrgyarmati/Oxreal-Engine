@@ -129,3 +129,27 @@ Facts checked on 2026-11-19:
   fragmentation or performance problems in benchmarks (consider engine-owned sub-allocators), or
   `ash` maintenance stopping (re-evaluate `vulkanalia`).
 - D-14's remaining part, **Linux packaging**, stays open.
+
+## Implementation notes (2026-11-20)
+
+- **Which validation layer CI uses (§5).** Validation decides whether a GPU test passes, so its
+  version is pinned. The Lavapipe jobs (Ubuntu 24.04 and 26.04) load
+  `VK_LAYER_KHRONOS_validation` from the LunarG Vulkan SDK 1.4.363.1, the version Windows
+  development uses. The layer is extracted from the SDK archive, pinned by SHA-256 and checked on
+  every run, and selected with `VK_LAYER_PATH`. CI also checks that the manifest's version is
+  1.4.363 and that its library path points at the extracted library. The distribution's package
+  isn't installed there.
+  - Why: Ubuntu 24.04's layer, 1.3.275, corrupts its own object tracking when one device is
+    destroyed while another thread uses a different device. A focused stress test crashed or
+    misreported in 6 of 30 runs with it, and in 0 of 30 with the SDK layer on the same image
+    (0 of 60 on Ubuntu 26.04's 1.4.341). See `docs/development/setup.md`, "Known upstream
+    issues".
+  - Instance creation logs the layer version at `info` (`validation_layer=`), so a log shows
+    which rules applied.
+  - Update the layer together with the Windows SDK pin (ADR-0019, implementation notes).
+- **Enumerations tolerate `VK_INCOMPLETE` from the count call.** ash's two-call enumerations
+  retry only when the fill call returns it. On Windows with AMD's driver installed, the count
+  call of `vkEnumerateInstanceExtensionProperties` returned it under concurrent instance
+  creation. Loader-assembled enumerations (layers, instance and device extensions, physical
+  devices) go through `enumerate_complete`, which starts over, at most four times, and then
+  reports the error.
