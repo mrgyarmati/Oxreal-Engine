@@ -1,0 +1,34 @@
+[package]
+name = "oxreal-renderer"
+description = "The M1 mesh pass: draws a plain-data RenderWorld through the RHI with cooked, source-key-checked shaders (ADR-0019)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "rendering"
+
+[dependencies]
+oxreal-diagnostics.workspace = true
+oxreal-math.workspace = true
+oxreal-rhi.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+# The build script computes the source keys of the shaders this crate was built with
+# (ADR-0019 §4). It reimplements the cook's encoding; no compiler is involved.
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+oxreal-diagnostics = { workspace = true, features = ["application"] }
+oxreal-rhi-vulkan.workspace = true
+oxreal-shader-compiler.workspace = true
+
+[lints]
+workspace = true

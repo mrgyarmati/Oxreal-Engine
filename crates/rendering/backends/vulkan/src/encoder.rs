@@ -620,7 +620,10 @@ impl Drop for VulkanEncoder {
     }
 }
 
-impl CommandEncoder for VulkanEncoder {
+// SAFETY: one encoder: `as_any` and `into_any` return this `VulkanEncoder`, and every hook
+// records into its own command buffer (`self.cmd`), so `Device::owns_encoder` and `submit` see
+// the object that recorded.
+unsafe impl CommandEncoder for VulkanEncoder {
     fn begin_render_pass_raw(&mut self, desc: &RenderPassDesc<'_>) {
         if self.pass.is_some() {
             self.misuse.push(format!(
@@ -1083,6 +1086,10 @@ impl CommandEncoder for VulkanEncoder {
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+
+    fn as_any(&self) -> &dyn Any {
         self
     }
 }

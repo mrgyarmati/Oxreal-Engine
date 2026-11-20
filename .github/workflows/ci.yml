@@ -114,10 +114,14 @@ jobs:
           "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       # Every platform has spirv-val now, so validation must not be skipped anywhere. The cook
       # tests (ADR-0019 §4) need it.
-      - name: Shader compiler and cook tests (pinned Slang, spirv-val)
+      - name: Shader compiler, cook and renderer round-trip tests (pinned Slang, spirv-val)
         env:
           OXREAL_REQUIRE_SPIRV_VAL: "1"
-        run: cargo test -p oxreal-shader-compiler --test compile --test cook --locked -- --ignored
+        # bash stops at the first failing command on every OS; a multi-line pwsh step wouldn't.
+        shell: bash
+        run: |
+          cargo test -p oxreal-shader-compiler --test compile --test cook --locked -- --ignored
+          cargo test -p oxreal-renderer --test round_trip --test shader_layout --locked -- --ignored
       # The developer command end to end: cargo xtask -> oxreal-shader-tool -> the cook.
       - name: Cook the workspace's shaders
         run: cargo xtask cook-shaders
@@ -186,6 +190,10 @@ jobs:
       # the regression tests of its unsafe audit.
       - name: Vulkan device tests (Lavapipe, validation on)
         run: cargo test -p oxreal-rhi-vulkan --locked -- --ignored
+      # The renderer on a real device: shaders cooked for the test, offscreen draws read back
+      # (ADR-0019 §5).
+      - name: Renderer GPU tests (Lavapipe, validation on)
+        run: cargo test -p oxreal-renderer --test gpu --locked -- --ignored
       - name: device_info example (Lavapipe)
         run: cargo run -p oxreal-rhi-vulkan --example device_info --locked
       # The whole frame loop on a real (virtual X11) window: surface, swapchain, clears,

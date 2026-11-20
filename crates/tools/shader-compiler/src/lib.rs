@@ -36,14 +36,17 @@ mod compiler;
 pub mod cook;
 mod depfile;
 mod error;
+mod layout;
 mod reflection;
 mod spirv;
 mod validate;
 
 pub use compiler::{
-    CompileRequest, CompiledShader, Optimization, SLANGC_ENV_VAR, SlangCompiler, pinned_version,
+    CompileRequest, CompiledShader, Optimization, SLANGC_ENV_VAR, SlangCompiler, compile_options,
+    pinned_version,
 };
 pub use error::ShaderError;
+pub use layout::SpirvLayouts;
 pub use reflection::{EntryPoint, Reflection, ResourceBinding, ShaderStage};
 pub use spirv::{ALLOWED_CAPABILITIES, Capability, capabilities};
 pub use validate::{SpirvValidator, validate_spirv};

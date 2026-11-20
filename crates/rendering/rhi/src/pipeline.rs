@@ -57,6 +57,9 @@ impl<'a> ShaderCode<'a> {
     ///   it's in.
     ///   During the pass the texture is being written, and isn't in a shader-readable state.
     ///   Sample it in a later pass instead.
+    /// - Addresses, bindless indices and the pipeline built from this code are only valid in
+    ///   encoders of the device that created them. Code that records on behalf of callers checks
+    ///   [`crate::Device::owns_encoder`] first.
     /// - Addresses and indices are plain numbers: the device can't check what a shader does with
     ///   them, and push constants that carry them are set through safe calls. So these are
     ///   **program-wide** obligations: whoever creates `ShaderCode` for such a shader also vouches

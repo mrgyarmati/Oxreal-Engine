@@ -155,6 +155,9 @@ constraints shape them:
   - the key format version;
   - the pinned Slang version string from `tools/slang.json`;
   - the target;
+  - the fixed `slangc` arguments every compile passes (`compile_options()`), which decide memory
+    layouts. *(Amended 2026-11-20, key format `/2`; see the second slice's implementation
+    notes.)*
   - the entry's normalized `cook.json` record: output name, source, entry points, include
     directories and declared inputs, in that order, so renaming an entry point or reordering
     include directories changes the key;
@@ -304,3 +307,75 @@ constraints shape them:
   undeclared file that shadows an import earlier in the include path doesn't change the key,
   so it's only caught when the shader next recompiles and the dependency check runs. Keeping
   module names unique across include directories avoids it.
+
+## Implementation notes (2026-11-20, second slice: the renderer)
+
+- **`oxreal-renderer`** (rendering layer) provides:
+  - `CookedShaders::load` (the strict loader);
+  - `Renderer::{new, register_mesh, unregister_mesh, render}`;
+  - plain-data `RenderWorld` / `Camera` / `DrawItem`;
+  - `MeshData` with `Vertex` and 16- or 32-bit `Indices`, plus `MeshData::cube()`;
+  - `RenderTarget`, with `RenderTarget::backbuffer(&Frame)`.
+
+  Its public API has no pipeline, `ShaderCode`, address or bindless index.
+- **The build script** (`build.rs`) computes the expected source keys from `shaders/cook.json`
+  and `tools/slang.json`, and fails the build if a declared input is missing. Its key code
+  (`build/source_key.rs`) is also compiled into the crate's tests:
+  - the golden test checks it against the cook's golden value;
+  - `tests/round_trip.rs` cooks this crate's real recipe and loads it, then cooks edited
+    sources and expects `ShaderCacheError::Stale`.
+- **The loader opens only `<name>.spv` for the shaders this build expects**, never a path from
+  the manifest. It requires the expected source key and entry points, the SHA-256, and the
+  SPIR-V magic number. Manifests are parsed strictly.
+- **Encoder ownership:** `render` refuses an encoder of another device
+  (`RenderError::ForeignEncoder`), through the new `Device::owns_encoder` (ADR-0017,
+  implementation notes of 2026-11-20). Without it, a foreign encoder would resolve the
+  renderer's handles in another device.
+- **Meshes:** validated at registration (every index names a vertex, at most 2³¹ vertices,
+  whole triangles), with generational handles. A slot whose generation would wrap is retired.
+  Stale handles in a `RenderWorld` are skipped, counted (`RenderStats::skipped`) and logged.
+- **Shared layout helper:** the SPIR-V layout reader moved from the backend's test into
+  `oxreal_shader_compiler::SpirvLayouts`. Both the backend's and the renderer's
+  `tests/shader_layout.rs` use it.
+- **What stays for the third slice:** the cube example keeps compiling its own copy of
+  `Mesh.slang` (`examples/shaders/`), which the backend's GPU tests also use. When the player
+  replaces the example, that copy becomes a backend test shader.
+- **Tests:**
+  - unit tests of the loader (valid, missing, stale, without the shader, damaged, not SPIR-V,
+    missing file, a manifest choosing another file, malformed manifests), the meshes and the
+    handles;
+  - GPU tests (`tests/gpu.rs`): a cube drawn and a stale handle skipped (pixels read back),
+    another device's encoder refused with nothing recorded, three target sizes and 32-bit
+    indices, invalid meshes, cameras and targets refused, all with validation and
+    synchronization validation reporting nothing.
+
+  The GPU tests ran on an AMD Radeon RX 9070 XT, and run on Lavapipe in CI. The round-trip and
+  layout tests run on every CI build job.
+- **After review** (the architecture review and the `unsafe` audit):
+  - **The source key includes the fixed `slangc` flags** (`compile_options()`, built from the
+    same list the compiler passes), because they decide memory layouts. Otherwise a cache cooked
+    with other flags could pass for current. The key format is now
+    `oxreal-shader-source-key/2`. Both golden values changed, and were confirmed again by the
+    independent shell implementation. A renderer unit test checks that its copies of the format
+    string, target and flags equal the cook's.
+  - **The RHI changes:** `CommandEncoder` became an `unsafe trait`, and buffer addresses are
+    16-byte aligned (ADR-0017, implementation notes of 2026-11-20).
+  - **A camera is a transform plus a `#[non_exhaustive]` `Projection`.** The bridge's camera
+    component can hold the renderer's `Projection` directly. `RenderWorld`, `Camera` and
+    `DrawItem` are `#[non_exhaustive]`, with constructors.
+  - **`build.rs` fails if the recipe lacks the `Mesh` shader and its entry points,** so a
+    missing shader is a build error, not a run-time error variant.
+  - **Other fixes:**
+    - `render` refuses the renderer's own material texture as a target;
+    - one pipeline is cached per color format;
+    - skipped draws are logged only when their count changes;
+    - mesh capacity is checked before uploading;
+    - the push-constant packing is unit-tested at the shader's offsets;
+    - `SpirvLayouts::parse` returns `ShaderError::MalformedSpirv`.
+  - **Known limits, documented on `Renderer`:**
+    - one depth target, recreated when the target size changes;
+    - one unsubmitted encoder per renderer at a time;
+    - mesh handles belong to the renderer that issued them.
+  - **The safety argument's layout step holds for sources that pass
+    `tests/shader_layout.rs`,** which CI and `cargo xtask ci` run. Editing the shader means
+    running it.

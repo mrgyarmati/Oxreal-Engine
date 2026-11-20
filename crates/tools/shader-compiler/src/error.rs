@@ -88,6 +88,12 @@ pub enum ShaderError {
         /// The compiler, symlinks resolved.
         path: PathBuf,
     },
+    /// A SPIR-V module is truncated or malformed.
+    #[error("malformed SPIR-V: {details}")]
+    MalformedSpirv {
+        /// What's wrong, with the word it was found at.
+        details: String,
+    },
     /// `spirv-val` rejected the generated SPIR-V.
     #[error("spirv-val rejected {source_file}:\n{diagnostics}")]
     Validation {
