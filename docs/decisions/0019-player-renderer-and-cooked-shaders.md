@@ -40,7 +40,7 @@ constraints shape them:
   `tool` crate, which the layer check forbids for `app-runtime`. It also makes every build of
   the game need `slangc`.
 - **C. An offline cook step writes a cooked directory, and the player loads it.** The renderer
-  checks it against what it was built for (§3). This matches ADR-0013 §4 and leads to the asset
+  checks it against what it was built for (§4). This matches ADR-0013 §4 and leads to the asset
   pipeline's cache (D-08).
 - **D. Commit cooked SPIR-V to the repository and embed it with `include_bytes!`, with CI
   checking it's up to date.**
@@ -48,7 +48,7 @@ constraints shape them:
   - Cons: binary files in git, reliance on byte-for-byte deterministic `slangc` output, a
     regeneration step in every shader change, and nothing that leads toward the asset cache.
 
-  Rejected for those costs: C's checks (§3) close the same gaps.
+  Rejected for those costs: C's checks (§4) close the same gaps.
 
 ### Where rendering code lives
 - **A. In the player**, as in the example. Every future app would copy it, and backend calls
@@ -86,9 +86,10 @@ constraints shape them:
     never drawn.
   - Unregistering a mesh destroys its buffers through the RHI's deferred destruction, which
     keeps them alive for work already recorded (ADR-0016).
-  - The shader's layout matches the Rust packing: the source key (§3) ties the cooked SPIR-V to
-    exactly the sources the renderer was built and layout-tested against.
-- **It creates `ShaderCode` only from SPIR-V its loader has accepted** (§3).
+  - The shader's layout matches the Rust packing: the source key (§4) ties the cooked SPIR-V to
+    exactly the sources whose layouts the renderer's layout test (today's
+    `tests/shader_layout.rs`) checks.
+- **It creates `ShaderCode` only from SPIR-V its loader has accepted** (§4).
 
 ### 2. Extraction: `oxreal-render-bridge` (gameplay layer)
 - **It holds the components that make an entity visible:**
@@ -122,11 +123,21 @@ constraints shape them:
   - Each entry names an output, a source file, its entry points, its include directories and
     its **declared inputs**: the source and every module it imports, across crates. For
     example, `Mesh.slang` imports `oxreal-rhi`'s `Bindless.slang`.
-  - Cooking fails if `slangc`'s depfile lists a file that isn't declared, so the declared
-    inputs are complete.
+  - **Declared inputs must be complete.** Cooking fails if `slangc`'s depfile lists a file that
+    isn't declared. Depfile entries are raw absolute paths, so the comparison follows one rule:
+    - canonicalize both sides, with the `\\?\` prefix stripped on Windows;
+    - compare case-insensitively on Windows, case-sensitively elsewhere;
+    - map both to workspace-relative paths.
+
+    A depfile entry inside the pinned Slang installation (its core modules) is covered by the
+    Slang version and skipped. Any other entry outside the workspace is an error.
 - **Validation is mandatory.** Cooking uses the pinned `slangc` and its capability allowlist,
   and **fails if `spirv-val` isn't found**. There's no skip flag: the manifest is the
   attestation that `from_spirv_unchecked` relies on.
+- **The compiler is exactly the pinned one.** Cooking fails unless the compiler reports exactly
+  the version pinned in `tools/slang.json`. `OXREAL_SLANGC` may name another binary, but only
+  one that reports that exact version. (Compiling for tests and experiments keeps today's
+  warning-only behaviour. Only cooking, which attests, is strict.)
 - **Optimization:** `--profile release` cooks with Release optimization, other profiles with
   Debug. The level is recorded and is part of the cook cache key. The loader accepts either
   level, since both are validated.
@@ -137,17 +148,36 @@ constraints shape them:
   - a format version;
   - the Slang version, the `spirv-val` version, and the target (SPIR-V 1.6 for Vulkan 1.3);
   - for each entry: its file, its entry points, its optimization level, the SHA-256 of its
-    SPIR-V, and its **source key**. That is the SHA-256 of the Slang version, the target, and
-    every declared input's path and contents, in a defined order.
+    SPIR-V, and its **source key**.
 
-  Cooking skips entries whose full key (source key plus options) is unchanged.
+  Cooking skips entries whose full key (source key plus optimization level) is unchanged.
+- **The source key** is a SHA-256 over length-prefixed records, in this order:
+  - the key format version;
+  - the pinned Slang version string from `tools/slang.json`;
+  - the target;
+  - the entry's normalized `cook.json` record: output name, source, entry points, include
+    directories and declared inputs, in that order, so renaming an entry point or reordering
+    include directories changes the key;
+  - each declared input as a pair of its path and its bytes, in declared order.
+
+  Paths are **workspace-relative, `/`-separated and case-exact, as written in `cook.json`**.
+  They're never derived from the filesystem, so the key is the same in every checkout and on
+  every OS. `.gitattributes` keeps sources' line endings identical across platforms
+  (`eol=lf`).
 - **The renderer's loader**, which owns the manifest's reader:
-  - **The source key it expects is built into the renderer.** Its build script hashes the same
-    declared inputs with the same Slang version (read from `tools/slang.json`). That needs no
-    compiler, so the layer check passes.
+  - **The source key it expects is built into the renderer.** Its build script computes it
+    with the same rules from the same `cook.json` and `tools/slang.json`. That needs no
+    compiler, so the layer check passes. The build script:
+    - emits `rerun-if-changed` for every declared input, for `shaders/cook.json` and for
+      `tools/slang.json`;
+    - fails the build if a declared input is missing;
+    - ties the renderer to the repository layout, which `publish = false` already implies.
+
+    The round-trip test (§5) guards that the build script's key and the cook's key stay
+    identical.
   - **It refuses a cache cooked from other sources**, with a typed `StaleCache` error saying to
     run `cargo xtask cook-shaders`. This, not the file hash, is what keeps the shader's layouts
-    matched to the Rust code the renderer was layout-tested with.
+    matched to the Rust code whose layouts the renderer's tests check.
   - **It verifies each file's SHA-256 against the manifest**, which catches corruption.
   - **It treats the manifest as untrusted input.** File names must be plain names: no
     separators, no `..`, no absolute paths, and an exact case match on every platform.
@@ -179,7 +209,13 @@ constraints shape them:
   - unit tests for the loader: a valid cache, a stale source key, a hash mismatch, a missing
     file, a wrong format version, and unsafe file names;
   - **a round-trip test** that dev-depends on `oxreal-shader-compiler` (dev-dependencies are
-    exempt from the layer check): cook into a temporary directory, then load it;
+    exempt from the layer check): cook into a temporary directory, then load it. It also checks
+    that the build script's key equals the cook's. It needs `slangc` and `spirv-val`. Where
+    they're missing it's skipped, unless `OXREAL_REQUIRE_SPIRV_VAL` is set, as the shader tests
+    already behave. CI sets it, so it can't be skipped there.
+  - **a golden test of the source key:** the key of a fixed fixture tree must equal a constant,
+    on Windows and Linux alike;
+  - **unit tests of the depfile normalization** with Windows-style and Unix-style paths;
   - a GPU test that renders a hand-made `RenderWorld` from a freshly cooked temporary cache and
     reads pixels back, run on Lavapipe in CI;
   - the layout test that `tests/shader_layout.rs` provides today, kept for the renderer's
@@ -191,8 +227,11 @@ constraints shape them:
   the player for a set number of frames under Xvfb, failing on any validation error. Job names
   don't change, so the ruleset doesn't either. `cargo xtask ci` doesn't cook, because that
   needs `slangc` and `spirv-val`.
-- **Windows:** the player is run by hand on Windows with a real GPU, and the PR records it. CI's
-  Windows job builds and unit-tests it but has no GPU.
+- **Windows:**
+  - CI's `clippy + test (windows-2025)` job installs `spirv-val` alongside the pinned Slang, and
+    runs the cook and the round-trip test, so Windows path handling is exercised in CI.
+  - That job has no GPU, so the player itself is run by hand on Windows with a real GPU, and the
+    PR records it.
 
 ## Consequences
 

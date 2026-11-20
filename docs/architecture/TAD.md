@@ -232,6 +232,6 @@ Create these only when M1 work starts, one at a time, each with real code:
 | `rendering/renderer` | rendering | `oxreal-renderer` (planned, ADR-0019): the M1 mesh pass, holding `Arc<dyn Device>` and recording into caller-given targets; fed a plain-data `RenderWorld`; loads cooked SPIR-V checked against the source key it was built with |
 | `gameplay/render-bridge` | gameplay | `oxreal-render-bridge` (planned, ADR-0019): `Camera` and `MeshInstance` components and the `Extract` system that fills the renderer's `RenderWorld` |
 | `applications/player` | app-runtime | `oxreal-player` (planned, ADR-0019): the M1 executable: window, input, device, frame loop, ECS world and schedule, renderer; the demo scene stands in for scene loading |
-| `tools/shader-compiler` | tool | **Created** (`oxreal-shader-compiler`): pinned `slangc`, reflection, depfile, SPIR-V capability allowlist, optional `spirv-val`. Never linked into games. (ADR-0013) |
+| `tools/shader-compiler` | tool | **Created** (`oxreal-shader-compiler`): pinned `slangc`, reflection, depfile, SPIR-V capability allowlist, optional `spirv-val` when compiling. Cooking (planned, ADR-0019) writes the cooked shader directory and its manifest, with mandatory `spirv-val` and the exact pinned compiler. Never linked into games. (ADR-0013, ADR-0019) |
 
 Crate names use the `oxreal-` prefix, for example `oxreal-math` and `oxreal-rhi` (D-15).
