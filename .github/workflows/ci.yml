@@ -72,12 +72,55 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends spirv-tools
-      - name: Shader compiler tests (pinned Slang)
-        shell: bash
+      # Windows has no spirv-tools package, so spirv-val comes from the LunarG Vulkan SDK
+      # (ADR-0019 §5). The installer is pinned by version and SHA-256. The hash was computed
+      # from the download, whose LunarG Authenticode signature was checked, when it was pinned.
+      # To update: download the new installer, check its signature, and replace both values.
+      # It installs copy-only (no registry changes, no admin rights) into the runner's temp
+      # directory. The download is cached outside .tools/downloads, which the Slang cache owns.
+      - name: Cache the Vulkan SDK installer (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/vulkan-sdk-installer
+          key: vulkan-sdk-installer-windows-1.4.363.1
+      - name: spirv-val for shader validation (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VULKAN_SDK_VERSION: "1.4.363.1"
+          VULKAN_SDK_SHA256: "c02932bd9a968b22d404536108adaacac908c081cd6b0113f5bfefc523dd0a6a"
         run: |
-          # Linux has spirv-val installed above, so validation must not be skipped there.
-          if [ "$RUNNER_OS" = "Linux" ]; then export OXREAL_REQUIRE_SPIRV_VAL=1; fi
-          cargo test -p oxreal-shader-compiler --test compile --locked -- --ignored
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $dir = '.tools/vulkan-sdk-installer'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $installer = Join-Path $dir "vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+          if (-not (Test-Path $installer)) {
+            Invoke-WebRequest -OutFile $installer `
+              -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($hash -ne $env:VULKAN_SDK_SHA256) {
+            Remove-Item $installer
+            throw "Vulkan SDK installer SHA-256 is $hash, expected $env:VULKAN_SDK_SHA256"
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'VulkanSDK'
+          $process = Start-Process -FilePath (Resolve-Path $installer) -Wait -PassThru -ArgumentList `
+            '--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install', 'copy_only=1'
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK install failed with exit code $($process.ExitCode)" }
+          & (Join-Path $root 'Bin\spirv-val.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'spirv-val did not run' }
+          "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      # Every platform has spirv-val now, so validation must not be skipped anywhere. The cook
+      # tests (ADR-0019 §4) need it.
+      - name: Shader compiler and cook tests (pinned Slang, spirv-val)
+        env:
+          OXREAL_REQUIRE_SPIRV_VAL: "1"
+        run: cargo test -p oxreal-shader-compiler --test compile --test cook --locked -- --ignored
+      # The developer command end to end: cargo xtask -> oxreal-shader-tool -> the cook.
+      - name: Cook the workspace's shaders
+        run: cargo xtask cook-shaders
       # Opens a real window and runs 120 frames (ADR-0015 §7). The build steps above ran with
       # no windowing dev packages; here only the runtime libraries and a virtual X server are
       # installed. The example fails (never hangs) if frames stop arriving.

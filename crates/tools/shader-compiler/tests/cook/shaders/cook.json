@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "shaders": [
+    {
+      "output": "Tint",
+      "source": "shaders/Tint.slang",
+      "entry_points": ["tintVertex", "tintPixel"],
+      "include_dirs": ["common"],
+      "inputs": ["shaders/Tint.slang", "common/Palette.slang"]
+    }
+  ]
+}

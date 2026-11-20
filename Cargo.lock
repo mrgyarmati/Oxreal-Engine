@@ -1125,6 +1125,16 @@ version = "0.1.0-dev"
 dependencies = [
  "oxreal-diagnostics",
  "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "oxreal-shader-tool"
+version = "0.1.0-dev"
+dependencies = [
+ "oxreal-diagnostics",
+ "oxreal-shader-compiler",
  "thiserror 2.0.21",
 ]
 

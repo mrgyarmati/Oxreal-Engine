@@ -11,7 +11,8 @@ use crate::spirv::{self, Capability};
 use crate::{ShaderError, depfile};
 
 /// Environment variable naming a different `slangc` to use instead of the pinned one, for
-/// experiments. It's logged as a warning (ADR-0013 §3).
+/// experiments. It's logged as a warning (ADR-0013 §3). `tools/xtask/src/cook.rs` names it too
+/// (xtask depends on no engine crate): change both together.
 pub const SLANGC_ENV_VAR: &str = "OXREAL_SLANGC";
 
 /// How much the compiler optimizes.
@@ -131,6 +132,43 @@ impl SlangCompiler {
     #[must_use]
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// Checks that this is exactly the Slang version pinned in `tools/slang.json`.
+    ///
+    /// Compiling only warns about another version ([`SlangCompiler::locate`]). Cooking attests
+    /// its output, so it requires the pinned one (ADR-0019 §4).
+    ///
+    /// # Errors
+    ///
+    /// [`ShaderError::UnpinnedCompiler`] if the versions differ.
+    pub fn ensure_pinned(&self) -> Result<(), ShaderError> {
+        let expected = pinned_version();
+        if self.version == expected {
+            Ok(())
+        } else {
+            Err(ShaderError::UnpinnedCompiler {
+                path: self.slangc.clone(),
+                expected,
+                found: self.version.clone(),
+            })
+        }
+    }
+
+    /// The directory the compiler is really installed in: the parent of its `bin` directory,
+    /// with symlinks resolved first (`/usr/local/bin/slangc` may point into `/opt/slang`).
+    /// Slang's own core modules live there.
+    ///
+    /// # Errors
+    ///
+    /// [`ShaderError::Io`] if the path can't be resolved, or
+    /// [`ShaderError::NotInAnInstallation`] if it has no `bin` directory above it.
+    pub fn install_root(&self) -> Result<PathBuf, ShaderError> {
+        let slangc = std::fs::canonicalize(&self.slangc).map_err(|source| ShaderError::Io {
+            action: format!("resolving {}", self.slangc.display()),
+            source,
+        })?;
+        install_root_of(&slangc).ok_or(ShaderError::NotInAnInstallation { path: slangc })
     }
 
     /// Compiles `request` to SPIR-V.
@@ -254,6 +292,12 @@ impl SlangCompiler {
     }
 }
 
+/// The grandparent of `slangc` (`<root>/bin/slangc`), if it has one.
+fn install_root_of(slangc: &Path) -> Option<PathBuf> {
+    let root = slangc.parent()?.parent()?;
+    (!root.as_os_str().is_empty()).then(|| root.to_owned())
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, ShaderError> {
     std::fs::read(path).map_err(|source| ShaderError::Io {
         action: format!("reading {}", path.display()),
@@ -261,13 +305,22 @@ fn read(path: &Path) -> Result<Vec<u8>, ShaderError> {
     })
 }
 
-/// The pinned `slangc` location and version from `tools/slang.json` (development builds).
-fn pinned_slangc() -> (PathBuf, String) {
+/// The Slang version pinned in `tools/slang.json` (ADR-0013 §3), for example `2026.22`.
+///
+/// It's part of every cooked shader's source key (ADR-0019 §4). Empty only if the manifest
+/// compiled into this crate is malformed, which its tests rule out.
+#[must_use]
+pub fn pinned_version() -> String {
     const MANIFEST: &str = include_str!("../../../../tools/slang.json");
-    let version = serde_json::from_str::<serde_json::Value>(MANIFEST)
+    serde_json::from_str::<serde_json::Value>(MANIFEST)
         .ok()
         .and_then(|json| json["version"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// The pinned `slangc` location and version from `tools/slang.json` (development builds).
+fn pinned_slangc() -> (PathBuf, String) {
+    let version = pinned_version();
     // This crate lives at crates/tools/shader-compiler, three levels below the workspace root.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -313,6 +366,39 @@ mod tests {
         let text = path.to_string_lossy();
         assert!(text.contains(".tools"), "{text}");
         assert!(text.contains(&version), "{text}");
+    }
+
+    #[test]
+    fn the_pinned_version_is_a_plain_version_number() {
+        let version = pinned_version();
+        assert!(!version.is_empty());
+        assert!(
+            version.chars().all(|c| c.is_ascii_digit() || c == '.'),
+            "{version}"
+        );
+    }
+
+    #[test]
+    fn another_version_is_refused_for_cooking() {
+        let compiler = SlangCompiler {
+            slangc: PathBuf::from("/opt/slang/bin/slangc"),
+            version: "2000.1".to_owned(),
+        };
+        let err = compiler.ensure_pinned().unwrap_err();
+        assert!(matches!(err, ShaderError::UnpinnedCompiler { .. }), "{err}");
+        assert!(err.to_string().contains(&pinned_version()), "{err}");
+        assert_eq!(
+            install_root_of(&compiler.slangc).as_deref(),
+            Some(Path::new("/opt/slang"))
+        );
+        assert_eq!(install_root_of(Path::new("/slangc")), None);
+        assert_eq!(install_root_of(Path::new("bin/slangc")), None);
+
+        let pinned = SlangCompiler {
+            version: pinned_version(),
+            ..compiler
+        };
+        assert!(pinned.ensure_pinned().is_ok());
     }
 
     #[test]

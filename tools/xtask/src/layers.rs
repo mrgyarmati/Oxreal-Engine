@@ -103,8 +103,8 @@ pub(crate) struct Package {
     pub(crate) deps: Vec<(String, DepKind)>,
 }
 
-/// Runs `cargo metadata` and checks the workspace. Prints a summary.
-pub(crate) fn run(cargo: &str, root: &Path) -> Result<(), String> {
+/// The workspace's `cargo metadata --no-deps`, parsed.
+pub(crate) fn cargo_metadata(cargo: &str, root: &Path) -> Result<Value, String> {
     let output = Command::new(cargo)
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(root)
@@ -116,8 +116,13 @@ pub(crate) fn run(cargo: &str, root: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let json: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("cannot parse cargo metadata output: {e}"))?;
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("cannot parse cargo metadata output: {e}"))
+}
+
+/// Runs `cargo metadata` and checks the workspace. Prints a summary.
+pub(crate) fn run(cargo: &str, root: &Path) -> Result<(), String> {
+    let json = cargo_metadata(cargo, root)?;
     let packages = parse_packages(&json)?;
     let violations = check(&packages);
     if violations.is_empty() {
