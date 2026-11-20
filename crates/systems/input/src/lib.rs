@@ -56,6 +56,9 @@ pub use oxreal_window::{ButtonState, KeyCode, KeyEvent, MouseButton, ScrollDelta
 
 /// The input of the current frame, built from events (ADR-0018 §2). See the
 /// [crate documentation](crate) for how to drive it.
+///
+/// It's an ECS [`Resource`](oxreal_ecs::Resource): systems declare
+/// `.reads_resource::<InputState>()` and read it from `ctx.resources` (ADR-0014 §8).
 #[derive(Debug, Clone, Default)]
 pub struct InputState {
     keys: Buttons<KeyCode>,
@@ -65,6 +68,8 @@ pub struct InputState {
     scroll_pixels: DVec2,
     cursor: Option<DVec2>,
 }
+
+impl oxreal_ecs::Resource for InputState {}
 
 impl InputState {
     /// No keys or buttons held, no motion, and no cursor position.

@@ -270,3 +270,61 @@ separate slices.
   - random access, at about 33 ns per lookup (a type-ID hash lookup on each call);
   - spawning;
   - the small allocation each query makes per archetype.
+
+## Implementation notes (2026-11-20, second slice: systems, stages and commands)
+
+- **Systems are explicit descriptors:** a name, declared reads and writes of components and
+  resources, `before`/`after` constraints, and a closure (`System::new(..).reads::<T>()`).
+  - They aren't Bevy-style functions whose parameter types imply their access. The descriptor
+    is plain data that a C ABI can express (TAD §5.8). It also states access without generic
+    machinery, and a parallel executor can read it (§5).
+  - Touching undeclared data panics, naming the declaration to add. A declared write includes
+    reading.
+- **The system context is split into three fields:**
+  - `ctx.world`: queries and lookups;
+  - `ctx.resources`;
+  - `ctx.commands`.
+
+  Each borrows a different part of the world, so a system can iterate a query, read a resource
+  and record commands at the same time with plain Rust borrows. Structure can't change while a
+  system runs; only commands change it.
+- **`Commands::spawn` returns a real handle at once.** `Entities` reserves it through a shared
+  reference, by moving an atomic cursor over the free list, then into fresh indices. The free
+  list only changes through `&mut`, after a flush turns reservations into reserved slots, so
+  despawned slots are reused by command spawns too. This works unchanged under a parallel
+  executor.
+  - Every reservation queues the spawn that consumes it.
+  - Reservations are lost only when a system panics: its stage's queue is discarded on the next
+    run, with a warning. A lost reservation can't alias, because its slot is never reused.
+- **Bundles are checked for duplicates when they're recorded** (`Commands::spawn`, `insert`), so
+  the panic points at the call site.
+- **Commands targeting gone entities:**
+  - An insert into an entity that's gone by the sync point drops the bundle, with a warning
+    naming the system.
+  - Despawning and removing from a gone entity do nothing.
+- **Ordering:**
+  - Within a stage, systems are sorted topologically. Ties keep the order systems were added
+    in, so runs are deterministic.
+  - Constraints across stages are rejected (stages already order them).
+  - A cycle is reported as the actual loop of system names, and nothing runs.
+- **Deferred to later work:**
+  - `DuringPhysics` runs once per `Schedule::run` until physics brings the fixed-step clock
+    (D-10).
+  - Events (§8) come with the gameplay framework.
+- **The first consumer:** the cube example.
+  - The camera, the spinning cube and the scenery are entities, and `InputState` and the frame
+    time are resources.
+  - Gameplay runs in `PrePhysics`, and an `Extract` system fills a draw list resource that the
+    renderer reads (CLAUDE.md rule 3).
+- **Tests** cover:
+  - stage and tie order, constraints, and every schedule error, including the cycle report;
+  - each undeclared-access panic;
+  - command order, reserved handles and slot reuse;
+  - the allocator's reservation arithmetic;
+  - the cube scene's systems.
+
+  These deliberately broken versions each fail the tests:
+  - a wrong reserved slot;
+  - a broken sort;
+  - a read declaration that allows writes;
+  - commands applied in reverse order.

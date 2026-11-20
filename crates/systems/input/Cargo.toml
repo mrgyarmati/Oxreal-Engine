@@ -12,6 +12,7 @@ publish.workspace = true
 layer = "systems"
 
 [dependencies]
+oxreal-ecs.workspace = true
 oxreal-math.workspace = true
 oxreal-window.workspace = true
 

@@ -12,6 +12,7 @@ publish.workspace = true
 layer = "runtime"
 
 [dependencies]
+oxreal-diagnostics.workspace = true
 thiserror.workspace = true
 
 [[bench]]

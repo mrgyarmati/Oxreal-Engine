@@ -65,7 +65,7 @@ pub(crate) mod sealed {
 
 /// How a query uses a component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccessKind {
+pub(crate) enum AccessKind {
     Read,
     Write,
 }
@@ -100,6 +100,17 @@ pub(crate) fn prepare<D: QueryData, F: QueryFilter>(
 ) -> (D::State, F::State) {
     D::declare(&mut Access::default());
     (D::prepare(components), F::prepare(components))
+}
+
+/// The components query data `D` reads and writes: `(type, type name, kind)`.
+///
+/// # Panics
+///
+/// If `D` aliases (see [`QueryData`]).
+pub(crate) fn accesses<D: QueryData>() -> Vec<(TypeId, &'static str, AccessKind)> {
+    let mut access = Access::default();
+    D::declare(&mut access);
+    access.entries
 }
 
 impl<T: Component> sealed::Fetch for &T {

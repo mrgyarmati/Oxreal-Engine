@@ -166,36 +166,25 @@ impl World {
     /// `entity`'s component `T`. `None` if `entity` isn't alive or doesn't have a `T`.
     #[must_use]
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
-        let location = self.entities.location(entity)?;
-        let id = self.components.id::<T>()?;
-        self.archetypes
-            .get(location.archetype)
-            .column::<T>(id)?
-            .get(location.row)
+        get_component(&self.entities, &self.components, &self.archetypes, entity)
     }
 
     /// `entity`'s component `T`, for writing through [`Mut`]. `None` if `entity` isn't alive or
     /// doesn't have a `T`.
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
-        let location = self.entities.location(entity)?;
-        let id = self.components.id::<T>()?;
-        self.archetypes
-            .get_mut(location.archetype)
-            .column_mut::<T>(id)?
-            .get_mut(location.row)
-            .map(Mut::new)
+        get_component_mut(
+            &self.entities,
+            &self.components,
+            &mut self.archetypes,
+            entity,
+        )
     }
 
     /// Whether `entity` is alive and has a component `T`. Constant time: use it for role tests,
     /// the way Unreal code uses a cast (ADR-0008 §1).
     #[must_use]
     pub fn has<T: Component>(&self, entity: Entity) -> bool {
-        let (Some(location), Some(id)) =
-            (self.entities.location(entity), self.components.id::<T>())
-        else {
-            return false;
-        };
-        self.archetypes.get(location.archetype).contains(id)
+        has_component::<T>(&self.entities, &self.components, &self.archetypes, entity)
     }
 
     /// Iterates every entity matching `D`, reading only.
@@ -291,6 +280,41 @@ impl World {
         self.resources.get_mut()
     }
 
+    /// Spawns `bundle` as `entity`, a handle reserved by [`crate::Commands::spawn`]. Returns
+    /// `false`, dropping the bundle, if the handle isn't a reserved, unspawned one.
+    pub(crate) fn spawn_reserved<B: Bundle>(&mut self, entity: Entity, bundle: B) -> bool {
+        let archetype = self.insert_target::<B>(ArchetypeId::EMPTY);
+        let row = self.archetypes.get(archetype).len();
+        if !self
+            .entities
+            .place_reserved(entity, Location { archetype, row })
+        {
+            return false;
+        }
+        let table = self.archetypes.get_mut(archetype);
+        table.push_entity(entity);
+        bundle.write(table, row, &self.components);
+        table.debug_check_rows();
+        true
+    }
+
+    /// Turns handles reserved by commands into reserved slots, before the commands are applied.
+    pub(crate) fn flush_reservations(&mut self) {
+        self.entities.flush();
+    }
+
+    /// The parts a system may touch while it runs: component storage (mutably, for queries),
+    /// the registry and entities (read-only: structure changes only at sync points), and
+    /// resources.
+    pub(crate) fn split(&mut self) -> (&mut Archetypes, &Components, &Entities, &mut Resources) {
+        (
+            &mut self.archetypes,
+            &self.components,
+            &self.entities,
+            &mut self.resources,
+        )
+    }
+
     /// Where an entity in `from` goes when bundle `B` is inserted, using the cached edge when
     /// there is one.
     fn insert_target<B: Bundle>(&mut self, from: ArchetypeId) -> ArchetypeId {
@@ -321,4 +345,48 @@ impl World {
         self.entities
             .set_location(entity, Location { archetype, row });
     }
+}
+
+/// `entity`'s component `T`. Shared by [`World::get`] and the system view.
+pub(crate) fn get_component<'a, T: Component>(
+    entities: &Entities,
+    components: &Components,
+    archetypes: &'a Archetypes,
+    entity: Entity,
+) -> Option<&'a T> {
+    let location = entities.location(entity)?;
+    let id = components.id::<T>()?;
+    archetypes
+        .get(location.archetype)
+        .column::<T>(id)?
+        .get(location.row)
+}
+
+/// `entity`'s component `T`, mutably. Shared by [`World::get_mut`] and the system view.
+pub(crate) fn get_component_mut<'a, T: Component>(
+    entities: &Entities,
+    components: &Components,
+    archetypes: &'a mut Archetypes,
+    entity: Entity,
+) -> Option<Mut<'a, T>> {
+    let location = entities.location(entity)?;
+    let id = components.id::<T>()?;
+    archetypes
+        .get_mut(location.archetype)
+        .column_mut::<T>(id)?
+        .get_mut(location.row)
+        .map(Mut::new)
+}
+
+/// Whether `entity` is alive and has a `T`. Shared by [`World::has`] and the system view.
+pub(crate) fn has_component<T: Component>(
+    entities: &Entities,
+    components: &Components,
+    archetypes: &Archetypes,
+    entity: Entity,
+) -> bool {
+    let (Some(location), Some(id)) = (entities.location(entity), components.id::<T>()) else {
+        return false;
+    };
+    archetypes.get(location.archetype).contains(id)
 }

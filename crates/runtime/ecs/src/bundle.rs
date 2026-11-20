@@ -1,6 +1,6 @@
 //! Bundles: sets of components inserted together.
 
-use std::any::type_name;
+use std::any::{TypeId, type_name};
 
 use crate::component::{Component, ComponentId, Components};
 use crate::storage::Archetype;
@@ -12,18 +12,24 @@ use crate::storage::Archetype;
 pub trait Bundle: sealed::BundleImpl + Send + Sync + 'static {}
 
 pub(crate) mod sealed {
-    use super::{Archetype, ComponentId, Components};
+    use super::{Archetype, ComponentId, Components, TypeId};
 
     /// The engine's side of [`super::Bundle`]. Not implementable outside `oxreal-ecs`.
     pub trait BundleImpl {
         /// Registers the bundle's component types and appends their IDs, in bundle order.
         fn register(components: &mut Components, ids: &mut Vec<ComponentId>);
+        /// Appends the bundle's component types, in bundle order, without registering them.
+        fn type_ids(ids: &mut Vec<(TypeId, &'static str)>);
         /// Writes the components into row `row` of `archetype`, which has all of them.
         fn write(self, archetype: &mut Archetype, row: usize, components: &Components);
     }
 }
 
 impl<T: Component> sealed::BundleImpl for T {
+    fn type_ids(ids: &mut Vec<(TypeId, &'static str)>) {
+        ids.push((TypeId::of::<T>(), type_name::<T>()));
+    }
+
     fn register(components: &mut Components, ids: &mut Vec<ComponentId>) {
         ids.push(components.register::<T>());
     }
@@ -53,6 +59,11 @@ impl<T: Component> Bundle for T {}
 macro_rules! tuple_bundles {
     ($($name:ident),*) => {
         impl<$($name: Bundle),*> sealed::BundleImpl for ($($name,)*) {
+            #[allow(unused_variables, reason = "the empty tuple doesn't use its argument")]
+            fn type_ids(ids: &mut Vec<(TypeId, &'static str)>) {
+                $($name::type_ids(ids);)*
+            }
+
             #[allow(unused_variables, reason = "the empty tuple uses neither argument")]
             fn register(components: &mut Components, ids: &mut Vec<ComponentId>) {
                 $($name::register(components, ids);)*
@@ -101,4 +112,23 @@ pub(crate) fn component_ids<B: Bundle>(components: &mut Components) -> Vec<Compo
         );
     }
     ids
+}
+
+/// Panics if bundle `B` contains a component type twice, without touching a world. Commands use
+/// it when they're recorded, so the panic points at the caller rather than at a sync point.
+///
+/// # Panics
+///
+/// If the bundle contains a component type twice. That's a bug in the caller.
+pub(crate) fn check_duplicates<B: Bundle>() {
+    let mut ids = Vec::new();
+    B::type_ids(&mut ids);
+    ids.sort_unstable_by_key(|&(id, _)| id);
+    if let Some(pair) = ids.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        panic!(
+            "bundle {} contains the component {} twice",
+            type_name::<B>(),
+            pair[0].1
+        );
+    }
 }

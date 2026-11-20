@@ -80,6 +80,7 @@ tracy-client = { version = "0.19.0", default-features = false, features = [
 
 # Workspace crates. Each one's layer is checked by `cargo xtask layers`.
 oxreal-diagnostics = { path = "crates/foundation/diagnostics" }
+oxreal-ecs = { path = "crates/runtime/ecs" }
 oxreal-math = { path = "crates/foundation/math" }
 oxreal-input = { path = "crates/systems/input" }
 oxreal-shader-compiler = { path = "crates/tools/shader-compiler" }
