@@ -203,18 +203,19 @@ to implement.
     possible.
   - Unreal developers keep familiar terms in the editor and the docs.
 - **Negative / costs:**
-  - Per-object logic waits for the events ADR (D-22) and the graph execution model (D-12).
+  - Shipping per-object logic waits for the events ADR (D-22), and designer graphs for their
+    execution model (D-12).
   - Familiarity depends on documentation and the editor: "a Pawn is components" must be taught
     well, with examples.
   - Executor systems that run many different graphs declare broad access, which limits their
     parallelism. D-12 decides how much finer the declarations get.
 - **Follow-up work:**
-  - The events and observers ADR (D-22).
-  - The visual scripting IR and execution ADR (D-12), against §3's contract.
-  - D-07 (levels and their instantiation), against §4.
   - The prototype of §6.
+  - The events and observers ADR (D-22), from the prototype's evidence.
+  - D-07 (levels and their instantiation), against §4.
+  - The visual scripting IR and execution ADR (D-12), against §3's contract.
 - **Revisit triggers:**
-  - The prototype or user testing shows designers can't express common per-object logic
+  - User testing of graphs (D-12, M6) shows designers can't express common per-object logic
     without writing Rust systems.
   - Graph executors become a serial bottleneck that finer access declarations can't fix.
   - Event dispatch costs dominate frame time in benchmark projects.
