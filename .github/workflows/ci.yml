@@ -217,8 +217,11 @@ jobs:
           [ "$version" = "${VULKAN_SDK_VERSION%.*}" ] || { echo "expected ${VULKAN_SDK_VERSION%.*}"; exit 1; }
           # The manifest must load the library extracted next to it, not whatever the dynamic
           # linker finds by name: a relative path resolves against the manifest's directory.
+          # Plain assignments, so `bash -e` stops the step if either path doesn't exist.
           library=$(jq -r '.layer.library_path' "$manifest_dir/VkLayer_khronos_validation.json")
-          [ "$(realpath -e "$manifest_dir/$library")" = "$(realpath -e "$root/x86_64/lib/libVkLayer_khronos_validation.so")" ] \
+          loaded=$(realpath -e "$manifest_dir/$library")
+          extracted=$(realpath -e "$root/x86_64/lib/libVkLayer_khronos_validation.so")
+          [ "$loaded" = "$extracted" ] \
             || { echo "manifest library_path '$library' doesn't point at the extracted layer"; exit 1; }
           echo "VK_LAYER_PATH=$manifest_dir" >> "$GITHUB_ENV"
       - run: bash tools/ci/check-vulkan-features.sh
