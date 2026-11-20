@@ -4,10 +4,12 @@ use std::any::{TypeId, type_name};
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::change::Mut;
+use crate::change::{ChangeWindow, ChangedTick, Mut, Tick};
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
 use crate::storage::{Archetype, TableView};
+
+use self::sealed::RowTest as _;
 
 /// What a query fetches for each entity:
 ///
@@ -27,12 +29,13 @@ pub trait QueryData: sealed::Fetch {}
 /// Query data that only reads, usable through a shared `&World` ([`crate::World::query`]).
 pub trait ReadOnlyQueryData: QueryData {}
 
-/// Which entities a query visits, beyond what its data requires:
-/// [`With<T>`], [`Without<T>`], `()` (no filter), or a tuple of up to 12 filters (all must hold).
+/// Which entities a query visits, beyond what its data requires: [`With<T>`], [`Without<T>`],
+/// [`Added<T>`], [`Changed<T>`], `()` (no filter), or a tuple of up to 12 filters (all must
+/// hold).
 pub trait QueryFilter: sealed::Filter {}
 
 pub(crate) mod sealed {
-    use super::{Access, Archetype, Components, TableView};
+    use super::{Access, Archetype, ChangeWindow, Components, TableView, TypeId};
 
     /// The engine's side of [`super::QueryData`]. Not implementable outside `oxreal-ecs`.
     pub trait Fetch {
@@ -48,18 +51,41 @@ pub(crate) mod sealed {
         fn prepare(components: &Components) -> Self::State;
         /// Whether an archetype's entities have what this needs.
         fn matches(state: &Self::State, archetype: &Archetype) -> bool;
-        /// Iterates the items of a matching archetype.
-        fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w>;
+        /// Iterates the items of a matching archetype. Writes are stamped at `window.now`.
+        fn iter<'w>(
+            state: &Self::State,
+            view: &mut TableView<'w>,
+            window: ChangeWindow,
+        ) -> Self::Iter<'w>;
     }
 
     /// The engine's side of [`super::QueryFilter`]. Not implementable outside `oxreal-ecs`.
     pub trait Filter {
         /// Component IDs, resolved once per query.
         type State: Copy;
+        /// The row test for one archetype.
+        type Rows<'w>: RowTest;
+        /// Whether this filter tests rows ([`super::Added`], [`super::Changed`]), not just
+        /// archetypes. When it doesn't, rows aren't tested at all.
+        const BY_ROW: bool;
         /// Resolves component IDs.
         fn prepare(components: &Components) -> Self::State;
-        /// Whether an archetype's entities pass.
+        /// Whether an archetype's entities may pass.
         fn matches(state: &Self::State, archetype: &Archetype) -> bool;
+        /// The row test for a matching archetype.
+        fn rows<'w>(
+            state: &Self::State,
+            view: &TableView<'w>,
+            window: ChangeWindow,
+        ) -> Self::Rows<'w>;
+        /// Appends the components whose ticks this reads: a system must declare reading them.
+        fn reads(reads: &mut Vec<(TypeId, &'static str)>);
+    }
+
+    /// Whether each row of one archetype passes a filter.
+    pub trait RowTest {
+        /// Whether row `row` passes.
+        fn keep(&self, row: usize) -> bool;
     }
 }
 
@@ -113,6 +139,13 @@ pub(crate) fn accesses<D: QueryData>() -> Vec<(TypeId, &'static str, AccessKind)
     access.entries
 }
 
+/// The components whose ticks filter `F` reads: `(type, type name)`.
+pub(crate) fn filter_reads<F: QueryFilter>() -> Vec<(TypeId, &'static str)> {
+    let mut reads = Vec::new();
+    F::reads(&mut reads);
+    reads
+}
+
 impl<T: Component> sealed::Fetch for &T {
     type State = Option<ComponentId>;
     type Item<'w> = &'w T;
@@ -130,7 +163,7 @@ impl<T: Component> sealed::Fetch for &T {
         state.is_some_and(|id| archetype.contains(id))
     }
 
-    fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
+    fn iter<'w>(state: &Self::State, view: &mut TableView<'w>, _: ChangeWindow) -> Self::Iter<'w> {
         state
             .and_then(|id| view.take_slice::<T>(id))
             .unwrap_or_default()
@@ -140,6 +173,26 @@ impl<T: Component> sealed::Fetch for &T {
 
 impl<T: Component> QueryData for &T {}
 impl<T: Component> ReadOnlyQueryData for &T {}
+
+/// One column for writing, with its changed ticks: the parts of a [`MutIter`].
+fn take_for_writing<'w, T: Component>(
+    state: Option<ComponentId>,
+    view: &mut TableView<'w>,
+    now: Tick,
+) -> Option<MutIter<'w, T>> {
+    let id = state?;
+    let values = view.take_slice_mut::<T>(id)?;
+    let Some(ticks) = view.ticks(id) else {
+        unreachable!(
+            "{} has values but no ticks: a bug in oxreal-ecs",
+            type_name::<T>()
+        );
+    };
+    Some(MutIter {
+        rows: values.iter_mut().zip(ticks.changed()),
+        now,
+    })
+}
 
 impl<T: Component> sealed::Fetch for &mut T {
     type State = Option<ComponentId>;
@@ -159,34 +212,42 @@ impl<T: Component> sealed::Fetch for &mut T {
         state.is_some_and(|id| archetype.contains(id))
     }
 
-    fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
-        MutIter(
-            state
-                .and_then(|id| view.take_slice_mut::<T>(id))
-                .unwrap_or_default()
-                .iter_mut(),
-        )
+    fn iter<'w>(
+        state: &Self::State,
+        view: &mut TableView<'w>,
+        window: ChangeWindow,
+    ) -> Self::Iter<'w> {
+        take_for_writing(*state, view, window.now).unwrap_or_else(|| MutIter {
+            rows: [].iter_mut().zip(&[]),
+            now: window.now,
+        })
     }
 }
 
 impl<T: Component> QueryData for &mut T {}
 
-/// Iterates a column, wrapping each value in [`Mut`]. A named type rather than a `Map` over a
-/// function pointer, so the wrapping inlines.
+/// Iterates a column, wrapping each value in [`Mut`] with its changed tick. A named type rather
+/// than a `Map` over a closure, so the wrapping inlines.
 #[derive(Debug)]
-pub struct MutIter<'w, T>(std::slice::IterMut<'w, T>);
+pub struct MutIter<'w, T> {
+    /// Values and their changed ticks, stepped together (`Zip` of two slices steps both with one
+    /// index).
+    rows: std::iter::Zip<std::slice::IterMut<'w, T>, std::slice::Iter<'w, ChangedTick>>,
+    now: Tick,
+}
 
 impl<'w, T> Iterator for MutIter<'w, T> {
     type Item = Mut<'w, T>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(Mut::new)
+        let (value, changed) = self.rows.next()?;
+        Some(Mut::new(value, changed, self.now))
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
+        self.rows.size_hint()
     }
 }
 
@@ -230,7 +291,7 @@ impl<T: Component> sealed::Fetch for Option<&T> {
         true
     }
 
-    fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
+    fn iter<'w>(state: &Self::State, view: &mut TableView<'w>, _: ChangeWindow) -> Self::Iter<'w> {
         let rows = view.len();
         Maybe {
             inner: state
@@ -262,12 +323,14 @@ impl<T: Component> sealed::Fetch for Option<&mut T> {
         true
     }
 
-    fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
+    fn iter<'w>(
+        state: &Self::State,
+        view: &mut TableView<'w>,
+        window: ChangeWindow,
+    ) -> Self::Iter<'w> {
         let rows = view.len();
         Maybe {
-            inner: state
-                .and_then(|id| view.take_slice_mut::<T>(id))
-                .map(|slice| MutIter(slice.iter_mut())),
+            inner: take_for_writing(*state, view, window.now),
             missing: rows,
         }
     }
@@ -288,7 +351,7 @@ impl sealed::Fetch for Entity {
         true
     }
 
-    fn iter<'w>((): &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
+    fn iter<'w>((): &Self::State, view: &mut TableView<'w>, _: ChangeWindow) -> Self::Iter<'w> {
         view.entities().iter().copied()
     }
 }
@@ -307,6 +370,7 @@ macro_rules! tuple_queries {
         impl<$($name: Iterator),+> Iterator for Zip<($($name,)+)> {
             type Item = ($($name::Item,)+);
 
+            #[inline]
             fn next(&mut self) -> Option<Self::Item> {
                 let ($($name,)+) = &mut self.0;
                 Some(($($name.next()?,)+))
@@ -332,9 +396,13 @@ macro_rules! tuple_queries {
                 $($name::matches($name, archetype))&&+
             }
 
-            fn iter<'w>(state: &Self::State, view: &mut TableView<'w>) -> Self::Iter<'w> {
+            fn iter<'w>(
+                state: &Self::State,
+                view: &mut TableView<'w>,
+                window: ChangeWindow,
+            ) -> Self::Iter<'w> {
                 let ($($name,)+) = state;
-                Zip(($($name::iter($name, view),)+))
+                Zip(($($name::iter($name, view, window),)+))
             }
         }
 
@@ -342,8 +410,19 @@ macro_rules! tuple_queries {
         impl<$($name: ReadOnlyQueryData),+> ReadOnlyQueryData for ($($name,)+) {}
 
         #[allow(non_snake_case, reason = "the bindings reuse the type parameter names")]
+        impl<$($name: sealed::RowTest),+> sealed::RowTest for ($($name,)+) {
+            #[inline]
+            fn keep(&self, row: usize) -> bool {
+                let ($($name,)+) = self;
+                $($name.keep(row))&&+
+            }
+        }
+
+        #[allow(non_snake_case, reason = "the bindings reuse the type parameter names")]
         impl<$($name: QueryFilter),+> sealed::Filter for ($($name,)+) {
             type State = ($($name::State,)+);
+            type Rows<'w> = ($($name::Rows<'w>,)+);
+            const BY_ROW: bool = $($name::BY_ROW)||+;
 
             fn prepare(components: &Components) -> Self::State {
                 ($($name::prepare(components),)+)
@@ -352,6 +431,19 @@ macro_rules! tuple_queries {
             fn matches(state: &Self::State, archetype: &Archetype) -> bool {
                 let ($($name,)+) = state;
                 $($name::matches($name, archetype))&&+
+            }
+
+            fn rows<'w>(
+                state: &Self::State,
+                view: &TableView<'w>,
+                window: ChangeWindow,
+            ) -> Self::Rows<'w> {
+                let ($($name,)+) = state;
+                ($($name::rows($name, view, window),)+)
+            }
+
+            fn reads(reads: &mut Vec<(TypeId, &'static str)>) {
+                $($name::reads(reads);)+
             }
         }
 
@@ -372,14 +464,33 @@ tuple_queries!(A, B, C, D, E, F, G, H, I, J);
 tuple_queries!(A, B, C, D, E, F, G, H, I, J, K);
 tuple_queries!(A, B, C, D, E, F, G, H, I, J, K, L);
 
+/// The row test of filters that only look at archetypes: every row passes.
+#[derive(Debug, Clone, Copy)]
+pub struct AllRows;
+
+impl sealed::RowTest for AllRows {
+    #[inline]
+    fn keep(&self, _: usize) -> bool {
+        true
+    }
+}
+
 impl sealed::Filter for () {
     type State = ();
+    type Rows<'w> = AllRows;
+    const BY_ROW: bool = false;
 
     fn prepare(_: &Components) -> Self::State {}
 
     fn matches((): &Self::State, _: &Archetype) -> bool {
         true
     }
+
+    fn rows<'w>((): &Self::State, _: &TableView<'w>, _: ChangeWindow) -> Self::Rows<'w> {
+        AllRows
+    }
+
+    fn reads(_: &mut Vec<(TypeId, &'static str)>) {}
 }
 
 impl QueryFilter for () {}
@@ -390,20 +501,80 @@ pub struct With<T>(PhantomData<fn() -> T>);
 /// A filter: only entities that don't have component `T`.
 pub struct Without<T>(PhantomData<fn() -> T>);
 
-impl<T> fmt::Debug for With<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "With<{}>", type_name::<T>())
-    }
+/// A filter: only entities whose component `T` was **added** since the system last ran: spawned
+/// with it, or given it by an insert. Replacing a `T` it already had isn't adding.
+///
+/// It compares with the system's previous run, so each addition is seen once per system. On a
+/// system's first run, and in queries made on the [`crate::World`] directly (which have no
+/// previous run), every `T` counts as added. A system using it must declare reading or writing
+/// `T`.
+pub struct Added<T>(PhantomData<fn() -> T>);
+
+/// A filter: only entities whose component `T` was **added or changed** since the system last
+/// ran. A value changes when it's written through [`crate::Mut`] or replaced by an insert;
+/// fetching it mutably without writing isn't a change.
+///
+/// It compares with the system's previous run, so a system sees the changes others made since
+/// then, never its own. On a system's first run, and in queries made on the
+/// [`crate::World`] directly (which have no previous run), every `T` counts as changed. A system
+/// using it must declare reading or writing `T`.
+///
+/// ```
+/// use oxreal_ecs::{Changed, Component, Resource, Schedule, Stage, System, World};
+///
+/// struct Health(u32);
+/// impl Component for Health {}
+/// /// How many health values changed since the system last ran.
+/// struct HealthChanges(usize);
+/// impl Resource for HealthChanges {}
+///
+/// let mut world = World::new();
+/// let hero = world.spawn(Health(100));
+/// world.spawn(Health(80));
+/// world.insert_resource(HealthChanges(0));
+///
+/// let mut schedule = Schedule::new();
+/// schedule.add(
+///     Stage::PostUpdate,
+///     System::new("count changes", |ctx| {
+///         let changed = ctx.world.query_filtered::<&Health, Changed<Health>>().count();
+///         if let Some(mut count) = ctx.resources.get_mut::<HealthChanges>() {
+///             count.0 = changed;
+///         }
+///     })
+///     .reads::<Health>()
+///     .writes_resource::<HealthChanges>(),
+/// );
+///
+/// let changes = |world: &World| world.resource::<HealthChanges>().map(|c| c.0);
+/// schedule.run(&mut world).unwrap();
+/// assert_eq!(changes(&world), Some(2), "on the first run, everything counts");
+/// if let Some(mut health) = world.get_mut::<Health>(hero) {
+///     health.0 -= 10;
+/// }
+/// schedule.run(&mut world).unwrap();
+/// assert_eq!(changes(&world), Some(1), "only the hero's");
+/// schedule.run(&mut world).unwrap();
+/// assert_eq!(changes(&world), Some(0), "nothing since");
+/// ```
+pub struct Changed<T>(PhantomData<fn() -> T>);
+
+macro_rules! filter_debug {
+    ($($name:ident),+) => {$(
+        impl<T> fmt::Debug for $name<T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}<{}>", stringify!($name), type_name::<T>())
+            }
+        }
+    )+};
 }
 
-impl<T> fmt::Debug for Without<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Without<{}>", type_name::<T>())
-    }
-}
+filter_debug!(With, Without, Added, Changed);
 
 impl<T: Component> sealed::Filter for With<T> {
     type State = Option<ComponentId>;
+    type Rows<'w> = AllRows;
+    const BY_ROW: bool = false;
 
     fn prepare(components: &Components) -> Self::State {
         components.id::<T>()
@@ -412,12 +583,20 @@ impl<T: Component> sealed::Filter for With<T> {
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
         state.is_some_and(|id| archetype.contains(id))
     }
+
+    fn rows<'w>(_: &Self::State, _: &TableView<'w>, _: ChangeWindow) -> Self::Rows<'w> {
+        AllRows
+    }
+
+    fn reads(_: &mut Vec<(TypeId, &'static str)>) {}
 }
 
 impl<T: Component> QueryFilter for With<T> {}
 
 impl<T: Component> sealed::Filter for Without<T> {
     type State = Option<ComponentId>;
+    type Rows<'w> = AllRows;
+    const BY_ROW: bool = false;
 
     fn prepare(components: &Components) -> Self::State {
         components.id::<T>()
@@ -426,9 +605,105 @@ impl<T: Component> sealed::Filter for Without<T> {
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
         state.is_none_or(|id| !archetype.contains(id))
     }
+
+    fn rows<'w>(_: &Self::State, _: &TableView<'w>, _: ChangeWindow) -> Self::Rows<'w> {
+        AllRows
+    }
+
+    fn reads(_: &mut Vec<(TypeId, &'static str)>) {}
 }
 
 impl<T: Component> QueryFilter for Without<T> {}
+
+/// The row test of [`Added`]: each row's added tick against the window.
+#[derive(Debug)]
+pub struct AddedRows<'w> {
+    added: &'w [Tick],
+    window: ChangeWindow,
+}
+
+impl sealed::RowTest for AddedRows<'_> {
+    #[inline]
+    fn keep(&self, row: usize) -> bool {
+        self.added
+            .get(row)
+            .is_some_and(|&tick| self.window.contains(tick))
+    }
+}
+
+/// The row test of [`Changed`]: each row's changed tick against the window.
+#[derive(Debug)]
+pub struct ChangedRows<'w> {
+    changed: &'w [ChangedTick],
+    window: ChangeWindow,
+}
+
+impl sealed::RowTest for ChangedRows<'_> {
+    #[inline]
+    fn keep(&self, row: usize) -> bool {
+        self.changed
+            .get(row)
+            .is_some_and(|tick| self.window.contains(tick.get()))
+    }
+}
+
+impl<T: Component> sealed::Filter for Added<T> {
+    type State = Option<ComponentId>;
+    type Rows<'w> = AddedRows<'w>;
+    const BY_ROW: bool = true;
+
+    fn prepare(components: &Components) -> Self::State {
+        components.id::<T>()
+    }
+
+    fn matches(state: &Self::State, archetype: &Archetype) -> bool {
+        state.is_some_and(|id| archetype.contains(id))
+    }
+
+    fn rows<'w>(state: &Self::State, view: &TableView<'w>, window: ChangeWindow) -> Self::Rows<'w> {
+        AddedRows {
+            added: state
+                .and_then(|id| view.ticks(id))
+                .map_or(&[], |ticks| ticks.added()),
+            window,
+        }
+    }
+
+    fn reads(reads: &mut Vec<(TypeId, &'static str)>) {
+        reads.push((TypeId::of::<T>(), type_name::<T>()));
+    }
+}
+
+impl<T: Component> QueryFilter for Added<T> {}
+
+impl<T: Component> sealed::Filter for Changed<T> {
+    type State = Option<ComponentId>;
+    type Rows<'w> = ChangedRows<'w>;
+    const BY_ROW: bool = true;
+
+    fn prepare(components: &Components) -> Self::State {
+        components.id::<T>()
+    }
+
+    fn matches(state: &Self::State, archetype: &Archetype) -> bool {
+        state.is_some_and(|id| archetype.contains(id))
+    }
+
+    fn rows<'w>(state: &Self::State, view: &TableView<'w>, window: ChangeWindow) -> Self::Rows<'w> {
+        ChangedRows {
+            changed: state
+                .and_then(|id| view.ticks(id))
+                .map_or(&[], |ticks| ticks.changed()),
+            window,
+        }
+    }
+
+    fn reads(reads: &mut Vec<(TypeId, &'static str)>) {
+        reads.push((TypeId::of::<T>(), type_name::<T>()));
+    }
+}
+
+impl<T: Component> QueryFilter for Changed<T> {}
 
 /// The archetypes a query walks: shared for read-only queries, unique for the others.
 enum Tables<'w> {
@@ -442,31 +717,39 @@ pub struct QueryIter<'w, D: QueryData, F: QueryFilter = ()> {
     tables: Tables<'w>,
     data: D::State,
     filter: F::State,
+    window: ChangeWindow,
     current: Option<D::Iter<'w>>,
+    /// The current archetype's row test, and the row the next item comes from.
+    rows: Option<F::Rows<'w>>,
+    row: usize,
 }
 
 impl<'w, D: QueryData, F: QueryFilter> QueryIter<'w, D, F> {
     pub(crate) fn shared(
         archetypes: std::slice::Iter<'w, Archetype>,
         (data, filter): (D::State, F::State),
+        window: ChangeWindow,
     ) -> Self {
-        Self {
-            tables: Tables::Shared(archetypes),
-            data,
-            filter,
-            current: None,
-        }
+        Self::new(Tables::Shared(archetypes), data, filter, window)
     }
 
     pub(crate) fn unique(
         archetypes: std::slice::IterMut<'w, Archetype>,
         (data, filter): (D::State, F::State),
+        window: ChangeWindow,
     ) -> Self {
+        Self::new(Tables::Unique(archetypes), data, filter, window)
+    }
+
+    fn new(tables: Tables<'w>, data: D::State, filter: F::State, window: ChangeWindow) -> Self {
         Self {
-            tables: Tables::Unique(archetypes),
+            tables,
             data,
             filter,
+            window,
             current: None,
+            rows: None,
+            row: 0,
         }
     }
 
@@ -486,13 +769,31 @@ impl<'w, D: QueryData, F: QueryFilter> QueryIter<'w, D, F> {
 impl<'w, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, D, F> {
     type Item = D::Item<'w>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(item) = self.current.as_mut().and_then(Iterator::next) {
-                return Some(item);
+            if let Some(current) = self.current.as_mut() {
+                if !F::BY_ROW {
+                    // Archetype-only filters: every row of a matching archetype passes.
+                    if let Some(item) = current.next() {
+                        return Some(item);
+                    }
+                } else {
+                    // An item filtered out is dropped unused: a `Mut` that isn't written through
+                    // marks nothing.
+                    for item in current.by_ref() {
+                        let row = self.row;
+                        self.row += 1;
+                        if self.rows.as_ref().is_some_and(|rows| rows.keep(row)) {
+                            return Some(item);
+                        }
+                    }
+                }
             }
             let mut view = self.next_table()?;
-            self.current = Some(D::iter(&self.data, &mut view));
+            self.rows = Some(F::rows(&self.filter, &view, self.window));
+            self.row = 0;
+            self.current = Some(D::iter(&self.data, &mut view, self.window));
         }
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use oxreal_diagnostics::warn;
 
-use crate::change::Mut;
+use crate::change::{ChangeWindow, Mut, Tick};
 use crate::command::{Commands, Source};
 use crate::component::{Component, Components};
 use crate::entity::{Entities, Entity};
@@ -159,6 +159,9 @@ pub struct System {
     declared: Declared,
     after: Vec<String>,
     before: Vec<String>,
+    /// The world's tick count when it last ran, for change detection (ADR-0014 §6). `None`
+    /// before its first run, when everything counts as added and changed.
+    last_run: Option<u64>,
 }
 
 impl fmt::Debug for System {
@@ -185,6 +188,7 @@ impl System {
             declared: Declared::default(),
             after: Vec::new(),
             before: Vec::new(),
+            last_run: None,
         }
     }
 
@@ -259,6 +263,8 @@ pub struct SystemWorld<'a> {
     entities: &'a Entities,
     declared: &'a Declared,
     system: &'a str,
+    /// What counts as added or changed, and the tick writes are stamped with.
+    window: ChangeWindow,
 }
 
 impl fmt::Debug for SystemWorld<'_> {
@@ -271,10 +277,16 @@ impl fmt::Debug for SystemWorld<'_> {
 
 impl SystemWorld<'_> {
     #[track_caller]
-    fn check_query<D: QueryData>(&self) {
+    fn check_query<D: QueryData, F: QueryFilter>(&self) {
         for (id, name, kind) in query::accesses::<D>() {
             if !allows(&self.declared.components, id, kind) {
                 undeclared(self.system, "component", name, kind);
+            }
+        }
+        // `Added<T>` and `Changed<T>` read `T`'s ticks: data like any other.
+        for (id, name) in query::filter_reads::<F>() {
+            if !allows(&self.declared.components, id, AccessKind::Read) {
+                undeclared(self.system, "component", name, AccessKind::Read);
             }
         }
     }
@@ -293,24 +305,27 @@ impl SystemWorld<'_> {
     /// If `D` aliases, or reads a component the system didn't declare.
     #[track_caller]
     pub fn query<D: ReadOnlyQueryData>(&self) -> QueryIter<'_, D> {
-        self.check_query::<D>();
+        self.check_query::<D, ()>();
         QueryIter::shared(
             self.archetypes.iter(),
             query::prepare::<D, ()>(self.components),
+            self.window,
         )
     }
 
-    /// Like [`SystemWorld::query`], visiting only entities that pass filter `F`.
+    /// Like [`SystemWorld::query`], visiting only entities that pass filter `F`. [`crate::Added`]
+    /// and [`crate::Changed`] compare with this system's previous run.
     ///
     /// # Panics
     ///
-    /// If `D` aliases, or reads a component the system didn't declare.
+    /// If `D` aliases, or it or `F` reads a component the system didn't declare.
     #[track_caller]
     pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> QueryIter<'_, D, F> {
-        self.check_query::<D>();
+        self.check_query::<D, F>();
         QueryIter::shared(
             self.archetypes.iter(),
             query::prepare::<D, F>(self.components),
+            self.window,
         )
     }
 
@@ -321,21 +336,22 @@ impl SystemWorld<'_> {
     /// If `D` aliases, or uses a component in a way the system didn't declare.
     #[track_caller]
     pub fn query_mut<D: QueryData>(&mut self) -> QueryIter<'_, D> {
-        self.check_query::<D>();
+        self.check_query::<D, ()>();
         let state = query::prepare::<D, ()>(self.components);
-        QueryIter::unique(self.archetypes.iter_mut(), state)
+        QueryIter::unique(self.archetypes.iter_mut(), state, self.window)
     }
 
     /// Like [`SystemWorld::query_mut`], visiting only entities that pass filter `F`.
+    /// [`crate::Added`] and [`crate::Changed`] compare with this system's previous run.
     ///
     /// # Panics
     ///
-    /// If `D` aliases, or uses a component in a way the system didn't declare.
+    /// If `D` aliases, or `D` or `F` uses a component in a way the system didn't declare.
     #[track_caller]
     pub fn query_filtered_mut<D: QueryData, F: QueryFilter>(&mut self) -> QueryIter<'_, D, F> {
-        self.check_query::<D>();
+        self.check_query::<D, F>();
         let state = query::prepare::<D, F>(self.components);
-        QueryIter::unique(self.archetypes.iter_mut(), state)
+        QueryIter::unique(self.archetypes.iter_mut(), state, self.window)
     }
 
     /// `entity`'s component `T`. See [`World::get`].
@@ -358,7 +374,13 @@ impl SystemWorld<'_> {
     #[track_caller]
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
         self.check::<T>(AccessKind::Write);
-        world::get_component_mut(self.entities, self.components, self.archetypes, entity)
+        world::get_component_mut(
+            self.entities,
+            self.components,
+            self.archetypes,
+            entity,
+            self.window.now,
+        )
     }
 
     /// Whether `entity` is alive and has a `T`. Needs no declaration: it reads structure, not
@@ -380,6 +402,7 @@ pub struct SystemResources<'a> {
     resources: &'a mut Resources,
     declared: &'a Declared,
     system: &'a str,
+    window: ChangeWindow,
 }
 
 impl fmt::Debug for SystemResources<'_> {
@@ -418,7 +441,34 @@ impl SystemResources<'_> {
     #[track_caller]
     pub fn get_mut<R: Resource>(&mut self) -> Option<Mut<'_, R>> {
         self.check::<R>(AccessKind::Write);
-        self.resources.get_mut().map(Mut::new)
+        self.resources.get_mut(self.window.now)
+    }
+
+    /// Whether resource `R` was added since this system last ran (on its first run: whether the
+    /// world has one). Replacing a resource with `insert_resource` isn't adding it.
+    ///
+    /// # Panics
+    ///
+    /// If the system didn't declare reading or writing `R`.
+    #[track_caller]
+    #[must_use]
+    pub fn is_added<R: Resource>(&self) -> bool {
+        self.check::<R>(AccessKind::Read);
+        self.resources.is_added::<R>(self.window)
+    }
+
+    /// Whether resource `R` was added, replaced or written through [`Mut`] since this system
+    /// last ran (on its first run: whether the world has one). A system doesn't see its own
+    /// writes.
+    ///
+    /// # Panics
+    ///
+    /// If the system didn't declare reading or writing `R`.
+    #[track_caller]
+    #[must_use]
+    pub fn is_changed<R: Resource>(&self) -> bool {
+        self.check::<R>(AccessKind::Read);
+        self.resources.is_changed::<R>(self.window)
     }
 }
 
@@ -559,8 +609,14 @@ impl Schedule {
                     name,
                     run,
                     declared,
+                    last_run,
                     ..
                 } = &mut systems[index];
+                let now = world.0.begin_system_run();
+                let window = ChangeWindow {
+                    since: last_run.map(|last| Tick::since(last, now)),
+                    now: Tick::from_count(now),
+                };
                 let parts = world.0.split();
                 let mut ctx = SystemContext {
                     world: SystemWorld {
@@ -569,11 +625,13 @@ impl Schedule {
                         entities: parts.entities,
                         declared,
                         system: name,
+                        window,
                     },
                     resources: SystemResources {
                         resources: parts.resources,
                         declared,
                         system: name,
+                        window,
                     },
                     commands: Commands::new(
                         parts.entities,
@@ -582,6 +640,8 @@ impl Schedule {
                     ),
                 };
                 run(&mut ctx);
+                // Only a run that finished: after a panic, the changes stay unseen, not lost.
+                *last_run = Some(now);
             }
             // The sync point.
             world.0.apply_commands();

@@ -9,6 +9,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
+use crate::change::{ChangedTick, Tick};
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
 use crate::type_map::TypeIdMap;
@@ -83,6 +84,56 @@ fn column_type_mismatch<T>() -> ! {
     )
 }
 
+/// The added and changed ticks of one column's values, row for row (ADR-0014 §6). Kept beside
+/// the type-erased column rather than in it, so a query can hold a column's values mutably and
+/// its ticks shared at once.
+#[derive(Debug, Default)]
+pub(crate) struct ColumnTicks {
+    added: Vec<Tick>,
+    changed: Vec<ChangedTick>,
+}
+
+impl ColumnTicks {
+    fn len(&self) -> usize {
+        self.added.len()
+    }
+
+    /// Appends the ticks of a value added at `tick`.
+    fn push(&mut self, tick: Tick) {
+        self.added.push(tick);
+        self.changed.push(ChangedTick::new(tick));
+    }
+
+    fn swap_remove(&mut self, row: usize) {
+        self.added.swap_remove(row);
+        self.changed.swap_remove(row);
+    }
+
+    /// Moves a row's ticks to the end of `to`, like [`AnyColumn::swap_remove_into`].
+    fn swap_remove_into(&mut self, row: usize, to: &mut ColumnTicks) {
+        to.added.push(self.added.swap_remove(row));
+        to.changed.push(self.changed.swap_remove(row));
+    }
+
+    pub(crate) fn added(&self) -> &[Tick] {
+        &self.added
+    }
+
+    pub(crate) fn changed(&self) -> &[ChangedTick] {
+        &self.changed
+    }
+
+    /// Clamps every tick to at most `max_age` before `now`.
+    fn clamp(&mut self, now: Tick, max_age: u32) {
+        for added in &mut self.added {
+            *added = added.clamped(now, max_age);
+        }
+        for changed in &self.changed {
+            changed.set(changed.get().clamped(now, max_age));
+        }
+    }
+}
+
 /// An archetype's index in [`Archetypes`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ArchetypeId(u32);
@@ -103,6 +154,8 @@ pub struct Archetype {
     /// One bit per component ID, for constant-time membership tests (ADR-0014 §7).
     membership: Box<[u64]>,
     columns: Vec<Box<dyn AnyColumn>>,
+    /// Each column's ticks. Parallel to `columns`.
+    ticks: Vec<ColumnTicks>,
     entities: Vec<Entity>,
     /// Where inserting a bundle of a given type leads, filled in as it's used.
     insert_edges: TypeIdMap<ArchetypeId>,
@@ -134,6 +187,7 @@ impl Archetype {
                 .iter()
                 .map(|&id| registry.new_column(id))
                 .collect(),
+            ticks: components.iter().map(|_| ColumnTicks::default()).collect(),
             components,
             membership,
             entities: Vec::new(),
@@ -174,10 +228,51 @@ impl Archetype {
         Some(typed::<T>(&*self.columns[index]))
     }
 
-    /// The column of component `T`, mutably.
-    pub(crate) fn column_mut<T: Component>(&mut self, id: ComponentId) -> Option<&mut Vec<T>> {
+    /// The column of component `T`, mutably, with its ticks.
+    pub(crate) fn column_mut<T: Component>(
+        &mut self,
+        id: ComponentId,
+    ) -> Option<(&mut Vec<T>, &ColumnTicks)> {
         let index = self.column_index(id)?;
-        Some(typed_mut::<T>(&mut *self.columns[index]))
+        Some((
+            typed_mut::<T>(&mut *self.columns[index]),
+            &self.ticks[index],
+        ))
+    }
+
+    /// Writes component `T`'s value in row `row` at `tick`: replacing the value already there
+    /// (a change), or appending it as the next row (an addition).
+    pub(crate) fn write<T: Component>(
+        &mut self,
+        id: ComponentId,
+        row: usize,
+        value: T,
+        tick: Tick,
+    ) {
+        let Some(index) = self.column_index(id) else {
+            unreachable!(
+                "an archetype lacks {} from the bundle written to it: a bug in oxreal-ecs",
+                std::any::type_name::<T>()
+            );
+        };
+        let column = typed_mut::<T>(&mut *self.columns[index]);
+        let ticks = &mut self.ticks[index];
+        if let Some(slot) = column.get_mut(row) {
+            // The entity already had this component: replace it, dropping the old value.
+            *slot = value;
+            ticks.changed[row].set(tick);
+        } else {
+            debug_assert_eq!(column.len(), row, "bundle rows must be written in order");
+            column.push(value);
+            ticks.push(tick);
+        }
+    }
+
+    /// Clamps every stored tick to at most `max_age` before `now`.
+    pub(crate) fn clamp_ticks(&mut self, now: Tick, max_age: u32) {
+        for ticks in &mut self.ticks {
+            ticks.clamp(now, max_age);
+        }
     }
 
     /// Appends a row for `entity`. Its components must be written right after, so every column
@@ -192,6 +287,9 @@ impl Archetype {
         for column in &mut self.columns {
             column.swap_remove_drop(row);
         }
+        for ticks in &mut self.ticks {
+            ticks.swap_remove(row);
+        }
         self.finish_swap_remove(row)
     }
 
@@ -204,7 +302,8 @@ impl Archetype {
     /// Every column has one value per entity. Checked in debug builds after structural changes.
     pub(crate) fn debug_check_rows(&self) {
         debug_assert!(
-            self.columns.iter().all(|c| c.len() == self.entities.len()),
+            self.columns.iter().all(|c| c.len() == self.entities.len())
+                && self.ticks.iter().all(|t| t.len() == self.entities.len()),
             "archetype {:?} has columns of unequal length: a bug in oxreal-ecs",
             self.components
         );
@@ -257,6 +356,13 @@ impl Archetypes {
 
     pub(crate) fn len(&self) -> usize {
         self.list.len()
+    }
+
+    /// Clamps every stored component tick to at most `max_age` before `now`.
+    pub(crate) fn clamp_ticks(&mut self, now: Tick, max_age: u32) {
+        for archetype in &mut self.list {
+            archetype.clamp_ticks(now, max_age);
+        }
     }
 
     /// The archetype with exactly these components (sorted, no duplicates), created if needed.
@@ -344,9 +450,17 @@ pub(crate) fn move_row(
     let new_row = to.push_entity(entity);
     for (index, &id) in from.components.iter().enumerate() {
         let column = &mut *from.columns[index];
+        let ticks = &mut from.ticks[index];
         match to.column_index(id) {
-            Some(target) => column.swap_remove_into(row, &mut *to.columns[target]),
-            None => leftover(id, column, row),
+            // A moved value keeps its ticks: moving between archetypes isn't a change.
+            Some(target) => {
+                column.swap_remove_into(row, &mut *to.columns[target]);
+                ticks.swap_remove_into(row, &mut to.ticks[target]);
+            }
+            None => {
+                leftover(id, column, row);
+                ticks.swap_remove(row);
+            }
         }
     }
     let moved = from.finish_swap_remove(row);
@@ -365,6 +479,8 @@ pub struct TableView<'w> {
     components: &'w [ComponentId],
     entities: &'w [Entity],
     columns: Vec<Option<ColumnRef<'w>>>,
+    /// Every column's ticks, always shared: stamping goes through atomics.
+    ticks: &'w [ColumnTicks],
 }
 
 impl std::fmt::Debug for TableView<'_> {
@@ -381,6 +497,7 @@ impl<'w> TableView<'w> {
         Self {
             components: &archetype.components,
             entities: &archetype.entities,
+            ticks: &archetype.ticks,
             columns: archetype
                 .columns
                 .iter()
@@ -394,11 +511,13 @@ impl<'w> TableView<'w> {
             components,
             entities,
             columns,
+            ticks,
             ..
         } = archetype;
         Self {
             components,
             entities,
+            ticks,
             columns: columns
                 .iter_mut()
                 .map(|column| Some(ColumnRef::Unique(&mut **column)))
@@ -412,6 +531,13 @@ impl<'w> TableView<'w> {
 
     pub(crate) fn len(&self) -> usize {
         self.entities.len()
+    }
+
+    /// Component `id`'s ticks, row for row. `None` if the archetype doesn't have it. Ticks are
+    /// always shared, so this works alongside any borrow of the values.
+    pub(crate) fn ticks(&self, id: ComponentId) -> Option<&'w ColumnTicks> {
+        let index = self.components.binary_search(&id).ok()?;
+        Some(&self.ticks[index])
     }
 
     /// Borrows component `T`'s column for reading. `None` if the archetype doesn't have it.

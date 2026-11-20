@@ -40,8 +40,8 @@
 //!   entity. Using it just fails ([`World::get`] returns `None`, [`World::insert`] returns
 //!   [`EcsError::NoSuchEntity`]). A handle is only meaningful in the world that created it: in
 //!   another world it may name an unrelated entity.
-//! - **Mutable access goes through [`Mut`]**, a smart pointer used like `&mut T`, so change
-//!   detection can be added later without changing this API.
+//! - **Mutable access goes through [`Mut`]**, a smart pointer used like `&mut T`. Writing through
+//!   it marks the value changed; fetching it doesn't.
 //! - **Queries are checked for aliasing** when created: `(&mut A, &A)` panics instead of
 //!   producing two references to the same value.
 //! - Programming errors panic with a message that names the type involved. Conditions that
@@ -63,7 +63,15 @@
 //! read and write data through a [`HookWorld`] and queue commands, which run right after the
 //! change that triggered them.
 //!
-//! Relations (`ChildOf` and `Children`) come next, built on hooks. Change detection and dynamic
+//! # Change detection
+//!
+//! Every component value and resource records when it was added and last changed. A system's
+//! [`Added`] and [`Changed`] filters see what happened since its previous run: others' writes,
+//! never its own, and everything on its first run. [`SystemResources::is_added`] and
+//! [`SystemResources::is_changed`] do the same for resources. Queries made on the [`World`]
+//! directly have no previous run, so there everything counts.
+//!
+//! Relations (`ChildOf` and `Children`) live in `oxreal-hierarchy`, built on hooks. Dynamic
 //! (reflection-driven) queries follow.
 //!
 //! [ADR-0014]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0014-ecs-architecture-and-storage.md
@@ -89,7 +97,9 @@ pub use command::Commands;
 pub use component::{Component, ComponentHooks, Hook, HookCause, HookContext};
 pub use entity::Entity;
 pub use hook::HookWorld;
-pub use query::{QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With, Without};
+pub use query::{
+    Added, Changed, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With, Without,
+};
 pub use resource::Resource;
 pub use schedule::{
     Schedule, ScheduleError, Stage, System, SystemContext, SystemResources, SystemWorld,
@@ -104,3 +114,6 @@ mod schedule_tests;
 
 #[cfg(test)]
 mod hook_tests;
+
+#[cfg(test)]
+mod change_tests;

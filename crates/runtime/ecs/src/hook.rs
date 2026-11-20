@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::change::Mut;
+use crate::change::{Mut, Tick};
 use crate::command::{Commands, Source};
 use crate::component::{Component, Components};
 use crate::entity::{Entities, Entity};
@@ -24,6 +24,8 @@ pub struct HookWorld<'w> {
     resources: &'w mut Resources,
     despawning: &'w HashSet<Entity>,
     commands: Commands<'w>,
+    /// The tick writes are stamped with.
+    change_tick: Tick,
 }
 
 impl fmt::Debug for HookWorld<'_> {
@@ -41,6 +43,7 @@ impl<'w> HookWorld<'w> {
             resources: parts.resources,
             despawning: parts.despawning,
             commands: Commands::new(parts.entities, parts.queue, source),
+            change_tick: parts.change_tick,
         }
     }
 
@@ -52,7 +55,13 @@ impl<'w> HookWorld<'w> {
 
     /// `entity`'s component `T`, for writing.
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
-        world::get_component_mut(self.entities, self.components, self.archetypes, entity)
+        world::get_component_mut(
+            self.entities,
+            self.components,
+            self.archetypes,
+            entity,
+            self.change_tick,
+        )
     }
 
     /// Whether `entity` is alive and has a `T`.
@@ -90,7 +99,7 @@ impl<'w> HookWorld<'w> {
 
     /// The resource of type `R`, for writing.
     pub fn resource_mut<R: Resource>(&mut self) -> Option<Mut<'_, R>> {
-        self.resources.get_mut().map(Mut::new)
+        self.resources.get_mut(self.change_tick)
     }
 
     /// Commands for structural changes, applied right after the change that triggered the hook.
