@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
+use crate::type_map::TypeIdMap;
 
 /// A type-erased column of one component type.
 pub(crate) trait AnyColumn: Send + Sync {
@@ -104,7 +105,7 @@ pub struct Archetype {
     columns: Vec<Box<dyn AnyColumn>>,
     entities: Vec<Entity>,
     /// Where inserting a bundle of a given type leads, filled in as it's used.
-    insert_edges: HashMap<TypeId, ArchetypeId>,
+    insert_edges: TypeIdMap<ArchetypeId>,
     /// Whether any of its components has a lifecycle hook, so changes without hooks skip them.
     hooked: bool,
     /// Where removing a component leads, filled in as it's used.
@@ -136,7 +137,7 @@ impl Archetype {
             components,
             membership,
             entities: Vec::new(),
-            insert_edges: HashMap::new(),
+            insert_edges: TypeIdMap::default(),
             hooked,
             remove_edges: HashMap::new(),
         }
@@ -428,6 +429,8 @@ impl<'w> TableView<'w> {
 
     /// Takes component `T`'s column for writing. `None` if the archetype doesn't have it.
     pub(crate) fn take_slice_mut<T: Component>(&mut self, id: ComponentId) -> Option<&'w mut [T]> {
+        // Every query write goes through here, whatever path prepared the query.
+        const { crate::component::assert_mutable::<T>() };
         match self.take(id)? {
             ColumnRef::Unique(column) => Some(typed_mut::<T>(column)),
             ColumnRef::Shared(_) => unreachable!(

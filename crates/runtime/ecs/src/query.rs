@@ -147,6 +147,7 @@ impl<T: Component> sealed::Fetch for &mut T {
     type Iter<'w> = MutIter<'w, T>;
 
     fn declare(access: &mut Access) {
+        const { crate::component::assert_mutable::<T>() };
         access.add::<T>(AccessKind::Write);
     }
 
@@ -249,6 +250,7 @@ impl<T: Component> sealed::Fetch for Option<&mut T> {
     type Iter<'w> = Maybe<MutIter<'w, T>>;
 
     fn declare(access: &mut Access) {
+        const { crate::component::assert_mutable::<T>() };
         access.add::<T>(AccessKind::Write);
     }
 

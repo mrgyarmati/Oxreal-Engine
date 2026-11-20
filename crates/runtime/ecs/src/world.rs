@@ -1,7 +1,7 @@
 //! The world: every entity, component and resource of one simulation.
 
 use std::any::TypeId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
@@ -16,6 +16,7 @@ use crate::hook::HookWorld;
 use crate::query::{self, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
 use crate::resource::{Resource, Resources};
 use crate::storage::{self, ArchetypeId, Archetypes};
+use crate::type_map::TypeIdMap;
 
 /// Why an operation on a world failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -70,7 +71,7 @@ struct BundleInfo {
 
 #[derive(Debug, Default)]
 struct Bundles {
-    index: HashMap<TypeId, usize>,
+    index: TypeIdMap<usize>,
     list: Vec<BundleInfo>,
 }
 
@@ -84,6 +85,8 @@ pub(crate) struct WorldParts<'a> {
     pub(crate) entities: &'a Entities,
     pub(crate) resources: &'a mut Resources,
     pub(crate) queue: &'a mut CommandQueue,
+    /// Entities whose despawn has started, for `HookWorld::is_despawning`.
+    pub(crate) despawning: &'a HashSet<Entity>,
 }
 
 impl Default for World {
@@ -465,6 +468,7 @@ impl World {
             entities: &self.entities,
             resources: &mut self.resources,
             queue: self.queue.get_mut().unwrap_or_else(PoisonError::into_inner),
+            despawning: &self.despawning,
         }
     }
 
@@ -473,8 +477,11 @@ impl World {
         self.queue.get_mut().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether `entity`'s despawn has started. Free when nothing is despawning, the usual case.
-    fn is_despawning(&self, entity: Entity) -> bool {
+    /// Whether `entity`'s despawn has started but not finished: its hooks' commands are
+    /// running. It still counts as alive ([`World::contains`]), and its components can be read but
+    /// not changed. See [`crate::HookWorld::is_despawning`].
+    #[must_use]
+    pub fn is_despawning(&self, entity: Entity) -> bool {
         !self.despawning.is_empty() && self.despawning.contains(&entity)
     }
 
@@ -627,6 +634,7 @@ pub(crate) fn get_component_mut<'a, T: Component>(
     archetypes: &'a mut Archetypes,
     entity: Entity,
 ) -> Option<Mut<'a, T>> {
+    const { crate::component::assert_mutable::<T>() };
     let location = entities.location(entity)?;
     let id = components.id::<T>()?;
     archetypes
