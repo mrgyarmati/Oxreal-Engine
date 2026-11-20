@@ -13,22 +13,35 @@
 //!   ([`WindowEvent::ScaleFactorChanged`]).
 //! - A minimized window can be 0×0. That's a normal state, not an error ([`PhysicalSize::is_zero`]).
 //!
+//! # Input ([ADR-0018])
+//!
+//! - Keyboard and mouse arrive as [`WindowEvent`]s. Keys are [`KeyCode`]s, named by physical
+//!   position, so bindings don't move with the keyboard layout.
+//! - Raw mouse motion, for mouse-look, arrives through [`App::device_event`], only while a window
+//!   has focus.
+//! - [`Window::capture_cursor`] hides the cursor and locks it, or confines it on X11.
+//! - Applications normally feed these events to `oxreal-input`, which keeps the frame's input
+//!   state.
+//!
 //! On Linux, `OXREAL_LINUX_DISPLAY=wayland|x11` forces a display server. Otherwise Wayland is
 //! used when `WAYLAND_DISPLAY` is set, and X11 when it isn't.
 //!
 //! [ADR-0015]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0015-windowing-and-platform-event-loop.md
+//! [ADR-0018]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0018-input-events-state-and-routing.md
 
 mod display;
 mod error;
 mod event;
 mod event_loop;
+mod input;
 mod window;
 
 pub use display::{DISPLAY_OVERRIDE_ENV_VAR, DisplayServer};
 pub use error::WindowError;
 pub use event::{PhysicalSize, WindowEvent};
 pub use event_loop::{App, Context, EventLoop};
-pub use window::{Window, WindowDesc, WindowId};
+pub use input::{ButtonState, DeviceEvent, KeyCode, KeyEvent, MouseButton, ScrollDelta};
+pub use window::{CursorCapture, Window, WindowDesc, WindowId};
 
 /// Re-export of the interop crate whose traits [`Window`] implements.
 pub use raw_window_handle;

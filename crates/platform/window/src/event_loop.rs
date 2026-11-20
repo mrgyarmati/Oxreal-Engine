@@ -4,7 +4,10 @@ use oxreal_diagnostics::info;
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
-use crate::{DisplayServer, Window, WindowDesc, WindowError, WindowEvent, WindowId, event};
+use crate::{
+    DeviceEvent, DisplayServer, Window, WindowDesc, WindowError, WindowEvent, WindowId, event,
+    input,
+};
 
 /// An application driven by the platform event loop.
 ///
@@ -17,6 +20,13 @@ pub trait App {
 
     /// Something happened to one of the application's windows.
     fn window_event(&mut self, ctx: &Context<'_>, window: WindowId, event: WindowEvent);
+
+    /// Raw input from a device rather than a window, such as unaccelerated mouse motion for
+    /// mouse-look (ADR-0018 §1). Delivered only while one of the application's windows has
+    /// focus.
+    fn device_event(&mut self, ctx: &Context<'_>, event: DeviceEvent) {
+        let _ = (ctx, event);
+    }
 
     /// All pending events have been delivered. A good place to drive the next frame, for example
     /// by calling [`Window::request_redraw`].
@@ -103,6 +113,10 @@ impl EventLoop {
     ///   thread or twice.
     pub fn new() -> Result<Self, WindowError> {
         let inner = build_platform_event_loop()?;
+        // ADR-0018 §1: device input (raw mouse motion) only while focused. This is winit's
+        // default, stated so an upgrade can't change it silently. Wayland ignores it, so the
+        // adapter also drops device events while no window has focus.
+        inner.listen_device_events(winit::event_loop::DeviceEvents::WhenFocused);
         let event_loop = Self { inner };
         info!(display_server = ?event_loop.display_server(), "platform event loop created");
         Ok(event_loop)
@@ -121,7 +135,10 @@ impl EventLoop {
     ///
     /// [`WindowError::EventLoop`] if the platform event loop fails.
     pub fn run<A: App>(self, app: A) -> Result<A, WindowError> {
-        let mut adapter = Adapter { app };
+        let mut adapter = Adapter {
+            app,
+            input: input::InputFilter::default(),
+        };
         self.inner
             .run_app(&mut adapter)
             .map_err(|e| WindowError::EventLoop {
@@ -134,6 +151,8 @@ impl EventLoop {
 /// Bridges winit's handler to the engine's [`App`], translating events.
 struct Adapter<A> {
     app: A,
+    /// Evens out per-platform input differences (ADR-0018 §1).
+    input: input::InputFilter<winit::window::WindowId>,
 }
 
 impl<A: App> ApplicationHandler for Adapter<A> {
@@ -147,9 +166,24 @@ impl<A: App> ApplicationHandler for Adapter<A> {
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
-        if let Some(event) = event::from_winit(&event) {
+        if let Some(event) = event::from_winit(&event, window_id, &mut self.input) {
             self.app
                 .window_event(&Context { event_loop }, WindowId(window_id), event);
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        // Wayland delivers raw motion whenever the pointer is over a window, focused or not.
+        if !self.input.device_events_allowed() {
+            return;
+        }
+        if let Some(event) = input::device_event_from_winit(&event) {
+            self.app.device_event(&Context { event_loop }, event);
         }
     }
 

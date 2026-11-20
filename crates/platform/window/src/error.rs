@@ -45,4 +45,10 @@ pub enum WindowError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// The cursor could not be captured or released (ADR-0018 §1).
+    #[error("cursor capture failed: {reason}")]
+    CursorCapture {
+        /// What the platform refused, with its reasons.
+        reason: String,
+    },
 }
