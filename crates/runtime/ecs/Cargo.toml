@@ -1,0 +1,22 @@
+[package]
+name = "oxreal-ecs"
+description = "Oxreal ECS: generational entities, archetype tables, typed queries and resources, with private storage (ADR-0014)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.engine]
+layer = "runtime"
+
+[dependencies]
+thiserror.workspace = true
+
+[[bench]]
+name = "ecs"
+harness = false
+
+[lints]
+workspace = true

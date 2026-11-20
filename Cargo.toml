@@ -8,6 +8,8 @@ members = [
     "crates/foundation/math",
     # platform
     "crates/platform/window",
+    # runtime
+    "crates/runtime/ecs",
     # rendering
     "crates/rendering/rhi",
     "crates/rendering/backends/vulkan",
