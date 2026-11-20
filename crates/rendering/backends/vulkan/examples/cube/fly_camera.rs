@@ -4,7 +4,7 @@
 //! forward, left, back and right, `E` and `Q` move up and down, and the wheel changes speed.
 //! With the button up, the camera ignores input, so keys stay free for other uses.
 //!
-//! This is example code. The gameplay camera arrives with the ECS (ADR-0008).
+//! This is example code. A gameplay camera comes with the gameplay capabilities (ADR-0020).
 
 use oxreal_input::{InputState, KeyCode, MouseButton};
 use oxreal_math::{Quat, Transform, Vec3, axes};

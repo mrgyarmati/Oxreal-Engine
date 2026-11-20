@@ -143,15 +143,22 @@ The design is open (D-02) but must be decided before M2.
   never destroys them.
 - The derived data cache is keyed by (source hash, importer version, settings hash, platform).
 
-### 5.6 Gameplay framework (ADR-0008, proposed)
+### 5.6 Gameplay model (ADR-0020)
 
-- Unreal concepts (Actor, Pawn, Character, Controller, GameMode, GameState, PlayerState,
-  Subsystems, Hud) are **roles built from ECS components**, not classes. There is no `A`/`U` prefix.
-- Two API levels share one data model: plain **systems** for performance-critical code, and
-  per-actor **Behaviours** (`begin_play`/`tick`/`end_play`) for Unreal-style logic. Visual
-  scripts implement the same Behaviour contract.
-- **Actor templates** (prefabs) play the role of Blueprint classes. Instance overrides reuse the
-  ADR-0006 mechanism.
+- **The ECS is the only runtime data model.** There's no runtime `Actor` type, no inheritance
+  hierarchy, and no gameplay state outside components, resources and relations.
+- **Gameplay is capabilities, relations and systems.** Capabilities are data components
+  (`Health`, `Interactable`). Logic lives in scheduled systems with declared access. Links such
+  as possession are relations. Unreal's roles (Pawn, Character, Controller, GameMode,
+  GameState, PlayerState, Subsystems) are compositions of these, never classes, and type names
+  carry no `A`/`U` prefixes.
+- **Per-object logic** has no callbacks. Reactions use **events and observers** (D-22).
+  Stateful, designer-authored logic is a **state machine or graph** that scheduled executor
+  systems run with declared access (D-12).
+- **"Actor" is an authoring term:** an object placed in a level, with a stable object ID.
+  **Actor templates** (prefabs, Unreal's Blueprint classes) are authoring assets whose
+  instances store overrides (ADR-0006). Levels are instantiated into worlds, and Play in Editor
+  runs in its own world, so runtime changes never write back to authored data.
 - Unreal tick groups map to schedule stages (ADR-0014 §5):
   `Input → PrePhysics → DuringPhysics → PostPhysics → PostUpdate → Extract`.
   Gameplay runs in `PrePhysics` by default, like Unreal's default actor tick group.
@@ -176,8 +183,8 @@ Implementation comes later, after the Rust gameplay API stabilizes. The constrai
   binding to Rust types.
 - **C#** uses .NET hosting (embedding the runtime, with NativeAOT as an option) with generated
   P/Invoke bindings. Options are evaluated in the ADR.
-- Foreign-language gameplay code plugs into the same contracts as Rust: Behaviours (ADR-0008),
-  systems with declared component access, and events. No parallel gameplay framework.
+- Foreign-language gameplay code plugs into the same contracts as Rust (ADR-0020 §7): components,
+  systems with declared component access, events, and graph nodes. No parallel gameplay framework.
 
 **Constraints on decisions made before then:**
 1. **Reflection (D-02)** must produce language-neutral type metadata: stable type IDs, field

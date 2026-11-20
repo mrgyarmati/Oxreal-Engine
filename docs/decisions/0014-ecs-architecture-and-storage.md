@@ -717,3 +717,16 @@ amendment and ADR-0005's amendment.
     case);
   - `modify` skipping `on_insert`;
   - `modify` without its panic guard.
+
+## Note (2026-11-20): ADR-0008 superseded by ADR-0020
+
+ADR-0020 supersedes ADR-0008. This ADR's references to ADR-0008 read as follows:
+- **ADR-0008 §3's requirements** (relations, hooks, deferred commands, stages,
+  reflection-driven access, constant-time `has`) stay commitments of this ECS (ADR-0020 §5).
+- **There are no Behaviours.** The first slice's note that "Behaviours (ADR-0008 §2) can be
+  built on this", with an `ActorCtx` driver system, no longer describes planned work.
+  Per-object logic is data that scheduled executor systems run (ADR-0020 §3). The entity-row
+  view and declaration by `ComponentId` noted there may still serve those executors (D-12).
+- **`begin_play`, `end_play` and other gameplay events** are events (ADR-0020 §3). §8's
+  "the detailed event and observer design follows with the gameplay framework" is D-22. §4
+  stands: hooks maintain engine invariants and aren't gameplay events.

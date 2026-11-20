@@ -1,6 +1,6 @@
 # ADR-0008: Unreal-style gameplay framework on top of the engine ECS
 
-- **Status:** Proposed
+- **Status:** Superseded by ADR-0020
 - **Date:** 2026-11-18
 - **Related:** PRD §6–§7, TAD §5.1, ADR-0005 (ECS and hierarchy), ADR-0006 (overrides), ADR-0007 (clean room); open decisions D-01, D-12, D-20
 

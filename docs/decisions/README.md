@@ -22,7 +22,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0005](0005-engine-owned-ecs-and-scene-hierarchy.md) | Engine-owned ECS and separate authoring hierarchy | Accepted |
 | [0006](0006-asset-identity-and-non-destructive-reimport.md) | Stable asset identity and non-destructive reimport | Proposed |
 | [0007](0007-unreal-source-as-ux-reference-only.md) | Unreal Engine source is a UX reference only | Accepted |
-| [0008](0008-unreal-style-gameplay-framework-on-ecs.md) | Unreal-style gameplay framework on top of the engine ECS | Proposed |
+| [0008](0008-unreal-style-gameplay-framework-on-ecs.md) | Unreal-style gameplay framework on top of the engine ECS | Superseded by ADR-0020 |
 | [0009](0009-versioning-and-release-policy.md) | Versioning and release policy | Accepted |
 | [0010](0010-errors-logging-and-profiling.md) | Errors, logging and profiling | Accepted |
 | [0011](0011-math-library-and-coordinate-conventions.md) | Math library and coordinate conventions | Accepted |
@@ -34,6 +34,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0017](0017-rhi-command-api-and-frame-model.md) | RHI command API, dispatch and frame model | Accepted |
 | [0018](0018-input-events-state-and-routing.md) | Input events, input state and routing | Accepted |
 | [0019](0019-player-renderer-and-cooked-shaders.md) | The player application, the M1 renderer and cooked shaders | Accepted |
+| [0020](0020-capability-oriented-gameplay-on-the-ecs.md) | Capability-oriented gameplay on the ECS | Accepted |
 
 Open questions that still need ADRs are tracked in
 [`../development/open-decisions.md`](../development/open-decisions.md).

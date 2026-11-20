@@ -17,8 +17,8 @@ use crate::resource::{Resource, Resources};
 use crate::storage::Archetypes;
 use crate::world::{self, World};
 
-/// When in a frame a system runs: Unreal's tick groups, preceded by input (ADR-0008 §1,
-/// ADR-0014 §5). Each stage ends with a **sync point**, where the commands its systems recorded
+/// When in a frame a system runs: Unreal's tick groups, preceded by input (ADR-0014 §5,
+/// ADR-0020 §5). Each stage ends with a **sync point**, where the commands its systems recorded
 /// are applied.
 ///
 /// More stages may be added (for example a fixed-step sub-stage), so matches need a wildcard

@@ -8,15 +8,17 @@ is our own (ADR-0007).
 
 | Term | Meaning | Not to be confused with |
 |---|---|---|
-| **Entity** | A runtime ECS identity: a 64-bit generational handle with components attached (ADR-0014). An internal, low-level concept. | Actor |
-| **Component** | Plain data attached to an entity. Behaviour lives in systems or behaviors, not in components. | Unreal's ActorComponent, which also carries logic |
-| **System** | A function scheduled by the ECS that queries and updates components in a stage | |
+| **Entity** | A runtime ECS identity: a 64-bit generational handle with components attached (ADR-0014). Runtime-only, never saved. | Actor |
+| **Component** | Plain data attached to an entity. It carries no logic: systems act on it. | Unreal's ActorComponent, which also carries logic |
+| **Capability** | A component (or a few) saying what an entity can do or how it takes part in gameplay: `Health`, `Interactable`, `PlayerControlled` (ADR-0020) | A class or interface |
+| **System** | A function scheduled by the ECS that queries and updates components in a stage, with its access declared. Where gameplay logic lives. | |
 | **Stage** | One step of the frame schedule: `Input → PrePhysics → DuringPhysics → PostPhysics → PostUpdate → Extract`. Unreal's *tick groups*. | |
 | **World** | The ECS container for one simulation: entities, components and resources | Level |
-| **Actor** | An entity placed in a level, with a transform and a place in the hierarchy. What the World Outliner lists (ADR-0008). | Entity, which can be internal and not placed |
-| **Pawn**, **Character**, **Controller**, **PlayerController**, **GameMode**, **GameState**, **PlayerState** | Unreal-equivalent gameplay roles, built from components (ADR-0008) | Classes: they aren't |
-| **Behavior** | Per-actor scripted logic with `begin_play`, `tick` and `end_play` (ADR-0008, spelled `Behaviour` there) | System |
-| **Actor template** | A reusable, overridable actor definition. Unreal's Blueprint class, also known as a prefab. | |
+| **Actor** | An authoring term: an object placed in a level, with a stable object ID, a transform and a place in the hierarchy. What the World Outliner lists. At run time it's an entity; there is no `Actor` type (ADR-0020). | Entity, which can be internal and not placed |
+| **Pawn**, **Character**, **Controller**, **PlayerController**, **GameMode**, **GameState**, **PlayerState** | Unreal-equivalent gameplay roles, built as compositions of capabilities, relations and systems (ADR-0020) | Classes: they aren't |
+| **Event** | A notification that something happened (spawned, damaged, opened), which systems that declared interest react to. Contract in D-22. | Lifecycle hook, which maintains engine invariants |
+| **Graph** | A state machine or visual script that an entity carries as data, run by a scheduled executor system (ADR-0020, D-12). The home of per-object designer logic. | A per-object tick callback, which Oxreal doesn't have |
+| **Actor template** | A reusable, overridable authored definition: components, defaults, children and optionally a graph. Unreal's Blueprint class, also known as a prefab. Instantiating one creates ordinary entities. | A runtime class |
 | **Level** | A saved arrangement of actors that can be loaded into a world | Scene, World |
 | **Scene** | Avoided as a technical term. In user-facing text it means "what's in the viewport". | |
 | **Hierarchy** | Parent/child relationships between actors (`ChildOf`/`Children`), driving transform propagation | |
