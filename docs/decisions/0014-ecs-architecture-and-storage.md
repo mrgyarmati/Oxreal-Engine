@@ -180,3 +180,57 @@ exposed registry.
   built, but its §3 requirements are now commitments of the ECS.
 - Revisit triggers: benchmark results contradicting the storage choice, relation queries needing
   pair-based archetypes, or parallel execution being blocked by the access model.
+
+## Implementation notes (2026-11-20, first slice)
+
+The first slice (`oxreal-ecs`) covers:
+- entities, the component registry and archetype tables;
+- bundles;
+- typed queries with `With`/`Without` filters;
+- resources.
+
+Commands and stages, relations and hooks, and change detection and dynamic queries follow as
+separate slices.
+
+- **The storage has no `unsafe` code.** §10 expected type-erased columns to need `unsafe`. Here
+  each column is a `Vec<T>` behind a small trait object. The trait is used only for whole-table
+  operations: moving or dropping a row, and creating a column. Queries iterate the `Vec<T>`
+  slices directly, so the dynamic dispatch happens once per archetype per query, not once per
+  entity. The crate is `#![forbid(unsafe_code)]`, so the Miri job and the `unsafe` audit that
+  §10 planned have nothing to check yet. They come back if benchmarks justify raw columns,
+  which §1 allows without an API change.
+- **Query and bundle traits are sealed.** Callers name `QueryData`, `QueryFilter` and `Bundle`,
+  but only `oxreal-ecs` implements them, so no internal storage type is public. Custom bundle
+  types (a derive) come with reflection (D-02).
+- **Queries are checked for aliasing when they're created.** A query that writes a component
+  and also accesses it another way panics, naming the component (ADR-0010: a caller bug).
+  Reading one component twice is allowed.
+- **`World::has` is constant time:** each archetype keeps a component bitset (ADR-0008 §3.6).
+- **Handles never alias.** An index whose generation would wrap is retired, never reused.
+- **Tests:**
+  - behaviour tests for every public operation;
+  - drop accounting: each component value is dropped exactly once;
+  - a randomized 20,000-step comparison against a reference model.
+
+  These deliberately broken versions each fail the tests:
+  - a generation that isn't bumped (aliasing handles);
+  - a moved entity whose location isn't updated;
+  - the aliasing check turned off;
+  - an inverted `Without`.
+- **Benchmarks** live in the crate (`cargo bench -p oxreal-ecs`) rather than a top-level
+  `benchmarks/ecs`, so they build and lint with the crate. Transform propagation joins them
+  with relations.
+
+  First results: AMD Ryzen 9 5950X, 64 GB, Windows 11, release build, median of 11 runs,
+  100k entities.
+
+  | Workload | Time |
+  |---|---|
+  | spawn (Position, Velocity) | 6.2 ms |
+  | despawn | 1.0 ms |
+  | iterate (&mut Position, &Velocity), 1 / 10 / 100 archetypes | 0.34 / 0.34 / 0.36 ms |
+  | insert + remove a tag on 10k entities | 1.5 ms |
+  | `get` through 100k shuffled handles | 3.3 ms |
+
+  Iteration cost barely changes from 1 to 100 archetypes. Random access (about 33 ns per
+  lookup) and spawning are the first places to optimize if profiling points there.
