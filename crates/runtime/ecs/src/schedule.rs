@@ -204,6 +204,7 @@ impl System {
     /// Declares that the system writes component `T` (and may read it).
     #[must_use]
     pub fn writes<T: Component>(mut self) -> Self {
+        const { crate::component::assert_mutable::<T>() };
         declare::<T>(&mut self.declared.components, AccessKind::Write);
         self
     }

@@ -28,10 +28,25 @@ pub trait Component: Send + Sync + 'static {
     /// be replaced with `insert` (or removed), so its hooks see every change. Use it for components
     /// whose hooks keep an invariant, such as a relation's link.
     ///
-    /// Writing an immutable component in place is refused at compile time: `get_mut`, and `&mut T`
-    /// or `Option<&mut T>` in a query, don't compile for it.
+    /// Writing an immutable component in place is refused **when the code is built**:
+    /// - `get_mut` (on the world, a system's view or a hook's view);
+    /// - `&mut T` or `Option<&mut T>` in a query;
+    /// - declaring `.writes::<T>()` on a system.
     ///
-    /// ```compile_fail
+    /// Each fails the build with an error that says to use `insert`.
+    ///
+    /// Know the limits of this check:
+    /// - It's a post-monomorphization error: `cargo check`, clippy and rust-analyzer don't report
+    ///   it, only `cargo build` and `cargo test` do.
+    /// - The error points into `oxreal-ecs`. The note under it names the instantiation that leads
+    ///   back to the call.
+    /// - A trait bound would report it at the call site, but needs a derive macro. That comes
+    ///   with reflection (ADR-0014, §3 amendment).
+    ///
+    /// Immutability is **shallow**: interior mutability (`Cell`, `Mutex`, atomics) inside an
+    /// immutable component bypasses its hooks, so link components mustn't contain any.
+    ///
+    /// ```compile_fail,E0080
     /// use oxreal_ecs::{Component, World};
     ///
     /// struct Link(u32);
@@ -41,12 +56,88 @@ pub trait Component: Send + Sync + 'static {
     ///
     /// let mut world = World::new();
     /// let e = world.spawn(Link(1));
-    /// let _ = world.get_mut::<Link>(e); // Doesn't compile: use `insert` instead.
+    /// let _ = world.get_mut::<Link>(e); // Fails the build: use `insert` instead.
     /// ```
     const MUTABLE: bool = true;
 }
 
-/// Refuses, at compile time, to write component `T` in place if it's immutable.
+/// Refuses, when the code is built, to write component `T` in place if it's immutable. Each
+/// write path calls it in an inline `const` block. The doc tests below pin every path to this
+/// error (`E0080`).
+///
+/// ```compile_fail,E0080
+/// use oxreal_ecs::{Component, World};
+/// struct Link;
+/// impl Component for Link {
+///     const MUTABLE: bool = false;
+/// }
+/// let mut world = World::new();
+/// let _ = world.query_mut::<&mut Link>().count();
+/// ```
+///
+/// ```compile_fail,E0080
+/// use oxreal_ecs::{Component, Entity, World};
+/// struct Link;
+/// impl Component for Link {
+///     const MUTABLE: bool = false;
+/// }
+/// let mut world = World::new();
+/// let _ = world.query_mut::<(Entity, Option<&mut Link>)>().count();
+/// ```
+///
+/// ```compile_fail,E0080
+/// use oxreal_ecs::{Component, Entity, System};
+/// struct Link;
+/// impl Component for Link {
+///     const MUTABLE: bool = false;
+/// }
+/// let target = Entity::from_bits(1 << 32).expect("valid bits");
+/// let _ = System::new("writer", move |ctx| {
+///     let _ = ctx.world.get_mut::<Link>(target);
+/// });
+/// ```
+///
+/// ```compile_fail,E0080
+/// use oxreal_ecs::{Component, ComponentHooks, HookContext, HookWorld};
+/// struct Link;
+/// struct Watcher;
+/// impl Component for Link {
+///     const MUTABLE: bool = false;
+/// }
+/// impl Component for Watcher {
+///     const HOOKS: ComponentHooks = ComponentHooks::NONE.on_add(edit);
+/// }
+/// fn edit(world: &mut HookWorld<'_>, context: HookContext) {
+///     let _ = world.get_mut::<Link>(context.entity);
+/// }
+/// fn main() {
+///     oxreal_ecs::World::new().spawn(Watcher);
+/// }
+/// ```
+///
+/// ```compile_fail,E0080
+/// use oxreal_ecs::{Component, System};
+/// struct Link;
+/// impl Component for Link {
+///     const MUTABLE: bool = false;
+/// }
+/// let _ = System::new("writer", |_| {}).writes::<Link>();
+/// ```
+///
+/// Reading and replacing stay possible:
+///
+/// ```
+/// use oxreal_ecs::{Component, World};
+/// struct Link(u32);
+/// impl Component for Link {
+///     const MUTABLE: bool = false;
+/// }
+/// let mut world = World::new();
+/// let e = world.spawn(Link(1));
+/// world.insert(e, Link(2)).expect("alive");
+/// assert_eq!(world.get::<Link>(e).map(|l| l.0), Some(2));
+/// let _ = world.query::<&Link>().count();
+/// ```
 pub(crate) const fn assert_mutable<T: Component>() {
     assert!(
         T::MUTABLE,
@@ -222,6 +313,14 @@ struct ComponentInfo {
     name: &'static str,
     new_column: fn() -> Box<dyn AnyColumn>,
     hooks: ComponentHooks,
+    /// `Component::MUTABLE`, for paths that write by component ID (reflection, the editor's
+    /// Details panel, the C ABI). They must check it at run time and replace immutable
+    /// components with `insert` instead of writing fields (ADR-0014, §3 amendment).
+    #[expect(
+        dead_code,
+        reason = "read by the by-ID access paths, which come with reflection"
+    )]
+    mutable: bool,
 }
 
 /// The component types a world has seen.
@@ -245,6 +344,7 @@ impl Components {
             name: type_name::<T>(),
             new_column: new_column::<T>,
             hooks: T::HOOKS,
+            mutable: T::MUTABLE,
         });
         self.ids.insert(TypeId::of::<T>(), id);
         id

@@ -478,7 +478,8 @@ impl World {
     }
 
     /// Whether `entity`'s despawn has started but not finished: its hooks' commands are
-    /// running, and its components can't change. It still counts as alive ([`World::contains`]).
+    /// running. It still counts as alive ([`World::contains`]), and its components can be read but
+    /// not changed. See [`crate::HookWorld::is_despawning`].
     #[must_use]
     pub fn is_despawning(&self, entity: Entity) -> bool {
         !self.despawning.is_empty() && self.despawning.contains(&entity)

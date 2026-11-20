@@ -68,8 +68,15 @@ impl<'w> HookWorld<'w> {
         self.entities.location(entity).is_some()
     }
 
-    /// Whether `entity`'s despawn has started but not finished. Its components can't change
-    /// any more, so a relation should treat it like a dead entity.
+    /// Whether `entity`'s despawn has started but not finished.
+    ///
+    /// Its components can still be **read**, for example a parent's world transform when its
+    /// children detach. They can't change: `insert` is refused, and `remove` and `despawn` do
+    /// nothing. So a relation shouldn't try to update it, for example by editing a despawning
+    /// parent's list of children.
+    ///
+    /// It's only ever `true` while hooks and their commands run. An entity whose components
+    /// have no hooks is removed at once and is never reported as despawning.
     #[must_use]
     pub fn is_despawning(&self, entity: Entity) -> bool {
         !self.despawning.is_empty() && self.despawning.contains(&entity)

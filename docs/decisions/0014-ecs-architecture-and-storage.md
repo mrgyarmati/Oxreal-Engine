@@ -94,15 +94,26 @@ exposed registry.
 - The authoring hierarchy (ADR-0005) is built on the `ChildOf`/`Children` relation, with ordered
   children. Transform propagation is a scheduled system, as before.
 
-#### Amendment (2026-11-20, immutable components)
+#### Amendment (2026-11-20, immutable components and per-link despawn policy)
 
 Relations stay consistent only if every change to their components passes through hooks.
 Writing such a component in place (`get_mut`, `&mut T` in a query) runs no hook. So:
 
-1. **A component type can be immutable** (`Component::MUTABLE = false`). It can be read,
-   inserted (which replaces it and runs `on_replace` and `on_insert`) and removed, but never
-   written in place. The ECS refuses in-place writes **at compile time**: `get_mut`, `&mut T`
-   and `Option<&mut T>` don't compile for an immutable type.
+1. **A component type can be immutable** (`Component::MUTABLE = false`).
+   - It can be read, inserted (which replaces it and runs `on_replace` and `on_insert`) and
+     removed, but never written in place.
+   - Typed Rust code that writes one in place fails **when it's built**. This covers
+     `get_mut`, `&mut T` and `Option<&mut T>` query data, and `System::writes`. The check is
+     an inline `const` assertion: a post-monomorphization error.
+   - Its limits: `cargo check` and rust-analyzer don't report it, and it points into
+     `oxreal-ecs` rather than at the call. It moves to a trait bound on the write paths, with
+     the error at the call site, once a `Component` derive exists (with reflection, D-02).
+     Stable Rust has no defaulted associated types, so a bound needs a derive to supply them.
+   - **Paths that write by component ID** (reflection, the editor's Details panel, the C ABI)
+     must check the registry's mutability flag at run time. They turn an edit of an immutable
+     component into an `insert` that replaces it, never a field write.
+   - **Immutability is shallow.** Interior mutability (`Cell`, `Mutex`, atomics) inside an
+     immutable component bypasses its hooks, so link components mustn't contain any.
 2. **A relation's link component is immutable**, for example `ChildOf`. Its inverse (for
    example `Children`) is read-only outside the crate that owns it: no public constructor or
    mutator.
@@ -110,6 +121,21 @@ Writing such a component in place (`get_mut`, `&mut T` in a query) runs no hook.
    the hierarchy's `LocalTransform` does with `WorldTransform`. This costs an extra archetype
    move per spawn. A declared "required components" mechanism that avoids the move is added
    when profiling or ergonomics call for it.
+4. **Despawn policy is per link** (decided 2026-11-20). This refines §3's "per-relation
+   policy":
+   - Each link chooses what happens to it when its target is despawned. The relation sets the
+     default.
+   - The policy is a field of the **immutable link component**, so changing it goes through
+     `insert` and the hooks.
+   - **For `ChildOf`, the default is to detach and keep the child's world placement**, as
+     Unreal detaches attached actors when their parent is destroyed. **Despawning with the
+     parent is opt-in per link**, for the parts of one object, such as a character's weapon.
+     Unreal makes users script that by hand.
+   - Where §3 and the §4 amendment (item 5) say "children before parents", they describe links
+     whose policy despawns the child.
+   - While a parent is despawning, its components can still be read, for example the world
+     transform its detaching children keep (`is_despawning`). They can't be changed.
+
 
 ### 4. Lifecycle hooks
 - Per-component-type hooks: `on_add`, `on_insert`, `on_replace` and `on_remove`. They run
@@ -494,12 +520,22 @@ The decisions are in §4's amendment. These notes cover how they're implemented.
 
 ## Implementation notes (2026-11-20, foundations for relations)
 
-- **Immutable components** (§3 amendment): `Component::MUTABLE` defaults to `true`. The write
-  paths call a `const fn` assertion in an inline `const` block, which the compiler evaluates
-  when it instantiates the generic code: `get_mut` on the world, the system view and the hook
-  view, and the `&mut T` and `Option<&mut T>` query data. So misuse is a compile error that
-  names the rule ("replace it with `insert`, so its hooks run"), not a runtime panic. A
-  `compile_fail` doc test, plus a manual check of all three paths, shows the error is this one.
+- **Immutable components** (§3 amendment, item 1): `Component::MUTABLE` defaults to `true`.
+  - **The guard:** every write path calls a `const fn` assertion in an inline `const` block,
+    so the build fails with a message naming the rule ("replace it with `insert`, so its hooks
+    run"). The paths are:
+    - `get_mut` on the world, the system view and the hook view;
+    - `System::writes`;
+    - `TableView::take_slice_mut`, which every query write goes through, whatever prepared the
+      query.
+  - **Regression tests:** six `compile_fail,E0080` doc tests pin every path to this error
+    code: world, system and hook `get_mut`; `&mut T`; `Option<&mut T>` in a tuple; and
+    `System::writes`. A further doc test shows that reading and replacing still work.
+  - **The registry records each component's mutability** for the by-ID paths that will need
+    it.
+  - **What the review measured:** `cargo check`, clippy and rust-analyzer don't report the
+    error, and neither does a build in which the offending function is never used. So this is
+    a build-time guard, not an editor diagnostic, until a derive allows a trait bound.
 - **`World::is_despawning` and `HookWorld::is_despawning`** report an entity whose despawn has
   started (§4 amendment, item 5). Such an entity still counts as alive, so relations need this
   to treat it as gone.
