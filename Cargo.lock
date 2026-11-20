@@ -1058,6 +1058,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxreal-input"
+version = "0.1.0-dev"
+dependencies = [
+ "oxreal-math",
+ "oxreal-window",
+]
+
+[[package]]
 name = "oxreal-math"
 version = "0.1.0-dev"
 dependencies = [
@@ -1082,6 +1090,7 @@ dependencies = [
  "ash-window",
  "gpu-allocator",
  "oxreal-diagnostics",
+ "oxreal-input",
  "oxreal-math",
  "oxreal-rhi",
  "oxreal-shader-compiler",

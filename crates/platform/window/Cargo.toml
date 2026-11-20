@@ -1,6 +1,6 @@
 [package]
 name = "oxreal-window"
-description = "Oxreal windows and the platform event loop: winit behind an engine-owned App trait and event model (ADR-0015)."
+description = "Oxreal windows, the platform event loop and device input: winit behind an engine-owned App trait and event model (ADR-0015, ADR-0018)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

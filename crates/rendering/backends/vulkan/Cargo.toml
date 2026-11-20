@@ -20,10 +20,16 @@ oxreal-rhi.workspace = true
 raw-window-handle.workspace = true
 
 [dev-dependencies]
+oxreal-input.workspace = true
 oxreal-math.workspace = true
 oxreal-shader-compiler.workspace = true
 oxreal-window.workspace = true
 oxreal-diagnostics = { workspace = true, features = ["application"] }
+
+# The cube example has unit tests (its fly camera), which `cargo test` runs.
+[[example]]
+name = "cube"
+test = true
 
 [lints]
 workspace = true

@@ -11,6 +11,8 @@ members = [
     # rendering
     "crates/rendering/rhi",
     "crates/rendering/backends/vulkan",
+    # systems
+    "crates/systems/input",
     # tools
     "crates/tools/shader-compiler",
     "tools/xtask",
@@ -77,6 +79,7 @@ tracy-client = { version = "0.19.0", default-features = false, features = [
 # Workspace crates. Each one's layer is checked by `cargo xtask layers`.
 oxreal-diagnostics = { path = "crates/foundation/diagnostics" }
 oxreal-math = { path = "crates/foundation/math" }
+oxreal-input = { path = "crates/systems/input" }
 oxreal-shader-compiler = { path = "crates/tools/shader-compiler" }
 oxreal-rhi = { path = "crates/rendering/rhi" }
 oxreal-window = { path = "crates/platform/window" }
