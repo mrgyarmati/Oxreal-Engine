@@ -196,7 +196,17 @@ impl Renderer {
             return Err(RenderError::TooManyMeshes);
         }
         let gpu = self.upload(mesh, index_count)?;
-        self.meshes.insert(gpu).ok_or(RenderError::TooManyMeshes)
+        // `is_full` was checked above, so there's room; if not, the buffers go back rather than
+        // leak.
+        match self.meshes.insert(gpu) {
+            Ok(handle) => Ok(handle),
+            Err(gpu) => {
+                if let Err(e) = destroy_mesh(self.device.as_ref(), &gpu) {
+                    warn!(error = %e, "destroying a mesh that didn't fit failed");
+                }
+                Err(RenderError::TooManyMeshes)
+            }
+        }
     }
 
     fn upload(&self, mesh: &MeshData, index_count: u32) -> Result<GpuMesh, RenderError> {

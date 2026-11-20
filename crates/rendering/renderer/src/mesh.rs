@@ -223,6 +223,9 @@ impl MeshHandle {
     /// A handle that never names a mesh, in any renderer: its slot index is reserved and never
     /// issued. Draws with it are skipped and counted like any stale handle. Use it where a
     /// handle is needed before a mesh exists, such as in tests that run without a GPU.
+    ///
+    /// It isn't a "no mesh" value: every draw with it is skipped, counted and logged. For a
+    /// mesh that may be absent, use `Option<MeshHandle>`.
     pub const DANGLING: Self = Self {
         index: RESERVED_INDEX,
         generation: 0,
@@ -250,31 +253,58 @@ struct Slot {
 }
 
 /// Registered meshes, by generational handle.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct MeshPool {
     slots: Vec<Slot>,
     free: Vec<u32>,
+    /// How many slots may exist: indices `0..slot_limit` are issued. At most
+    /// [`RESERVED_INDEX`], so the reserved index never is. Tests lower it to reach the limit.
+    slot_limit: u32,
+}
+
+impl Default for MeshPool {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+            slot_limit: RESERVED_INDEX,
+        }
+    }
 }
 
 impl MeshPool {
-    /// Stores `mesh`, returning its handle, or `None` if every slot is taken.
-    pub(crate) fn insert(&mut self, mesh: GpuMesh) -> Option<MeshHandle> {
+    /// A pool that issues only indices `0..slot_limit`, to test what happens at the limit.
+    #[cfg(test)]
+    fn with_slot_limit(slot_limit: u32) -> Self {
+        // Every `u32` is at most `RESERVED_INDEX` (`u32::MAX`), so the reserved index stays
+        // unissued whatever the limit.
+        Self {
+            slot_limit,
+            ..Self::default()
+        }
+    }
+
+    /// Stores `mesh`, returning its handle, or gives `mesh` back if every slot is taken.
+    pub(crate) fn insert(&mut self, mesh: GpuMesh) -> Result<MeshHandle, GpuMesh> {
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.mesh = Some(mesh);
-            return Some(MeshHandle {
+            return Ok(MeshHandle {
                 index,
                 generation: slot.generation,
             });
         }
-        let index = u32::try_from(self.slots.len())
+        let Some(index) = u32::try_from(self.slots.len())
             .ok()
-            .filter(|&index| index != RESERVED_INDEX)?;
+            .filter(|&index| index < self.slot_limit)
+        else {
+            return Err(mesh);
+        };
         self.slots.push(Slot {
             generation: 0,
             mesh: Some(mesh),
         });
-        Some(MeshHandle {
+        Ok(MeshHandle {
             index,
             generation: 0,
         })
@@ -315,10 +345,11 @@ impl MeshPool {
         handles.into_iter().filter_map(|h| self.remove(h)).collect()
     }
 
-    /// Whether no more meshes fit: every slot index but the reserved one is taken and none is
-    /// free.
+    /// Whether no more meshes fit: every slot that may exist does, and none is free. It's true
+    /// exactly when [`Self::insert`] would return `None`.
     pub(crate) fn is_full(&self) -> bool {
-        self.free.is_empty() && self.slots.len() >= RESERVED_INDEX as usize
+        self.free.is_empty()
+            && usize::try_from(self.slot_limit).is_ok_and(|limit| self.slots.len() >= limit)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -427,6 +458,45 @@ mod tests {
         );
         assert_eq!(pool.get(second).unwrap().address, 3);
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn the_pool_is_full_exactly_when_insert_fails() {
+        let mut pool = MeshPool::with_slot_limit(3);
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            assert!(!pool.is_full());
+            handles.push(pool.insert(gpu_mesh(i)).expect("below the limit"));
+        }
+        assert!(pool.is_full());
+        assert!(pool.insert(gpu_mesh(9)).is_err(), "full means full");
+        assert!(
+            handles.iter().all(|h| h.index < 3),
+            "no index past the limit"
+        );
+
+        // A freed slot makes room again.
+        pool.remove(handles[1]).unwrap();
+        assert!(!pool.is_full());
+        handles[1] = pool.insert(gpu_mesh(10)).expect("the freed slot");
+        assert!(pool.is_full());
+
+        // A retired slot (its generation would wrap) doesn't make room.
+        pool.slots[0].generation = u32::MAX;
+        let last = MeshHandle {
+            index: 0,
+            generation: u32::MAX,
+        };
+        pool.remove(last).unwrap();
+        assert!(pool.is_full(), "the retired slot isn't free");
+        assert!(pool.insert(gpu_mesh(11)).is_err());
+    }
+
+    #[test]
+    fn the_default_limit_leaves_the_reserved_index_unissued() {
+        let pool = MeshPool::default();
+        assert_eq!(pool.slot_limit, RESERVED_INDEX);
+        assert_eq!(MeshHandle::DANGLING.index, RESERVED_INDEX);
     }
 
     #[test]

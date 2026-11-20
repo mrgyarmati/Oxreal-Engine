@@ -9,8 +9,9 @@
 //!   registered mesh. Both are placed by the entity's [`WorldTransform`], so give such entities a
 //!   [`LocalTransform`](oxreal_hierarchy::LocalTransform). They can be children like any other
 //!   entity.
-//! - **Resource:** [`ExtractedWorld`], the [`RenderWorld`] the application hands to
-//!   [`oxreal_renderer::Renderer::render`]. The application inserts it, and sets its background.
+//! - **Resource:** [`ExtractedWorld`], which holds the [`RenderWorld`] the application hands to
+//!   [`oxreal_renderer::Renderer::render`]. The application inserts it and chooses the
+//!   background; extraction fills in the rest.
 //! - **System:** [`extract_render_world`], in [`Stage::Extract`], after transform propagation
 //!   ([`Stage::PostUpdate`]). [`add_systems`] adds it.
 //!
@@ -19,15 +20,17 @@
 use oxreal_diagnostics::{info, warn};
 use oxreal_ecs::{Component, Entity, Resource, Schedule, Stage, System};
 use oxreal_hierarchy::WorldTransform;
-use oxreal_math::Transform;
+use oxreal_math::{LinearRgba, Transform};
 use oxreal_renderer::{DrawItem, MeshHandle, Projection, RenderWorld};
 
 /// Makes an entity a camera: the world is seen from its [`WorldTransform`], looking along its
 /// local −Z (ADR-0011). Its scale is ignored, since cameras are rigid.
 ///
-/// When several entities have one, the one with the smallest [`Entity`] is used, so the choice
-/// stays the same from frame to frame. Choosing between cameras deliberately comes with the
-/// gameplay camera (ADR-0020).
+/// A camera is **usable** when its projection is valid and its world transform has an
+/// orientation (a zero scale has none). When several are usable, extraction picks one, and keeps
+/// picking the same one while the set of cameras doesn't change;
+/// [`ExtractedWorld::camera_entity`] says which. Choosing between cameras deliberately comes with
+/// the gameplay camera (ADR-0020).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Camera {
@@ -66,27 +69,48 @@ impl MeshInstance {
 
 impl Component for MeshInstance {}
 
-/// What the renderer draws this frame, filled by [`extract_render_world`] in
-/// [`Stage::Extract`]. The renderer reads only this, never the ECS world (brief rule 3).
+/// What the renderer draws this frame. The renderer reads only this, never the ECS world (brief
+/// rule 3).
+///
+/// The application owns the background ([`Self::set_background`]). [`extract_render_world`]
+/// owns the rest: the camera and the draws, rewritten every frame. Without a usable camera, the
+/// render world has the default camera and no draws, so the target is only cleared.
 #[derive(Debug, Clone, PartialEq, Default)]
-#[non_exhaustive]
 pub struct ExtractedWorld {
-    /// The frame to draw. Extraction sets its camera and draws. The application sets its
-    /// background, which extraction leaves alone.
-    pub render_world: RenderWorld,
-    /// The entity the frame is seen from. `None` when no entity has a usable [`Camera`]; then
-    /// nothing is drawn, and the target is only cleared.
-    pub camera: Option<Entity>,
+    render_world: RenderWorld,
+    camera_entity: Option<Entity>,
 }
 
 impl ExtractedWorld {
-    /// An empty extraction that clears to `render_world`'s background.
+    /// An extraction that clears to `background` until the first frame is extracted.
     #[must_use]
-    pub fn new(render_world: RenderWorld) -> Self {
-        Self {
-            render_world,
-            camera: None,
-        }
+    pub fn new(background: LinearRgba) -> Self {
+        let mut extracted = Self::default();
+        extracted.set_background(background);
+        extracted
+    }
+
+    /// The frame to draw: hand it to [`oxreal_renderer::Renderer::render`].
+    #[must_use]
+    pub fn render_world(&self) -> &RenderWorld {
+        &self.render_world
+    }
+
+    /// The camera entity the frame is seen from, or `None` when no camera is usable.
+    #[must_use]
+    pub fn camera_entity(&self) -> Option<Entity> {
+        self.camera_entity
+    }
+
+    /// The color the target is cleared to, linear.
+    #[must_use]
+    pub fn background(&self) -> LinearRgba {
+        self.render_world.background
+    }
+
+    /// Sets the color the target is cleared to, linear (ADR-0011 §5).
+    pub fn set_background(&mut self, background: LinearRgba) {
+        self.render_world.background = background;
     }
 }
 
@@ -100,49 +124,41 @@ pub fn add_systems(schedule: &mut Schedule) {
 
 /// The system that fills [`ExtractedWorld`] from the cameras and mesh instances.
 ///
-/// - **Camera:** the [`Camera`] entity with the smallest [`Entity`] among those whose world
-///   transform has an orientation (a zero scale has none). It's logged when the number of
-///   cameras changes, and warned about when there is none.
+/// - **Camera:** one usable [`Camera`] (see there), the same one every frame while the set of
+///   cameras doesn't change. Changes in the number of cameras or in the one chosen are logged,
+///   and the lack of a usable camera is warned about, each once.
 /// - **Draws:** one per [`MeshInstance`] with a [`WorldTransform`], with its world matrix. With
-///   no camera there are none.
+///   no usable camera there are none.
 ///
 /// If the [`ExtractedWorld`] resource is missing, it does nothing and warns once.
 #[must_use]
 pub fn extract_render_world() -> System {
-    // What was last reported, so the log says each change once rather than every frame.
-    let mut reported_cameras: Option<usize> = None;
+    // What was last reported, so each change is logged once rather than every frame.
+    let mut reported: Option<(usize, Option<Entity>)> = None;
     let mut reported_missing = false;
     System::new("extract render world", move |ctx| {
         let mut cameras = 0_usize;
-        let mut chosen: Option<(Entity, Camera, Transform)> = None;
+        // The usable camera with the smallest `Entity`: arbitrary, but the same every frame
+        // while the cameras don't change.
+        let mut chosen: Option<(Entity, Projection, Transform)> = None;
         for (entity, camera, world) in ctx.world.query::<(Entity, &Camera, &WorldTransform)>() {
             cameras += 1;
-            let Some(placement) = camera_placement(world) else {
+            let Some(placement) = usable_placement(camera, world) else {
                 continue;
             };
             if chosen.as_ref().is_none_or(|(best, _, _)| entity < *best) {
-                chosen = Some((entity, *camera, placement));
+                chosen = Some((entity, camera.projection, placement));
             }
         }
-        if reported_cameras != Some(cameras) {
-            match (cameras, chosen.as_ref()) {
+        let chosen_entity = chosen.as_ref().map(|(entity, _, _)| *entity);
+        if reported != Some((cameras, chosen_entity)) {
+            match (cameras, chosen_entity) {
                 (_, None) => warn!(cameras, "no usable camera: nothing is drawn"),
                 (1, Some(_)) => {}
-                (_, Some((entity, _, _))) => {
-                    info!(cameras, using = ?entity, "several cameras: using the first");
-                }
+                (_, Some(entity)) => info!(cameras, using = ?entity, "several cameras"),
             }
-            reported_cameras = Some(cameras);
+            reported = Some((cameras, chosen_entity));
         }
-
-        let draws: Vec<DrawItem> = if chosen.is_some() {
-            ctx.world
-                .query::<(&MeshInstance, &WorldTransform)>()
-                .map(|(instance, world)| DrawItem::new(instance.mesh, world.matrix()))
-                .collect()
-        } else {
-            Vec::new()
-        };
 
         let Some(mut extracted) = ctx.resources.get_mut::<ExtractedWorld>() else {
             if !reported_missing {
@@ -152,12 +168,21 @@ pub fn extract_render_world() -> System {
             return;
         };
         reported_missing = false;
-        extracted.camera = chosen.as_ref().map(|(entity, _, _)| *entity);
-        if let Some((_, camera, placement)) = chosen {
-            extracted.render_world.camera =
-                oxreal_renderer::Camera::new(placement, camera.projection);
+        extracted.camera_entity = chosen_entity;
+        extracted.render_world.camera = chosen
+            .map_or_else(Default::default, |(_, projection, placement)| {
+                oxreal_renderer::Camera::new(placement, projection)
+            });
+        // Refilled in place, so the list's memory is reused from frame to frame.
+        let draws = &mut extracted.render_world.draws;
+        draws.clear();
+        if chosen_entity.is_some() {
+            draws.extend(
+                ctx.world
+                    .query::<(&MeshInstance, &WorldTransform)>()
+                    .map(|(instance, world)| DrawItem::new(instance.mesh, world.matrix())),
+            );
         }
-        extracted.render_world.draws = draws;
     })
     .reads::<Camera>()
     .reads::<MeshInstance>()
@@ -165,9 +190,11 @@ pub fn extract_render_world() -> System {
     .writes_resource::<ExtractedWorld>()
 }
 
-/// A camera's rigid placement: its world transform's rotation and translation, without scale.
-/// `None` if the transform has no orientation (a zero scale).
-fn camera_placement(world: &WorldTransform) -> Option<Transform> {
+/// A usable camera's rigid placement: its world transform's rotation and translation, without
+/// scale. `None` if the projection is invalid or the transform has no orientation.
+fn usable_placement(camera: &Camera, world: &WorldTransform) -> Option<Transform> {
+    // Any positive aspect ratio tells whether the settings make a projection.
+    camera.projection.clip_from_view(1.0).ok()?;
     let (_, rotation, translation) = world.affine().to_scale_rotation_translation();
     (rotation.is_finite() && translation.is_finite())
         .then(|| Transform::from_translation(translation).with_rotation(rotation.normalize()))
@@ -177,7 +204,7 @@ fn camera_placement(world: &WorldTransform) -> Option<Transform> {
 mod tests {
     use oxreal_ecs::World;
     use oxreal_hierarchy::{ChildOf, LocalTransform};
-    use oxreal_math::{LinearRgba, Quat, Vec3};
+    use oxreal_math::{Quat, Vec3};
 
     use super::*;
 
@@ -221,7 +248,7 @@ mod tests {
         ));
         let extracted = extract(&mut world);
         let mut origins: Vec<Vec3> = extracted
-            .render_world
+            .render_world()
             .draws
             .iter()
             .map(|draw| draw.object_to_world.w_axis.truncate())
@@ -233,7 +260,7 @@ mod tests {
         );
         assert!(
             extracted
-                .render_world
+                .render_world()
                 .draws
                 .iter()
                 .all(|d| d.mesh == MeshHandle::DANGLING)
@@ -259,8 +286,8 @@ mod tests {
             ChildOf::new(rig),
         ));
         let extracted = extract(&mut world);
-        assert_eq!(extracted.camera, Some(camera));
-        let seen = extracted.render_world.camera;
+        assert_eq!(extracted.camera_entity(), Some(camera));
+        let seen = extracted.render_world().camera;
         assert_eq!(seen.projection, projection);
         // The parent's scale moves the child's offset, but the camera itself isn't scaled.
         assert!(
@@ -276,43 +303,71 @@ mod tests {
     fn without_a_camera_nothing_is_drawn_and_the_background_stays() {
         let mut world = World::new();
         let background = LinearRgba::new(0.1, 0.2, 0.3, 1.0);
-        let mut render_world = RenderWorld::default();
-        render_world.background = background;
-        world.insert_resource(ExtractedWorld::new(render_world));
+        world.insert_resource(ExtractedWorld::new(background));
         world.spawn((at(Vec3::ZERO), MeshInstance::new(MeshHandle::DANGLING)));
         let extracted = extract(&mut world);
-        assert_eq!(extracted.camera, None);
-        assert!(extracted.render_world.draws.is_empty());
-        assert_eq!(extracted.render_world.background, background);
+        assert_eq!(extracted.camera_entity(), None);
+        assert!(extracted.render_world().draws.is_empty());
+        assert_eq!(extracted.background(), background);
     }
 
     #[test]
-    fn the_smallest_entity_wins_among_several_cameras() {
+    fn losing_the_camera_resets_the_render_worlds_camera() {
         let mut world = world();
-        let cameras: Vec<Entity> = (0_u8..3)
-            .map(|i| world.spawn((Camera::default(), at(Vec3::splat(f32::from(i))))))
-            .collect();
-        let smallest = cameras.iter().copied().min();
-        assert_eq!(extract(&mut world).camera, smallest);
-        // The same choice every frame.
-        assert_eq!(extract(&mut world).camera, smallest);
+        let camera = world.spawn((Camera::default(), at(Vec3::new(0.0, 0.0, 7.0))));
+        world.spawn((at(Vec3::ZERO), MeshInstance::new(MeshHandle::DANGLING)));
+        let before = extract(&mut world);
+        assert_eq!(before.render_world().draws.len(), 1);
+        assert_ne!(
+            before.render_world().camera,
+            oxreal_renderer::Camera::default()
+        );
+
+        assert!(world.despawn(camera), "the camera was alive");
+        let after = extract(&mut world);
+        assert_eq!(after.camera_entity(), None);
+        assert_eq!(
+            after.render_world().camera,
+            oxreal_renderer::Camera::default(),
+            "no camera from an earlier frame is left behind"
+        );
+        assert!(after.render_world().draws.is_empty());
     }
 
     #[test]
-    fn a_camera_with_zero_scale_has_no_orientation_and_is_passed_over() {
+    fn the_choice_among_several_cameras_is_stable() {
+        let mut world = world();
+        for i in 0_u8..3 {
+            world.spawn((Camera::default(), at(Vec3::splat(f32::from(i)))));
+        }
+        let first = extract(&mut world).camera_entity();
+        assert!(first.is_some());
+        for _ in 0..3 {
+            assert_eq!(extract(&mut world).camera_entity(), first);
+        }
+    }
+
+    #[test]
+    fn unusable_cameras_are_passed_over() {
         let mut world = world();
         let flattened = world.spawn((
             Camera::default(),
             LocalTransform(Transform::from_translation(Vec3::ONE).with_scale(Vec3::ZERO)),
         ));
-        let extracted = extract(&mut world);
-        assert_eq!(extracted.camera, None);
+        let no_projection = world.spawn((
+            Camera::new(Projection::Perspective {
+                vertical_fov: 0.0,
+                near: 0.1,
+            }),
+            at(Vec3::ZERO),
+        ));
+        assert_eq!(extract(&mut world).camera_entity(), None);
         let usable = world.spawn((Camera::default(), at(Vec3::ZERO)));
         assert!(
-            flattened < usable,
-            "the unusable one would win if it counted"
+            flattened < usable && no_projection < usable,
+            "the unusable ones would be chosen if they counted"
         );
-        assert_eq!(extract(&mut world).camera, Some(usable));
+        assert_eq!(extract(&mut world).camera_entity(), Some(usable));
     }
 
     #[test]
@@ -320,7 +375,7 @@ mod tests {
         let mut world = world();
         world.spawn((Camera::default(), at(Vec3::ZERO)));
         world.spawn(MeshInstance::new(MeshHandle::DANGLING));
-        assert!(extract(&mut world).render_world.draws.is_empty());
+        assert!(extract(&mut world).render_world().draws.is_empty());
     }
 
     #[test]

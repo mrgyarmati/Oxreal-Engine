@@ -45,9 +45,12 @@ cargo xtask ci     # fmt check + clippy + tests + rustdoc + layer check
 Run the player, the game executable, with its demo scene:
 
 ```sh
-cargo xtask cook-shaders      # after a fresh checkout or shader changes (needs spirv-val)
+cargo xtask cook-shaders      # after a fresh checkout or shader changes
 cargo run -p oxreal-player    # hold the right mouse button to look; W A S D, E / Q to move
 ```
+
+Cooking needs `spirv-val` (Windows: the Vulkan SDK; Linux: `spirv-tools`), and release builds
+cook with `--profile release`. See [setup](docs/development/setup.md#vulkan-needed-from-m1) for both.
 
 See [setup](docs/development/setup.md) for platform prerequisites.
 

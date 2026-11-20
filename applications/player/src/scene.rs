@@ -20,7 +20,7 @@ use oxreal_hierarchy::{ChildOf, LocalTransform};
 use oxreal_input::InputState;
 use oxreal_math::{LinearRgba, Quat, Transform, Vec3};
 use oxreal_render_bridge::{Camera, ExtractedWorld, MeshInstance};
-use oxreal_renderer::{MeshHandle, RenderWorld};
+use oxreal_renderer::MeshHandle;
 
 use crate::fly_camera::FlyCamera;
 
@@ -47,9 +47,7 @@ pub(crate) fn world(cube: MeshHandle) -> World {
     let mut world = World::new();
     world.insert_resource(InputState::new());
     world.insert_resource(FrameTime(0.0));
-    let mut render_world = RenderWorld::default();
-    render_world.background = BACKGROUND;
-    world.insert_resource(ExtractedWorld::new(render_world));
+    world.insert_resource(ExtractedWorld::new(BACKGROUND));
 
     // Above and behind the cube, looking at it, at walking pace.
     let fly = FlyCamera::looking_at(Vec3::new(0.0, 1.2, 4.0), Vec3::ZERO, 3.0);
@@ -105,6 +103,8 @@ pub(crate) fn schedule() -> Schedule {
                     .query_mut::<(&mut FlyCamera, &mut LocalTransform)>()
                 {
                     camera.update(input, seconds);
+                    // The fly camera is authoritative: it overwrites the entity's placement every
+                    // frame, so set its position through `FlyCamera`, not `LocalTransform`.
                     local.0 = camera.transform();
                 }
             })
@@ -168,14 +168,14 @@ mod tests {
         let mut schedule = schedule();
         schedule.validate().expect("the systems' order is valid");
         let extracted = frame(&mut world, &mut schedule, 0.0);
-        assert_eq!(extracted.render_world.draws.len(), 1 + 2 + 81 + 4);
-        assert!(extracted.camera.is_some());
+        assert_eq!(extracted.render_world().draws.len(), 1 + 2 + 81 + 4);
+        assert!(extracted.camera_entity().is_some());
         assert_eq!(
-            extracted.render_world.camera.transform.translation,
+            extracted.render_world().camera.transform.translation,
             Vec3::new(0.0, 1.2, 4.0),
             "the camera starts where it was placed"
         );
-        assert_eq!(extracted.render_world.background, BACKGROUND);
+        assert_eq!(extracted.background(), BACKGROUND);
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
         let mut world = world(MeshHandle::DANGLING);
         let mut schedule = schedule();
         let before = frame(&mut world, &mut schedule, 0.0)
-            .render_world
+            .render_world()
             .camera
             .transform;
         if let Some(mut input) = world.resource_mut::<InputState>() {
@@ -198,7 +198,7 @@ mod tests {
             }));
         }
         let after = frame(&mut world, &mut schedule, 0.5)
-            .render_world
+            .render_world()
             .camera
             .transform;
         // 3 m/s for half a second, toward the cube.
@@ -248,7 +248,7 @@ mod tests {
         let extracted = frame(&mut world, &mut schedule, 0.0);
         assert!(
             extracted
-                .render_world
+                .render_world()
                 .draws
                 .iter()
                 .all(|draw| draw.mesh == MeshHandle::DANGLING)

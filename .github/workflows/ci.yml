@@ -258,6 +258,7 @@ jobs:
       # which loads them from `cooked/` next to itself and fails on any validation error or if
       # frames stop arriving.
       - name: Cook shaders
+        timeout-minutes: 10
         run: cargo xtask cook-shaders
       - name: player (Lavapipe, X11 under Xvfb)
         timeout-minutes: 10

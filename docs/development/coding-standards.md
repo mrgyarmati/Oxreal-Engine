@@ -110,6 +110,7 @@ listed here.
 | `OXREAL_VULKAN_SYNC_VALIDATION` | `oxreal-rhi-vulkan` | `1` adds synchronization validation (needs validation on; device creation fails if unavailable). Set in CI | Implemented |
 | `OXREAL_SLANGC` | `oxreal-shader-compiler` | Use a different `slangc` than the pinned one (logged as a warning) (ADR-0013) | Implemented |
 | `OXREAL_REQUIRE_SPIRV_VAL` | shader-compiler tests | `1` makes a missing `spirv-val` a test failure (set in CI on Linux) | Implemented |
+| `OXREAL_COOKED_DIR` | `oxreal-player` | The cooked data's root (the directory holding `shaders/`) when `--cooked` isn't given. Empty counts as unset (ADR-0019 §4) | Implemented |
 
 ### Tests
 

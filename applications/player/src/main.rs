@@ -13,7 +13,9 @@
 //! - the platform event loop and the window (`oxreal-window`);
 //! - the device: this is the only place the Vulkan backend is named. Everything else sees an
 //!   `Arc<dyn Device>`;
-//! - the surface and the frame loop, including a minimized window, where no frame comes;
+//! - the surface and the frame loop. While the window is minimized (zero size) no frames can be
+//!   shown, so the loop sleeps until the next event instead of spinning, except under
+//!   `--frames`, whose timeout must keep running;
 //! - input, fed into the scene's `InputState`, and cursor capture while looking around;
 //! - frame timing;
 //! - the ECS world and schedule (`scene.rs`), with `oxreal-hierarchy` and
@@ -46,17 +48,19 @@ use oxreal_window::{
 };
 
 mod cooked;
+mod error;
 mod fly_camera;
 mod options;
 mod scene;
 
 use cooked::{COOKED_DIR_ENV_VAR, resolve_cooked_root};
+use error::PlayerError;
 use fly_camera::{FlyCamera, LOOK_BUTTON};
 use options::{Command, Options};
 use scene::FrameTime;
 
-/// The longest step the scene takes in one frame, so a stall (a breakpoint, a dragged window)
-/// doesn't throw the camera across the scene.
+/// The longest step the scene takes in one frame, so a stall (a breakpoint, a dragged window,
+/// a minimized one) doesn't throw the camera across the scene.
 const MAX_FRAME_SECONDS: f32 = 0.1;
 
 struct Player {
@@ -72,46 +76,47 @@ struct Player {
     schedule: Schedule,
     /// Whether the cursor is captured for looking around.
     cursor_captured: bool,
+    /// Whether the window has zero size (minimized), so no frame can be shown.
+    minimized: bool,
     frames: u64,
     started: Instant,
     /// When the scene last updated, to scale movement by the frame's duration.
     last_update: Instant,
-    error: Option<String>,
+    error: Option<PlayerError>,
 }
 
 impl Player {
-    fn fail(&mut self, ctx: &Context<'_>, message: String) {
+    /// Records the first error and ends the event loop.
+    fn fail(&mut self, ctx: &Context<'_>, error: PlayerError) {
         if self.error.is_none() {
-            self.error = Some(message);
+            self.error = Some(error);
         }
         ctx.exit();
     }
 
     /// Ends `frame` without drawing, then fails: a frame must always be ended, or its swapchain
     /// image stays acquired.
-    fn abandon_frame(&mut self, ctx: &Context<'_>, frame: Frame, message: String) {
+    fn abandon_frame(&mut self, ctx: &Context<'_>, frame: Frame, error: PlayerError) {
         if let Err(end) = self.device.end_frame(frame) {
             warn!(error = %end, "ending the frame after an error failed");
         }
-        self.fail(ctx, message);
+        self.fail(ctx, error);
     }
 
     /// Runs one frame of the scene: records the frame time, runs the schedule (gameplay,
     /// transform propagation, then extraction), captures the cursor while the look button is
     /// held, and ends the input frame.
-    fn update(&mut self) -> Result<(), String> {
+    fn update(&mut self) -> Result<(), PlayerError> {
         let now = Instant::now();
         let seconds = (now - self.last_update)
             .as_secs_f32()
             .min(MAX_FRAME_SECONDS);
         self.last_update = now;
         self.world.insert_resource(FrameTime(seconds));
-        self.schedule
-            .run(&mut self.world)
-            .map_err(|e| e.to_string())?;
+        self.schedule.run(&mut self.world)?;
 
         let Some(input) = self.world.resource::<InputState>() else {
-            return Err("the InputState resource is missing".to_owned());
+            return Err(PlayerError::MissingResource("InputState"));
         };
         // Only while the button is still down: a press and a release (or focus loss) in the same
         // frame must not leave a capture behind.
@@ -163,10 +168,28 @@ impl Player {
         }
     }
 
+    /// Notes whether the window is minimized. While it is, the loop sleeps until the next event
+    /// (a restore arrives as a resize), unless `--frames` needs its timeout checked.
+    fn set_minimized(&mut self, ctx: &Context<'_>, minimized: bool) {
+        if minimized == self.minimized {
+            return;
+        }
+        self.minimized = minimized;
+        info!(minimized, "window visibility changed");
+        ctx.set_continuous(!minimized || self.options.frames.is_some());
+        if !minimized && let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn draw(&mut self, ctx: &Context<'_>) {
         let (Some(window), Some(surface)) = (self.window.clone(), self.surface) else {
             return;
         };
+        // The renderer goes only in `exiting`, after which nothing is drawn.
+        if self.renderer.is_none() {
+            return;
+        }
         // The scene updates even when the frame is skipped below, so input never piles up.
         if let Err(e) = self.update() {
             return self.fail(ctx, e);
@@ -174,7 +197,7 @@ impl Player {
         let mut frame = match self.device.begin_frame(surface) {
             Ok(Some(frame)) => frame,
             Ok(None) => return, // Minimized or recreating: skip this frame.
-            Err(e) => return self.fail(ctx, e.to_string()),
+            Err(e) => return self.fail(ctx, PlayerError::device("beginning a frame")(e)),
         };
         let target = RenderTarget::backbuffer(&frame);
         let rendered = match (
@@ -183,17 +206,18 @@ impl Player {
         ) {
             // The renderer reads only the extracted render world, never the scene.
             (Some(renderer), Some(extracted)) => renderer
-                .render(frame.encoder(), &target, &extracted.render_world)
-                .map_err(|e| e.to_string()),
-            (None, _) => Err("the renderer is gone".to_owned()),
-            (_, None) => Err("the ExtractedWorld resource is missing".to_owned()),
+                .render(frame.encoder(), &target, extracted.render_world())
+                .map(|_| ())
+                .map_err(PlayerError::render("rendering the frame")),
+            (_, None) => Err(PlayerError::MissingResource("ExtractedWorld")),
+            (None, Some(_)) => unreachable!("checked at the start of `draw`"),
         };
         if let Err(e) = rendered {
             return self.abandon_frame(ctx, frame, e);
         }
         window.pre_present_notify();
         if let Err(e) = self.device.end_frame(frame) {
-            return self.fail(ctx, e.to_string());
+            return self.fail(ctx, PlayerError::device("presenting a frame")(e));
         }
         self.frames += 1;
         if self
@@ -216,7 +240,7 @@ impl App for Player {
             ..WindowDesc::default()
         }) {
             Ok(window) => Arc::new(window),
-            Err(e) => return self.fail(ctx, e.to_string()),
+            Err(e) => return self.fail(ctx, e.into()),
         };
         let size = window.inner_size();
         let desc = SurfaceDesc {
@@ -226,7 +250,7 @@ impl App for Player {
         };
         match self.device.create_surface(window.clone(), &desc) {
             Ok(surface) => self.surface = Some(surface),
-            Err(e) => return self.fail(ctx, e.to_string()),
+            Err(e) => return self.fail(ctx, PlayerError::device("creating the surface")(e)),
         }
         info!(display_server = ?ctx.display_server(), ?size, "window ready");
         ctx.set_continuous(true);
@@ -243,10 +267,11 @@ impl App for Player {
             WindowEvent::Focused(false) => self.set_cursor_captured(false),
             WindowEvent::CloseRequested => ctx.exit(),
             WindowEvent::Resized(size) => {
+                self.set_minimized(ctx, size.width == 0 || size.height == 0);
                 if let Some(surface) = self.surface
                     && let Err(e) = self.device.resize_surface(surface, size.width, size.height)
                 {
-                    self.fail(ctx, e.to_string());
+                    self.fail(ctx, PlayerError::device("resizing the surface")(e));
                 }
             }
             WindowEvent::RedrawRequested => self.draw(ctx),
@@ -262,13 +287,15 @@ impl App for Player {
 
     fn about_to_wait(&mut self, ctx: &Context<'_>) {
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
-            let message = format!(
-                "timed out after {} frame(s) in {:?}",
-                self.frames, self.options.timeout
-            );
-            return self.fail(ctx, message);
+            let error = PlayerError::TimedOut {
+                frames: self.frames,
+                timeout: self.options.timeout,
+            };
+            return self.fail(ctx, error);
         }
-        if let Some(window) = &self.window {
+        if !self.minimized
+            && let Some(window) = &self.window
+        {
             window.request_redraw();
         }
     }
@@ -287,7 +314,7 @@ impl App for Player {
 }
 
 fn main() -> std::process::ExitCode {
-    oxreal_diagnostics::run_application(run)
+    oxreal_diagnostics::run_application(|| run().map_err(Into::into))
 }
 
 #[expect(
@@ -298,32 +325,40 @@ fn print_usage() {
     println!("{}", options::USAGE);
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), PlayerError> {
     let options = match options::parse(std::env::args_os().skip(1)) {
         Ok(Command::Run(options)) => options,
         Ok(Command::Help) => {
             print_usage();
             return Ok(());
         }
-        Err(e) => return Err(format!("{e}\n\n{}", options::USAGE).into()),
+        Err(source) => return Err(PlayerError::Options { source }),
     };
 
     let environment: Option<OsString> = std::env::var_os(COOKED_DIR_ENV_VAR);
-    let (cooked_root, source) = resolve_cooked_root(
+    let (root, from) = resolve_cooked_root(
         options.cooked.as_deref(),
         environment.as_deref(),
         std::env::current_exe,
     )?;
-    info!(root = %cooked_root.display(), from = %source, "cooked data");
-    let shaders = CookedShaders::load(&cooked_root)
-        .map_err(|e| format!("{e} (cooked root from {source}: {})", cooked_root.display()))?;
+    info!(root = %root.display(), %from, "cooked data");
+    let shaders = match CookedShaders::load(&root) {
+        Ok(shaders) => shaders,
+        Err(source) => return Err(PlayerError::CookedShaders { root, from, source }),
+    };
 
-    let device: Arc<dyn Device> = Arc::new(oxreal_rhi_vulkan::create_device(&DeviceDesc {
-        app_name: "oxreal player".to_owned(),
-        ..DeviceDesc::default()
-    })?);
-    let mut renderer = Renderer::new(Arc::clone(&device), shaders)?;
-    let cube = renderer.register_mesh(&MeshData::cube())?;
+    let device: Arc<dyn Device> = Arc::new(
+        oxreal_rhi_vulkan::create_device(&DeviceDesc {
+            app_name: "oxreal player".to_owned(),
+            ..DeviceDesc::default()
+        })
+        .map_err(PlayerError::device("creating the device"))?,
+    );
+    let mut renderer = Renderer::new(Arc::clone(&device), shaders)
+        .map_err(PlayerError::render("creating the renderer"))?;
+    let cube = renderer
+        .register_mesh(&MeshData::cube())
+        .map_err(PlayerError::render("registering the cube mesh"))?;
     let mut schedule = scene::schedule();
     // Check the systems' ordering now, so a mistake fails before a window opens.
     schedule.validate()?;
@@ -336,6 +371,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         world: scene::world(cube),
         schedule,
         cursor_captured: false,
+        minimized: false,
         frames: 0,
         started: Instant::now(),
         last_update: Instant::now(),
@@ -346,15 +382,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = player.started.elapsed();
     let errors = player.device.validation_error_count();
     if let Some(error) = player.error {
-        return Err(error.into());
+        return Err(error);
     }
     if errors > 0 {
-        return Err(format!("Vulkan validation reported {errors} error(s); see the log").into());
+        return Err(PlayerError::Validation(errors));
     }
     if let Some(target) = player.options.frames
         && player.frames < target
     {
-        return Err(format!("window closed after {} of {target} frames", player.frames).into());
+        return Err(PlayerError::ClosedEarly {
+            frames: player.frames,
+            target,
+        });
     }
     info!(
         frames = player.frames,

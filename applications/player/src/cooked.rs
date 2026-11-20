@@ -9,6 +9,12 @@
 //!    `target/<profile>/cooked/`, beside `target/<profile>/oxreal-player`, so a cooked build
 //!    runs as it is.
 //!
+//!    "The executable" is what [`std::env::current_exe`] reports, and that differs for a
+//!    symbolic link: Linux reports the file the link points to (so an installed game linked
+//!    from `/usr/bin` finds `cooked/` beside the real binary), while Windows reports the path
+//!    the player was started through. Start it through its real path, or pass `--cooked`, when
+//!    the two differ.
+//!
 //! The overrides work in every build. They sit at the trust level of the command line and the
 //! environment, like the executable itself (ADR-0019 §4, "The trust argument").
 

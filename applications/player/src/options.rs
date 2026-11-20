@@ -47,7 +47,7 @@ pub(crate) enum Command {
 /// The command line is wrong. The message says how; [`USAGE`] says what's right.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum OptionsError {
-    /// An option needs a value and has none.
+    /// An option needs a value and has none, or an empty one.
     #[error("{option} needs a value")]
     MissingValue {
         /// The option.
@@ -78,8 +78,12 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     let mut options = Options::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        let mut value =
-            |option: &'static str| args.next().ok_or(OptionsError::MissingValue { option });
+        // An empty value counts as missing, like an empty environment variable.
+        let mut value = |option: &'static str| {
+            args.next()
+                .filter(|value| !value.is_empty())
+                .ok_or(OptionsError::MissingValue { option })
+        };
         match arg.to_str() {
             Some("--help" | "-h") => return Ok(Command::Help),
             // A path may be any OS string, so it isn't converted.
@@ -153,6 +157,11 @@ mod tests {
         assert_eq!(
             parse_strs(&["--frames"]),
             Err(OptionsError::MissingValue { option: "--frames" })
+        );
+        assert_eq!(
+            parse_strs(&["--cooked", ""]),
+            Err(OptionsError::MissingValue { option: "--cooked" }),
+            "an empty path would mean the current directory"
         );
         assert_eq!(
             parse_strs(&["--frames", "-1"]),

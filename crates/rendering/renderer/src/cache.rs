@@ -41,7 +41,7 @@ pub enum ShaderCacheError {
     /// The directory holds no cooked shaders.
     #[error(
         "no cooked shaders in {dir}: run `cargo xtask cook-shaders` (with `--profile release` \
-         for release builds)"
+         for release builds, and the same `--target` as the build, if any)"
     )]
     NotCooked {
         /// The `shaders` directory looked in.
