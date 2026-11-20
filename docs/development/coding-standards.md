@@ -52,13 +52,12 @@ Follow the standard Rust casing ([RFC 430]) everywhere:
 
 Oxreal specifics:
 
-- **No type prefixes.** No Unreal-style `A`, `U`, `F`, `T`, `E` or `I` (ADR-0008 §4). Write
-  `Actor` and `Pawn`, not `AActor` or `APawn`. Module paths disambiguate.
+- **No type prefixes.** No Unreal-style `A`, `U`, `F`, `T`, `E` or `I` (ADR-0020 §5). Write
+  `Pawn` and `GameMode`, not `APawn` or `AGameMode`. Module paths disambiguate.
 - **Acronyms are words:** `Rhi`, `Gpu`, `Ui`, `Id`, `Srgb`, giving `RhiDevice`, `AssetId`,
   `LinearRgba`. Never `RHIDevice` or `AssetID`.
 - **American English in identifiers** (`color`, `normalize`, `initialize`, `behavior`), matching
   Rust and its ecosystem. Prose in docs may use either variety, consistently within a file.
-  - Note: ADR-0008 sketches a `Behaviour` trait. It is to be named `Behavior` when implemented.
 - **Names say what, not how:** `inner_size`, not `get_winit_inner_size`. Implementation details
   stay out of names.
 

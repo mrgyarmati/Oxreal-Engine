@@ -11,7 +11,7 @@ use crate::type_map::TypeIdMap;
 /// Data attached to an entity.
 ///
 /// Implement it for plain data types: `impl Component for Velocity {}`. A component has no
-/// behaviour of its own. Systems and queries act on it (ADR-0008 §1).
+/// behaviour of its own. Systems and queries act on it (ADR-0020 §2).
 ///
 /// A component's `Drop` must not panic. A panic while the world is dropping or moving
 /// components leaves it in an inconsistent state (never memory-unsafe), and later operations

@@ -378,7 +378,7 @@ impl World {
     }
 
     /// Whether `entity` is alive and has a component `T`. Constant time: use it for role tests,
-    /// the way Unreal code uses a cast (ADR-0008 §1).
+    /// the way Unreal code uses a cast (ADR-0020 §2).
     #[must_use]
     pub fn has<T: Component>(&self, entity: Entity) -> bool {
         has_component::<T>(&self.entities, &self.components, &self.archetypes, entity)

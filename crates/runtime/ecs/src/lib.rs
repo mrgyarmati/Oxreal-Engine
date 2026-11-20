@@ -25,7 +25,7 @@
 //!     position.1 += velocity.1;
 //! }
 //!
-//! // Only players: a filter, like a role test (ADR-0008).
+//! // Only players: a filter, like a role test (ADR-0020 §2).
 //! let players = world.query_filtered::<&Position, With<Player>>().count();
 //! assert_eq!(players, 1);
 //! assert!(world.has::<Player>(player));
