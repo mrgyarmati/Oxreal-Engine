@@ -1072,6 +1072,7 @@ dependencies = [
  "oxreal-diagnostics",
  "oxreal-ecs",
  "oxreal-math",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
