@@ -1,7 +1,7 @@
 //! The world: every entity, component and resource of one simulation.
 
 use std::any::TypeId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
@@ -16,6 +16,7 @@ use crate::hook::HookWorld;
 use crate::query::{self, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
 use crate::resource::{Resource, Resources};
 use crate::storage::{self, ArchetypeId, Archetypes};
+use crate::type_map::TypeIdMap;
 
 /// Why an operation on a world failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -70,7 +71,7 @@ struct BundleInfo {
 
 #[derive(Debug, Default)]
 struct Bundles {
-    index: HashMap<TypeId, usize>,
+    index: TypeIdMap<usize>,
     list: Vec<BundleInfo>,
 }
 

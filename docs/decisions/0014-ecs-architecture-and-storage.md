@@ -474,3 +474,65 @@ The decisions are in §4's amendment. These notes cover how they're implemented.
   - despawn finishing before its hooks' commands;
   - inserting into a despawning entity;
   - the hook panic guard disabled.
+
+## Implementation notes (2026-11-20, fourth slice: relations and the hierarchy)
+
+- **The first relation is `ChildOf`/`Children`**, in `oxreal-hierarchy` (ADR-0005), built only
+  on §4's hooks and §3's "relations are components with maintained inverses":
+  - `ChildOf::new(parent)` is the link. Its parent can be read but not edited in place.
+  - `Children` is ordered. It can be read but not built or edited outside the crate, so only
+    hooks change it. It exists only while it lists a child.
+  - **Despawn policy:**
+    - despawning a parent despawns its subtree, children first (§4 amendment, item 5);
+    - removing `Children` on its own detaches the children instead.
+
+    The hooks tell the two cases apart through `HookCause::Despawn`.
+  - **Refused links:** a link to a dead parent, or one that would form a cycle, is removed
+    again by the hook, with a warning. `set_parent` reports both cases as errors before changing
+    anything.
+  - Creating `Children` changes structure, so the hook queues a command, and the command
+    re-checks the link when it runs. Several children attaching in the same flush therefore all
+    arrive, in order.
+- **Transform propagation** (`propagate transforms`, `PostUpdate`):
+  - It walks each tree from its root with an explicit stack: no recursion, any depth.
+  - `WorldTransform` is an `Affine3A`, so non-uniform scale under rotation stays exact.
+  - Adding `LocalTransform` adds `WorldTransform` through a hook.
+- **Faster `TypeId` lookups** across the ECS: component, resource and bundle maps hash
+  `TypeId` with a pass-through hasher instead of SipHash. A `TypeId` is already a
+  compiler-chosen hash, so SipHash's flood resistance buys nothing there. Measured back to back
+  on the same machine (100k entities, release):
+
+  | Workload | Before | After |
+  |---|---|---|
+  | spawn | 6.5 ms | 5.1 ms |
+  | `get` through 100k shuffled handles | 3.2 ms | 2.0 ms |
+  | insert + remove a tag on 10k entities | 1.53 ms | 1.38 ms |
+
+  Iteration and despawn are unchanged.
+- **The §10 transform-propagation benchmark** (`cargo bench -p oxreal-hierarchy`): 111,100
+  entities in trees four levels deep (100 roots × 10 × 10 × 10), on an AMD Ryzen 9 5950X with
+  Windows 11 and rustc 1.100.0, release build:
+  - propagation takes **5.0 ms** (7.7 ms before the hasher change);
+  - building the trees takes 42 ms.
+
+  Each entity costs three lookups by handle (local transform, world transform, children). The
+  next step, if profiling asks for it, is query state that caches component IDs and column
+  positions per archetype.
+- **Tests:**
+  - attach, order, move and detach;
+  - `set_parent` errors, and the hooks' refusals for links inserted directly;
+  - recursive despawn, and detach when `Children` is removed;
+  - ten children attaching in one flush;
+  - propagation against matrix products, with non-uniform scale and an entity without a
+    `LocalTransform` in the chain;
+  - a randomized test: 5,000 random spawns, re-parents (cycles must be refused), detaches,
+    despawns (whole subtrees must go) and `Children` removals, checking every invariant along
+    the way.
+
+  These deliberately broken versions each fail the tests:
+  - the despawn and detach policies swapped;
+  - the hooks' cycle check turned off;
+  - a moved child left in its old parent's `Children`;
+  - `local * parent` instead of `parent * local`.
+- **The cube example's spinning cube has two moons as children,** which orbit through
+  propagation alone. `Extract` reads `WorldTransform`.

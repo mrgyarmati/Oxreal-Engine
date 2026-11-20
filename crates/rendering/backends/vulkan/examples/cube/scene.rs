@@ -1,23 +1,22 @@
-//! The cube example's scene as ECS data and systems (ADR-0014).
+//! The cube example's scene as ECS data and systems (ADR-0014, ADR-0005).
 //!
-//! - **Entities:** the camera (a [`FlyCamera`]), the spinning cube, and the floor tiles and
-//!   pillars, each with a [`Placement`].
+//! - **Entities:** the camera (a [`FlyCamera`]), the spinning cube with two small moons as its
+//!   children, and the floor tiles and pillars. Each mesh has a `LocalTransform`.
 //! - **Resources:** the frame's `InputState` (fed by the window events), [`FrameTime`], and the
 //!   [`DrawList`] the renderer reads.
-//! - **Systems:** gameplay in `PrePhysics` moves the camera and spins the cube. `Extract` copies
-//!   what the renderer needs into the [`DrawList`], so the renderer never reads the scene itself
-//!   (CLAUDE.md rule 3).
+//! - **Systems:**
+//!   - `PrePhysics`: gameplay moves the camera and spins the cube.
+//!   - `PostUpdate`: `oxreal-hierarchy` propagates transforms, so the moons orbit with the
+//!     cube.
+//!   - `Extract`: copies the world transforms into the [`DrawList`], so the renderer never reads
+//!     the scene itself (CLAUDE.md rule 3).
 
-use oxreal_ecs::{Component, Resource, Schedule, Stage, System, World};
+use oxreal_ecs::{Component, Resource, Schedule, Stage, System, With, World};
+use oxreal_hierarchy::{ChildOf, LocalTransform, WorldTransform};
 use oxreal_input::InputState;
 use oxreal_math::{Mat4, Quat, Transform, Vec3};
 
 use crate::fly_camera::FlyCamera;
-
-/// Where an object stands: object space to world space.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Placement(pub(crate) Transform);
-impl Component for Placement {}
 
 /// Turns an object about two axes over time.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,6 +25,11 @@ pub(crate) struct Spin {
     elapsed: f32,
 }
 impl Component for Spin {}
+
+/// A mesh to draw at the entity's world transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Mesh;
+impl Component for Mesh {}
 
 impl Component for FlyCamera {}
 
@@ -42,8 +46,8 @@ pub(crate) struct DrawList {
 }
 impl Resource for DrawList {}
 
-/// Creates the world: resources, the camera, the spinning cube, a 9 × 9 floor of 1.8 m tiles
-/// with 0.2 m gaps 1 m below the cube, and four 3 m pillars.
+/// Creates the world: resources, the camera, the spinning cube and its two moons, a 9 × 9 floor
+/// of 1.8 m tiles with 0.2 m gaps 1 m below the cube, and four 3 m pillars.
 pub(crate) fn world() -> World {
     let mut world = World::new();
     world.insert_resource(InputState::new());
@@ -56,7 +60,18 @@ pub(crate) fn world() -> World {
         Vec3::ZERO,
         3.0,
     ));
-    world.spawn((Placement(Transform::IDENTITY), Spin { elapsed: 0.0 }));
+    let cube = world.spawn((LocalTransform::default(), Mesh, Spin { elapsed: 0.0 }));
+    // Children of the cube: they turn with it, through transform propagation alone.
+    for (offset, scale) in [
+        (Vec3::new(1.4, 0.0, 0.0), 0.3),
+        (Vec3::new(-1.2, 0.5, 0.3), 0.2),
+    ] {
+        world.spawn((
+            LocalTransform(Transform::from_translation(offset).with_scale(Vec3::splat(scale))),
+            Mesh,
+            ChildOf::new(cube),
+        ));
+    }
     for x in -4_i8..=4 {
         for z in -4_i8..=4 {
             let tile = Transform::from_translation(Vec3::new(
@@ -65,18 +80,18 @@ pub(crate) fn world() -> World {
                 f32::from(z) * 2.0,
             ))
             .with_scale(Vec3::new(1.8, 0.1, 1.8));
-            world.spawn(Placement(tile));
+            world.spawn((LocalTransform(tile), Mesh));
         }
     }
     for (x, z) in [(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)] {
         let pillar =
             Transform::from_translation(Vec3::new(x, 0.5, z)).with_scale(Vec3::new(0.4, 3.0, 0.4));
-        world.spawn(Placement(pillar));
+        world.spawn((LocalTransform(pillar), Mesh));
     }
     world
 }
 
-/// The example's systems.
+/// The example's systems, plus the hierarchy's transform propagation.
 pub(crate) fn schedule() -> Schedule {
     let mut schedule = Schedule::new();
     schedule
@@ -99,15 +114,15 @@ pub(crate) fn schedule() -> Schedule {
             Stage::PrePhysics,
             System::new("spin", |ctx| {
                 let seconds = ctx.resources.get::<FrameTime>().map_or(0.0, |t| t.0);
-                for (mut placement, mut spin) in
-                    ctx.world.query_mut::<(&mut Placement, &mut Spin)>()
+                for (mut local, mut spin) in
+                    ctx.world.query_mut::<(&mut LocalTransform, &mut Spin)>()
                 {
                     spin.elapsed += seconds;
-                    placement.0.rotation = Quat::from_rotation_y(spin.elapsed * 0.7)
+                    local.0.rotation = Quat::from_rotation_y(spin.elapsed * 0.7)
                         * Quat::from_rotation_x(spin.elapsed * 0.45);
                 }
             })
-            .writes::<Placement>()
+            .writes::<LocalTransform>()
             .writes::<Spin>()
             .reads_resource::<FrameTime>(),
         )
@@ -124,18 +139,23 @@ pub(crate) fn schedule() -> Schedule {
                 };
                 list.camera = camera.unwrap_or(Transform::IDENTITY);
                 list.objects.clear();
-                list.objects
-                    .extend(ctx.world.query::<&Placement>().map(|p| p.0.to_matrix()));
+                list.objects.extend(
+                    ctx.world
+                        .query_filtered::<&WorldTransform, With<Mesh>>()
+                        .map(WorldTransform::matrix),
+                );
             })
             .reads::<FlyCamera>()
-            .reads::<Placement>()
+            .reads::<WorldTransform>()
             .writes_resource::<DrawList>(),
         );
+    oxreal_hierarchy::add_systems(&mut schedule);
     schedule
 }
 
 #[cfg(test)]
 mod tests {
+    use oxreal_ecs::{Entity, Without};
     use oxreal_input::{ButtonState, KeyCode, KeyEvent, MouseButton};
     use oxreal_window::WindowEvent;
 
@@ -150,12 +170,19 @@ mod tests {
         world.resource::<DrawList>().cloned().unwrap_or_default()
     }
 
+    fn world_position(world: &World, entity: Entity) -> Vec3 {
+        world
+            .get::<WorldTransform>(entity)
+            .map(WorldTransform::translation)
+            .unwrap_or(Vec3::NAN)
+    }
+
     #[test]
-    fn the_schedule_is_valid_and_extracts_every_object() {
+    fn the_schedule_is_valid_and_extracts_every_mesh() {
         let mut world = world();
         let mut schedule = schedule();
         let list = frame(&mut world, &mut schedule, 0.0);
-        assert_eq!(list.objects.len(), 1 + 81 + 4);
+        assert_eq!(list.objects.len(), 1 + 2 + 81 + 4);
         assert_eq!(
             list.camera.translation,
             Vec3::new(0.0, 1.2, 4.0),
@@ -190,12 +217,33 @@ mod tests {
     }
 
     #[test]
-    fn the_cube_spins_with_frame_time() {
+    fn the_moons_orbit_with_the_spinning_cube_and_the_scenery_stands_still() {
         let mut world = world();
         let mut schedule = schedule();
-        let first = frame(&mut world, &mut schedule, 0.0).objects;
-        let later = frame(&mut world, &mut schedule, 0.25).objects;
-        assert_ne!(first[0], later[0], "the spinning cube turned");
-        assert_eq!(first[1..], later[1..], "the scenery stands still");
+        frame(&mut world, &mut schedule, 0.0);
+        let moons: Vec<Entity> = world.query_filtered::<Entity, With<ChildOf>>().collect();
+        let scenery: Vec<Entity> = world
+            .query_filtered::<Entity, (With<Mesh>, Without<ChildOf>, Without<Spin>)>()
+            .collect();
+        assert_eq!((moons.len(), scenery.len()), (2, 85));
+        let moons_before: Vec<Vec3> = moons.iter().map(|&m| world_position(&world, m)).collect();
+        let scenery_before: Vec<Vec3> =
+            scenery.iter().map(|&s| world_position(&world, s)).collect();
+        assert!((moons_before[0] - Vec3::new(1.4, 0.0, 0.0)).length() < 1e-5);
+
+        frame(&mut world, &mut schedule, 0.5);
+        for (&moon, before) in moons.iter().zip(&moons_before) {
+            let after = world_position(&world, moon);
+            assert!(
+                (after - *before).length() > 0.1,
+                "the moon moved: {before} -> {after}"
+            );
+            assert!(
+                (after.length() - before.length()).abs() < 1e-4,
+                "it keeps its distance from the cube"
+            );
+        }
+        let scenery_after: Vec<Vec3> = scenery.iter().map(|&s| world_position(&world, s)).collect();
+        assert_eq!(scenery_before, scenery_after);
     }
 }

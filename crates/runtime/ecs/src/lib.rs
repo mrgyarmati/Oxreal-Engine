@@ -80,6 +80,7 @@ mod query;
 mod resource;
 mod schedule;
 mod storage;
+mod type_map;
 mod world;
 
 pub use bundle::Bundle;

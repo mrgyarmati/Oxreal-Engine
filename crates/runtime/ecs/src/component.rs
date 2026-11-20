@@ -1,12 +1,12 @@
 //! Components and their registry.
 
 use std::any::{TypeId, type_name};
-use std::collections::HashMap;
 use std::fmt;
 
 use crate::entity::Entity;
 use crate::hook::HookWorld;
 use crate::storage::{AnyColumn, new_column};
+use crate::type_map::TypeIdMap;
 
 /// Data attached to an entity.
 ///
@@ -197,7 +197,7 @@ struct ComponentInfo {
 /// The component types a world has seen.
 #[derive(Debug, Default)]
 pub struct Components {
-    ids: HashMap<TypeId, ComponentId>,
+    ids: TypeIdMap<ComponentId>,
     infos: Vec<ComponentInfo>,
 }
 

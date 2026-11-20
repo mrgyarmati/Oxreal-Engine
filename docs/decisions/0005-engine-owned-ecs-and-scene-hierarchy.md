@@ -28,3 +28,15 @@ cache-optimized runtime store.
 
 - Significant implementation effort, which reflection integration and editor needs justify.
 - Hierarchy and ECS must be kept consistent, so the sync points must be tested explicitly.
+
+## Implementation notes (2026-11-20)
+
+- `runtime/hierarchy` is `oxreal-hierarchy`. Its parentage is the `ChildOf` component, and the
+  ordered `Children` component is its inverse, kept consistent by ECS hooks (ADR-0014 §4). So
+  the hierarchy *is* ECS data: there's no second store to keep in sync. The sync points this
+  ADR asks to test are the hooks, which a randomized invariant test exercises.
+- Local transforms are `LocalTransform`. World transforms (`WorldTransform`, affine, so
+  non-uniform scale stays exact) are computed by the `propagate transforms` system in
+  `PostUpdate`: after gameplay and physics, before `Extract`.
+- Details, including the despawn policy and measurements, are in ADR-0014's fourth-slice
+  notes.

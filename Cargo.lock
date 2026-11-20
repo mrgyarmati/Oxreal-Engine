@@ -1066,6 +1066,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxreal-hierarchy"
+version = "0.1.0-dev"
+dependencies = [
+ "oxreal-diagnostics",
+ "oxreal-ecs",
+ "oxreal-math",
+]
+
+[[package]]
 name = "oxreal-input"
 version = "0.1.0-dev"
 dependencies = [
@@ -1100,6 +1109,7 @@ dependencies = [
  "gpu-allocator",
  "oxreal-diagnostics",
  "oxreal-ecs",
+ "oxreal-hierarchy",
  "oxreal-input",
  "oxreal-math",
  "oxreal-rhi",
