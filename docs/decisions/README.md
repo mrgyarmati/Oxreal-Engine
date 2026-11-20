@@ -33,6 +33,7 @@ Status values: **Proposed** (under review), **Accepted**, **Superseded**, **Depr
 | [0016](0016-rhi-resource-and-bind-model.md) | RHI resource model, bindless binding and required GPU features | Accepted |
 | [0017](0017-rhi-command-api-and-frame-model.md) | RHI command API, dispatch and frame model | Accepted |
 | [0018](0018-input-events-state-and-routing.md) | Input events, input state and routing | Accepted |
+| [0019](0019-player-renderer-and-cooked-shaders.md) | The player application, the M1 renderer and cooked shaders | Accepted |
 
 Open questions that still need ADRs are tracked in
 [`../development/open-decisions.md`](../development/open-decisions.md).

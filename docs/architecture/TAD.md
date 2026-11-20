@@ -229,8 +229,8 @@ Create these only when M1 work starts, one at a time, each with real code:
 | `systems/input` | systems | **Created** (`oxreal-input`): `InputState` built from platform events: held keys and buttons with per-frame edges, raw mouse motion, scroll, cursor position, focus-loss reset. Input contexts with consumption come with the second consumer (ADR-0018). |
 | `rendering/rhi` | rendering | **Created** (`oxreal-rhi`): `Device` trait, adapter selection, generational handles, surfaces, frames, command encoder and scoped render passes, textures (uploads, bindless sampling, depth targets), buffers (GPU addresses, ordered writes, readback), samplers, render pipelines (push constants, depth testing), draws and indexed draws (index buffers), standalone submission and readback, `RhiError`; `shaders/Bindless.slang` for shaders. (ADR-0016, ADR-0017) |
 | `rendering/backends/vulkan` | rendering | **Created** (`oxreal-rhi-vulkan`): instance, validation, GPU selection, device, allocator, surfaces and swapchains with internal recreation, timeline-paced frame loop, dynamic rendering with color and depth attachments, textures, buffers with device addresses and staged writes, the global bindless descriptor set and samplers, pipelines with a Y-up viewport, deferred destruction, readback, SPIR-V checks, pixel tests. (ADR-0011, ADR-0012, ADR-0016, ADR-0017) |
-| `rendering/renderer` | rendering | Basic mesh pass, camera |
-| `applications/player` | app-runtime | The vertical-slice app |
+| `rendering/renderer` | rendering | `oxreal-renderer` (planned, ADR-0019): the M1 mesh pass over `oxreal_rhi::Device`, fed a plain-data `RenderWorld`; loads hash-verified cooked SPIR-V |
+| `applications/player` | app-runtime | `oxreal-player` (planned, ADR-0019): the M1 executable: window, input, ECS world and schedule, extraction, renderer; the demo scene stands in for scene loading |
 | `tools/shader-compiler` | tool | **Created** (`oxreal-shader-compiler`): pinned `slangc`, reflection, depfile, SPIR-V capability allowlist, optional `spirv-val`. Never linked into games. (ADR-0013) |
 
 Crate names use the `oxreal-` prefix, for example `oxreal-math` and `oxreal-rhi` (D-15).
