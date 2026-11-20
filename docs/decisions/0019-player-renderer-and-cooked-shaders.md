@@ -2,144 +2,217 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-20
-- **Related:** PRD §7 (M1), TAD §2–§4 and §7, brief rule 3 (the renderer consumes an extracted render world), ADR-0004 (layering), ADR-0005 (hierarchy), ADR-0008 (gameplay framework), ADR-0013 §4 (no shader compiler in shipped games), ADR-0014 (ECS), ADR-0016/0017 (RHI), ADR-0018 (input)
+- **Related:** PRD §7 (M1), TAD §2–§4, §5.3 and §7, brief rule 3 (the renderer consumes an extracted render world), ADR-0004 (layering), ADR-0005 (hierarchy), ADR-0008 (gameplay framework), ADR-0013 §4 (no shader compiler in shipped games), ADR-0014 (ECS), ADR-0016 (RHI resources, `ShaderCode`), ADR-0017 §1 (renderer code holds `Arc<dyn Device>`), ADR-0018 (input), D-07, D-08
 
 ## Context
 
 M1's exit criterion is "a small app renders and navigates a 3D scene on both platforms". Every
 part exists, but the app is still `examples/cube` inside the Vulkan backend crate:
 - it builds its scene in code;
-- it drives the RHI directly (pipelines, depth buffer, push constants);
+- it drives the RHI directly;
 - it **compiles Slang at startup**.
 
-The TAD plans `applications/player` (layer `app-runtime`) and `rendering/renderer`. Three
+The TAD plans `applications/player` (layer `app-runtime`) and `rendering/renderer`. Four
 constraints shape them:
 
-1. **ADR-0013 §4:** "No shader compiler at runtime in shipped games. Players load precompiled
-   SPIR-V from the cooked shader cache". There's no cache or cook step yet. The layer rules
-   forbid the player from depending on `oxreal-shader-compiler` (a `tool` crate), even as a
-   build dependency.
-2. **`ShaderCode::from_spirv_unchecked`** (ADR-0016) is `unsafe`. Its contract requires valid
-   SPIR-V for Oxreal's feature set, and says "words from anywhere else must be validated before
-   use". So shaders loaded from disk need an integrity story before they can soundly reach it.
-3. **Brief rule 3:** the renderer doesn't own scene data, and consumes an extracted render
-   world. The TAD places extraction glue in the `gameplay` layer.
+1. **No compiler in the game.** ADR-0013 §4: "No shader compiler at runtime in shipped games.
+   Players load precompiled SPIR-V from the cooked shader cache". There's no cache or cook step
+   yet. The layer check forbids `app-runtime` → `tool`, so the player can't depend on
+   `oxreal-shader-compiler`, even as a build dependency.
+2. **`ShaderCode::from_spirv_unchecked` is `unsafe`** (ADR-0016). Its contract has two kinds of
+   obligation:
+   - The words must be a valid SPIR-V module within Oxreal's feature set: "words from anywhere
+     else must be validated before use".
+   - **Program-wide obligations:** every buffer address, bindless index and index range the
+     program gives the shader must be valid. The shader must also match the layouts the Rust
+     code writes, which `tests/shader_layout.rs` checks at build time today.
+3. **Brief rule 3 and TAD §2:** the renderer doesn't own scene data, and consumes an extracted
+   render world. Extraction glue belongs to the `gameplay` layer.
+4. **ADR-0017 §1:** renderer code holds `Arc<dyn Device>`, records through
+   `&mut dyn CommandEncoder`, and is never generic over a backend.
 
 ## Options considered
 
 ### How a shipped player gets its shaders
 - **A. Compile at startup** (what the example does). This breaks ADR-0013 §4, ships a compiler
   dependency, and slows startup.
-- **B. Embed SPIR-V in the binary from a build script.** The build script would depend on the
-  shader compiler, a `tool` crate, which the layer check forbids for `app-runtime`. It also
-  makes every build of the game need `slangc`.
-- **C. An offline cook step writes a cooked shader directory, and the player loads it.** The
-  directory holds SPIR-V files plus a manifest with hashes, and the player verifies each file
-  before use. This matches ADR-0013 §4 and the later asset pipeline. It needs a cook command
-  and a small manifest format.
+- **B. Embed SPIR-V from a build script that compiles it.** The build script depends on a
+  `tool` crate, which the layer check forbids for `app-runtime`. It also makes every build of
+  the game need `slangc`.
+- **C. An offline cook step writes a cooked directory, and the player loads it.** The renderer
+  checks it against what it was built for (§3). This matches ADR-0013 §4 and leads to the asset
+  pipeline's cache (D-08).
+- **D. Commit cooked SPIR-V to the repository and embed it with `include_bytes!`, with CI
+  checking it's up to date.**
+  - Pros: no I/O at run time, no stale-cache case, no hashing dependencies in the game.
+  - Cons: binary files in git, reliance on byte-for-byte deterministic `slangc` output, a
+    regeneration step in every shader change, and nothing that leads toward the asset cache.
+
+  Rejected for those costs: C's checks (§3) close the same gaps.
 
 ### Where rendering code lives
-- **A. In the player** (as in the example). Every future app (the editor viewport, a dedicated
-  test app) would copy it, and the backend calls would leak into application code.
+- **A. In the player**, as in the example. Every future app would copy it, and backend calls
+  would leak into application code.
 - **B. A renderer crate that queries the ECS itself.** It couples rendering to scene storage,
   against rule 3, and makes the renderer impossible to test without a world.
-- **C. A renderer crate with a plain-data input.** It takes a `RenderWorld` (camera plus draw
-  items) filled by extraction glue. It's testable with hand-made input, and the editor and the
-  player share it.
+- **C. A renderer crate with a plain-data input**, filled by extraction glue. It's testable
+  with hand-made input, and the editor and the player share it.
 
 ## Decision
 
 ### 1. `oxreal-renderer` (rendering layer)
-- **It owns the M1 mesh pass:** the mesh pipeline, depth targets (recreated on resize), mesh
-  buffers, a default checkerboard material, and the camera projection (ADR-0011's reversed
-  depth).
-- **It's generic over `oxreal_rhi::Device`.** Only the application names the backend.
-- **Input is plain data:** each frame takes a `RenderWorld` (the camera's transform and
-  projection settings, plus draw items made of a mesh handle and an object-to-world matrix).
-  It doesn't depend on `oxreal-ecs`. Meshes are registered up front and drawn by handle.
-- **It creates `ShaderCode` only from verified cooked SPIR-V (§3).** Its SAFETY arguments
-  combine the cook pipeline's guarantees with its own obligations: buffer addresses, bindless
-  indices and index ranges, the program-wide obligations of `from_spirv_unchecked`.
-- **Its shaders** (`Mesh.slang`) move into the crate.
+- **It owns the M1 mesh pass:** the mesh pipeline, depth targets (sized to the color target
+  it's given), mesh buffers, a default checkerboard material, and the camera projection
+  (ADR-0011's reversed depth). Its shaders (`Mesh.slang`) move into the crate.
+- **It holds an `Arc<dyn oxreal_rhi::Device>` and records through `&mut dyn CommandEncoder`**
+  (ADR-0017 §1). Only the application names the backend, when it creates the device.
+- **Output target:** the **application** owns surfaces and the frame loop, including a
+  minimized window, where `begin_frame` returns no frame. Each frame the renderer records into
+  an encoder and a color target with its extent, both given by the caller. So an offscreen
+  editor viewport can use it unchanged.
+- **Input is plain data.** Each frame it takes a `RenderWorld`:
+  - the camera's transform and projection settings;
+  - draw items, each a mesh handle and an object-to-world matrix.
 
-### 2. `oxreal-player` (`applications/player`, app-runtime layer)
+  It doesn't depend on `oxreal-ecs`.
+- **It vouches for the program-wide obligations of `from_spirv_unchecked`, so nothing a caller
+  passes can break them:**
+  - Pipelines, `ShaderCode`, buffer addresses and bindless indices never appear in its public
+    API.
+  - Registering a mesh validates its data: every index must be below its vertex count, and
+    every index plus the draw's vertex offset must fall in `0..=i32::MAX`. Anything else is a
+    typed error, never a draw.
+  - Mesh handles are generational. A stale handle in a `RenderWorld` is skipped and reported,
+    never drawn.
+  - Unregistering a mesh destroys its buffers through the RHI's deferred destruction, which
+    keeps them alive for work already recorded (ADR-0016).
+  - The shader's layout matches the Rust packing: the source key (§3) ties the cooked SPIR-V to
+    exactly the sources the renderer was built and layout-tested against.
+- **It creates `ShaderCode` only from SPIR-V its loader has accepted** (§3).
+
+### 2. Extraction: `oxreal-render-bridge` (gameplay layer)
+- **It holds the components that make an entity visible:**
+  - `Camera`: the projection settings;
+  - `MeshInstance`: a renderer mesh handle.
+- **It holds the `Extract`-stage system** that fills the renderer's `RenderWorld` from
+  `Camera`, `MeshInstance` and `WorldTransform`.
+- **It exists now, not later.** It holds real code, and TAD §2 puts extraction here. Creating
+  it now gives these components their final identity before scene files (D-07) start naming
+  them.
+
+### 3. `oxreal-player` (`applications/player`, app-runtime layer)
 - **The shipped executable for M1.** It owns:
   - the platform event loop and window;
-  - Vulkan device creation, the only place the backend is named;
-  - input fed into `InputState`;
+  - device creation, the only place the Vulkan backend is named;
+  - surfaces and the frame loop;
+  - input, fed into `InputState`;
   - cursor capture;
   - frame timing;
-  - the ECS world and schedule (with `oxreal-hierarchy`'s propagation);
+  - the ECS world and schedule, with `oxreal-hierarchy` and `oxreal-render-bridge`;
   - the renderer.
-- **Extraction** is an `Extract`-stage system that fills the `RenderWorld` from `Camera`,
-  `MeshInstance` and `WorldTransform` components. In M1 it lives in the player. It moves to a
-  `gameplay`-layer glue crate when a second application needs it (the editor viewport, M2).
-- **The demo scene** (the cube with its moons, the floor, the pillars, the fly camera) is built
-  in code in the player, clearly marked as standing in for scene loading (D-07, M2). The fly
-  camera stays with it until the gameplay camera arrives (ADR-0008).
-- **The cube example retires.** The Vulkan backend keeps its narrow examples (`clear`,
-  `triangle`, `textured`, `frame_protocol`, `device_info`). CI runs the player in its place,
-  under the same job names, so the ruleset doesn't change.
+- **The demo scene** (the cube with its moons, the floor, the pillars) is built in code in the
+  player, marked as standing in for scene loading (D-07). The fly camera stays with it until
+  the gameplay camera arrives (ADR-0008).
+- **The cube example retires.** The Vulkan backend keeps its narrow examples.
 
-### 3. The cooked shader directory (interim, until the asset pipeline)
-- **`cargo xtask cook-shaders`** compiles every shader listed in each runtime crate's
-  `shaders/cook.json`, with the pinned `slangc` through `oxreal-shader-compiler`, including its
-  capability allowlist and `spirv-val`. It writes `cooked/shaders/` next to the build's
-  executables (`target/<profile>/`), or into `--out <dir>`.
-- **The output** is one `<name>.spv` per entry, plus `manifest.json`, which records:
+### 4. The cooked shader directory (interim, until the asset pipeline)
+- **The cook logic lives in `oxreal-shader-compiler`**, which owns the manifest's writer.
+  `cargo xtask cook-shaders` runs it.
+  - It cooks every workspace crate that has a `shaders/cook.json`.
+  - Each entry names an output, a source file, its entry points, its include directories and
+    its **declared inputs**: the source and every module it imports, across crates. For
+    example, `Mesh.slang` imports `oxreal-rhi`'s `Bindless.slang`.
+  - Cooking fails if `slangc`'s depfile lists a file that isn't declared, so the declared
+    inputs are complete.
+- **Validation is mandatory.** Cooking uses the pinned `slangc` and its capability allowlist,
+  and **fails if `spirv-val` isn't found**. There's no skip flag: the manifest is the
+  attestation that `from_spirv_unchecked` relies on.
+- **Optimization:** `--profile release` cooks with Release optimization, other profiles with
+  Debug. The level is recorded and is part of the cook cache key. The loader accepts either
+  level, since both are validated.
+- **Output** goes under the cargo target directory (from `cargo metadata`, so `--target` and
+  `CARGO_TARGET_DIR` are honoured), in the profile's directory (`dev` maps to `debug`), as
+  `cooked/shaders/`. `--out <dir>` overrides the root. The directory holds one `<name>.spv`
+  per entry, plus `manifest.json`, which records:
   - a format version;
-  - the Slang version and compile options;
-  - for each entry: its file, its entry points, and the SHA-256 of its SPIR-V;
-  - each entry's source key: the hash of the source and every file its depfile lists. Cooking
-    skips entries whose key is unchanged.
-- **The renderer's loader** opens the directory, checks the format version, and verifies each
-  file's SHA-256 against the manifest before returning its words. Missing, mismatched or
-  malformed files are typed errors that say what to run (`cargo xtask cook-shaders`). Where the
-  player looks:
+  - the Slang version, the `spirv-val` version, and the target (SPIR-V 1.6 for Vulkan 1.3);
+  - for each entry: its file, its entry points, its optimization level, the SHA-256 of its
+    SPIR-V, and its **source key**. That is the SHA-256 of the Slang version, the target, and
+    every declared input's path and contents, in a defined order.
+
+  Cooking skips entries whose full key (source key plus options) is unchanged.
+- **The renderer's loader**, which owns the manifest's reader:
+  - **The source key it expects is built into the renderer.** Its build script hashes the same
+    declared inputs with the same Slang version (read from `tools/slang.json`). That needs no
+    compiler, so the layer check passes.
+  - **It refuses a cache cooked from other sources**, with a typed `StaleCache` error saying to
+    run `cargo xtask cook-shaders`. This, not the file hash, is what keeps the shader's layouts
+    matched to the Rust code the renderer was layout-tested with.
+  - **It verifies each file's SHA-256 against the manifest**, which catches corruption.
+  - **It treats the manifest as untrusted input.** File names must be plain names: no
+    separators, no `..`, no absolute paths, and an exact case match on every platform.
+  - Missing, mismatched and malformed files are typed errors, never panics.
+- **Where the player looks** for the cooked root (which contains `shaders/`):
   - `--cooked <dir>`, if given;
   - otherwise `OXREAL_COOKED_DIR`;
-  - otherwise `cooked/` next to the executable.
-- **The trust argument** for `from_spirv_unchecked`:
-  - The directory is part of the game's installation, like the executable itself: whoever can
-    replace it can replace the executable.
-  - The hash check catches corruption and stale or mismatched caches, not tampering.
-  - Everything the manifest admits was produced by the pinned compiler with its validation.
-- **Dependencies:** `sha2` and `serde_json`, already audited for `xtask`, are now also used by
-  `oxreal-renderer` at run time. `dependencies.md` records the wider scope.
+  - otherwise `cooked/` next to the executable. If `current_exe()` fails, that's a typed error.
+- **The trust argument.** The cooked directory is part of the game's installation, like the
+  executable itself.
+  - Everything a manifest admits was produced by the pinned compiler with mandatory
+    validation, from the sources the renderer was built for.
+  - The source key catches stale caches, and the file hashes catch corruption. **Neither
+    defends against tampering**, which is out of scope: whoever can replace the directory can
+    replace the executable.
+  - The overrides (`--cooked`, `OXREAL_COOKED_DIR`) are honoured in every build, as developer
+    and modding conveniences at the trust level of the process's command line and environment.
+- **Dependencies:**
+  - `sha2` and `serde_json` are already audited for `xtask`. They now also ship in the
+    renderer, and `dependencies.md` records the wider scope.
+  - The manifest is read as an untyped `serde_json::Value` by hand, so **no `serde` derive** is
+    adopted. `serde` and the cooked scene format stay open (D-07).
 - **Deliberately interim.** The asset pipeline (D-08, M3) replaces the directory with the
-  cooked asset cache and its stable IDs. The cache keys keep ADR-0013 §4's shape (source and
-  dependency hashes, Slang version, options, target), so the move changes the container, not
-  the rules.
+  cooked asset cache. The keys keep ADR-0013 §4's shape (source and dependency hashes, Slang
+  version, options, target), so the move changes the container, not the rules.
 
-### 4. Testing
+### 5. Testing and CI
 - **Renderer:**
-  - unit tests for the loader (valid cache, hash mismatch, missing file, wrong version) and
-    for `RenderWorld` handling;
-  - a GPU test that renders a frame from a hand-made `RenderWorld` and reads pixels back, run
-    on Lavapipe in CI.
+  - unit tests for the loader: a valid cache, a stale source key, a hash mismatch, a missing
+    file, a wrong format version, and unsafe file names;
+  - **a round-trip test** that dev-depends on `oxreal-shader-compiler` (dev-dependencies are
+    exempt from the layer check): cook into a temporary directory, then load it;
+  - a GPU test that renders a hand-made `RenderWorld` from a freshly cooked temporary cache and
+    reads pixels back, run on Lavapipe in CI;
+  - the layout test that `tests/shader_layout.rs` provides today, kept for the renderer's
+    shaders.
 - **Player:**
-  - CI cooks the shaders, then runs the player for a set number of frames under Xvfb, failing
-    on any validation error;
+  - unit tests for resolving the cooked root on Windows-style and Unix-style paths;
   - the demo scene's systems keep their unit tests.
+- **CI:** the existing `vulkan (lavapipe, …)` jobs gain two steps: cook the shaders, then run
+  the player for a set number of frames under Xvfb, failing on any validation error. Job names
+  don't change, so the ruleset doesn't either. `cargo xtask ci` doesn't cook, because that
+  needs `slangc` and `spirv-val`.
+- **Windows:** the player is run by hand on Windows with a real GPU, and the PR records it. CI's
+  Windows job builds and unit-tests it but has no GPU.
 
 ## Consequences
 
 - **Positive:**
   - M1 has a real executable with no compiler inside, built from layered crates.
-  - The editor viewport (M2) can reuse the renderer unchanged.
-  - Shaders reach the GPU only from validated, hash-checked output.
+  - The editor viewport (M2) can reuse the renderer and the bridge unchanged.
+  - Shaders reach the GPU only from validated output, cooked from the exact sources the
+    renderer was built for.
 - **Negative / costs:**
-  - A cook step before running the player: `cargo xtask cook-shaders`, and in CI. A missing or
-    stale cache is a clear startup error, never a silent mismatch.
+  - A cook step before running the player: `cargo xtask cook-shaders`, and in CI. A missing,
+    stale or corrupted cache is a clear startup error, never a silent mismatch.
+  - Developers need `spirv-val`, which comes with the Vulkan SDK, to cook. `setup.md` says so.
   - `sha2` and `serde_json` ship in the player.
   - The demo scene and the fly camera live in the player until scenes and the gameplay camera
     exist.
 - **Follow-up work:**
-  - The implementation PR: renderer, player, the cook command, CI.
-  - Extraction glue moving to the gameplay layer with the editor.
+  - The implementation PR: renderer, bridge, player, cooking, CI, docs.
   - Scene loading (D-07).
   - The asset pipeline's cooked cache (D-08).
 - **Revisit triggers:**
   - The cook step proving error-prone in daily work. The next step would then be automatic
-    cooking on build in the editor or `xtask`, never a compiler in the game.
-  - A second backend, whose shaders would need per-target cooked output.
+    cooking when building or running, never a compiler in the game.
+  - A second backend, whose shaders need per-target cooked output.
