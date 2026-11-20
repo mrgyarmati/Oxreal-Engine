@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-20
-- **Related:** PRD §5–§7, TAD §5.1, §5.6 and §5.8, ADR-0005 (ECS and hierarchy), ADR-0006 (overrides), ADR-0007 (clean room), ADR-0014 (ECS), D-02, D-07, D-12, D-20 (resolved here), D-21, D-22 (opened here). **Supersedes ADR-0008.**
+- **Related:** PRD §3 (users), §6 (editor), §7 (gameplay, graphs, languages) and §8 (M4, M6), TAD §5.1, §5.6 and §5.8, ADR-0005 (ECS and hierarchy), ADR-0006 (overrides, Proposed), ADR-0007 (clean room), ADR-0014 (ECS), D-02, D-07, D-12, D-20 (resolved here), D-21, D-22 (opened here). **Supersedes ADR-0008.**
 
 ## Context
 
@@ -72,7 +72,8 @@ alone push every door and pickup into a dedicated system.
 ### 2. Gameplay is capabilities, relations and systems
 - **A capability is data:** components that say what an entity can do or how it takes part in
   gameplay (`Health`, `Interactable`, `CharacterMovement`, `PlayerControlled`). Components
-  carry no logic of their own.
+  carry no gameplay logic. (A component type's lifecycle hooks, ADR-0014 §4, maintain engine
+  invariants only. See §3.)
 - **Logic lives in systems** that declare their access and run in the schedule's stages
   (ADR-0014 §5). Bulk and continuous simulation always belong here.
 - **Links between entities are relations**, with consistency kept by hooks, as for the
@@ -100,38 +101,52 @@ alone push every door and pickup into a dedicated system.
 ### 3. Three execution mechanisms, one access model
 - **Systems:** the primary mechanism, as above.
 - **Events and observers** for reactions: something happened (spawned, despawned, damaged,
-  opened), and systems that declared interest react. Their contract is decided in its own ADR
-  (D-22) before any gameplay depends on them. That ADR must define:
-  - ordering relative to stages and deferred commands;
-  - lifetime and delivery guarantees;
-  - how readers and writers are declared, so the scheduler sees them.
-
-  ECS lifecycle hooks stay what ADR-0014 §4 made them: engine invariants such as relation
-  inverses, never a gameplay event mechanism.
+  opened), and systems that declared interest react.
+  - **The base is decided:** ADR-0014 §8 makes events typed, double-buffered per frame, and
+    readable by every system that declares them.
+  - **D-22 decides the rest** before any shipping gameplay depends on events: observers,
+    ordering relative to stages and deferred commands, and anything §8 leaves open. If D-22
+    changes §8's base, it amends ADR-0014.
+- **Hooks and events, checkably:** an engine hook **may emit** an event. It records it into a
+  resource, as ADR-0014 §4 amendment item 6 records changes, and that's how spawned and
+  despawned events will arise. **Gameplay code never registers hooks and never reacts inside
+  one.** It reacts to the events, in systems. Hooks stay what ADR-0014 §4 made them: engine
+  invariants such as relation inverses.
 - **State machines and graphs** for stateful, designer-authored logic (a door, a boss's phases,
   a quest). An entity carries the graph's state and a reference to its asset as components.
-  **Executor systems** run the graphs in a stage, with access declared to the scheduler: the
-  union of what the graphs can touch. Visual scripting (D-12) must fit this contract.
+  **Executor systems** run the graphs in a stage, with access declared to the scheduler: at
+  least the union of what the graphs they run can touch. D-12 may make declarations finer.
+  Visual scripting (D-12) must fit this contract.
 
 **No per-object callbacks are a runtime concept.** Nothing ticks itself, and there's no
 `begin_play`, `tick` or `end_play` trait. "This door has its own logic" is data (a graph and its
 state) that a scheduled system runs.
 
-### 4. Authored data stays separate from runtime state
+### 4. Authored data stays separate from simulated state
+
+The separation is **between worlds (and the level file), not between ECS and non-ECS data.**
+ADR-0005's amendment stands: the authoring hierarchy is ECS data, one source of truth, with no
+separate store.
+
 - **"Actor" is an authoring term:** an object placed in a level, with a stable object ID, a
   transform and a place in the hierarchy, listed in the World Outliner. The editor may use it
   freely in its UI.
 - **Identity:** stable object IDs identify authored objects in files, templates and
   references. `Entity` handles are runtime-only and never saved (ADR-0014 §3).
 - **Actor templates** (prefabs, Unreal's Blueprint classes) are authoring assets: components,
-  default values, children and optionally a graph. Instances store overrides (ADR-0006).
-  Instantiating one creates ordinary entities. A template is never a runtime class.
+  default values, children and optionally a graph. Instantiating one creates ordinary
+  entities. A template is never a runtime class. How instances store their overrides is decided
+  with D-07, reusing the property-path override model of ADR-0006 (Proposed) where it fits.
+- **The editor edits an ECS world.** Its hierarchy is `ChildOf`/`Children` (ADR-0005), and its
+  objects carry their stable IDs as components. Only editor-only metadata (selection, locking,
+  folders) may live outside that world, and it stays out of cooked runtime data.
 - **Levels are instantiated into worlds:** loading resolves assets, spawns entities and links
-  relations. Runtime changes never silently write back to authored data. Play in Editor runs
-  in its own world, and stopping it restores the authored state. The file format and the
-  editor's in-memory representation of a level are decided with D-07 and the editor. They must
-  keep this separation, and the runtime hierarchy stays ECS data (the ADR-0005 amendment).
-- Editor-only metadata (selection, locking, folders) stays out of cooked runtime data.
+  relations. Play in Editor gets **its own world**, instantiated from the edited world (unsaved
+  edits included, as in Unreal). Stopping it
+  discards that world, so the edited world is untouched. Runtime changes never silently write
+  back to authored data.
+- The level file format, and how the editor world is saved and loaded, are decided with D-07,
+  within these rules.
 
 ### 5. What carries over from ADR-0008
 - **Unreal terminology in user-facing text** where it's the established term (PRD §6), with
@@ -144,20 +159,35 @@ state) that a scheduled system runs.
 - **Stages** are Unreal's tick groups by another name (ADR-0014 §5).
 
 ### 6. Validated by a prototype before the gameplay framework grows
-Before gameplay features beyond the M1 player are built (and before M4), a vertical slice
-exercises the model end to end:
-- a player-controlled character with movement and health, possessed through a relation;
-- a door driven by a state machine;
-- a thousand AI-controlled agents;
-- projectiles and damage events;
-- a level saved, reloaded and run in Play in Editor without losing authored changes.
+**The gate:** the prototype comes before the first gameplay-capability crate, meaning any crate
+in the `gameplay` layer other than ADR-0019's `oxreal-render-bridge`, and before M4.
 
-It records its benchmarks: bulk iteration, structural changes, event dispatch, state-machine
-execution, scheduler overhead and level instantiation. What it shows can amend this ADR. Until
-then, these stay open:
-- the event and observer contract (D-22);
+**The order:**
+1. **The prototype** is a vertical slice that exercises the model end to end:
+   - a player-controlled character with movement and health, possessed through a relation;
+   - a door driven by a state machine, written as a Rust state-machine component plus its
+     system;
+   - a thousand AI-controlled agents;
+   - projectiles and damage events;
+   - a level saved, reloaded and run in Play in Editor without losing authored changes. Until
+     the editor and D-07 exist, the slice can show this with two worlds and a stand-in level.
+
+   It lives in examples or on a branch, never in a crate the engine ships. It may use
+   **provisional, non-shipping** event and state-machine mechanisms, so it doesn't wait for
+   the decisions it informs.
+2. It records its benchmarks: bulk iteration, structural changes, event dispatch,
+   state-machine execution, scheduler overhead and level instantiation.
+3. **From that evidence**, the D-22 ADR (events and observers) is written, before any
+   shipping gameplay uses events. Anything the prototype contradicts here amends this ADR.
+4. Gameplay-capability crates follow.
+
+**What the prototype doesn't test:** designer-authored graphs. Their execution and access
+declarations stay with D-12 (visual scripting, M6), so the first revisit trigger below can
+only fire then.
+
+Still open after it:
+- the event and observer contract (D-22), as above;
 - how graphs declare their access (D-12);
-- which authoring relations, if any, stay in the level file rather than the world (D-07);
 - when and which component types need sparse-set storage (ADR-0014).
 
 ### 7. Other languages

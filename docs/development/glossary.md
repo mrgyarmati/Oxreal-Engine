@@ -16,7 +16,8 @@ is our own (ADR-0007).
 | **World** | The ECS container for one simulation: entities, components and resources | Level |
 | **Actor** | An authoring term: an object placed in a level, with a stable object ID, a transform and a place in the hierarchy. What the World Outliner lists. At run time it's an entity; there is no `Actor` type (ADR-0020). | Entity, which can be internal and not placed |
 | **Pawn**, **Character**, **Controller**, **PlayerController**, **GameMode**, **GameState**, **PlayerState** | Unreal-equivalent gameplay roles, built as compositions of capabilities, relations and systems (ADR-0020) | Classes: they aren't |
-| **Event** | A notification that something happened (spawned, damaged, opened), which systems that declared interest react to. Contract in D-22. | Lifecycle hook, which maintains engine invariants |
+| **Relation** | A link between entities stored as a component, with its inverse kept consistent by hooks: `ChildOf`/`Children`, possession (ADR-0014 §3) | A pointer field, which nothing keeps consistent |
+| **Event** | A notification that something happened (spawned, damaged, opened), which systems that declared interest react to. An **observer** reacts to one; its exact form, like the rest of the contract, is decided in D-22. | Lifecycle hook, which maintains engine invariants |
 | **Graph** | A state machine or visual script that an entity carries as data, run by a scheduled executor system (ADR-0020, D-12). The home of per-object designer logic. | A per-object tick callback, which Oxreal doesn't have |
 | **Actor template** | A reusable, overridable authored definition: components, defaults, children and optionally a graph. Unreal's Blueprint class, also known as a prefab. Instantiating one creates ordinary entities. | A runtime class |
 | **Level** | A saved arrangement of actors that can be loaded into a world | Scene, World |

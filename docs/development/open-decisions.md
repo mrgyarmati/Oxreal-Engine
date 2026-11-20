@@ -28,7 +28,7 @@ decision and consequences (use the `adr-author` agent). Update the status here w
 | D-19 | GPU testing in CI (lavapipe / SwiftShader software Vulkan, self-hosted GPU runners) | M1 | Open | |
 | D-20 | Gameplay framework model: Actor/Pawn/Controller/GameMode concepts on ECS, per-object logic, templates | before M4 (shapes M1 ECS) | **Resolved**: capabilities, relations and systems on the ECS; events and scheduled state machines/graphs for per-object logic; "Actor" is an authoring term; no per-object callbacks. Supersedes ADR-0008 | [ADR-0020](../decisions/0020-capability-oriented-gameplay-on-the-ecs.md) |
 | D-21 | Additional languages: C++ and C# via a stable C ABI and generated bindings (.NET hosting model, header generation, ownership and threading rules, layer placement). Constraints already apply to D-02, D-11 and D-13 (TAD §5.8) | constraints now, ADR after the Rust gameplay API stabilizes | Open | |
-| D-22 | Gameplay events and observers: ordering relative to stages and deferred commands, lifetime, delivery guarantees, declared readers and writers (ADR-0020 §3) | before gameplay code relies on events (before M4) | Open | |
+| D-22 | Gameplay events and observers: ordering relative to stages and deferred commands, lifetime, delivery guarantees, declared readers and writers (ADR-0020 §3, building on ADR-0014 §8) | after the ADR-0020 §6 prototype, before shipping gameplay uses events (before M4) | Open | |
 
 ## Risks
 

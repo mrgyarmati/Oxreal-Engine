@@ -723,10 +723,14 @@ amendment and ADR-0005's amendment.
 ADR-0020 supersedes ADR-0008. This ADR's references to ADR-0008 read as follows:
 - **ADR-0008 §3's requirements** (relations, hooks, deferred commands, stages,
   reflection-driven access, constant-time `has`) stay commitments of this ECS (ADR-0020 §5).
-- **There are no Behaviours.** The first slice's note that "Behaviours (ADR-0008 §2) can be
+- **There are no Behaviours.** The second slice's note that "Behaviours (ADR-0008 §2) can be
   built on this", with an `ActorCtx` driver system, no longer describes planned work.
   Per-object logic is data that scheduled executor systems run (ADR-0020 §3). The entity-row
   view and declaration by `ComponentId` noted there may still serve those executors (D-12).
-- **`begin_play`, `end_play` and other gameplay events** are events (ADR-0020 §3). §8's
-  "the detailed event and observer design follows with the gameplay framework" is D-22. §4
-  stands: hooks maintain engine invariants and aren't gameplay events.
+- **`begin_play`, `end_play` and other gameplay events** are events (ADR-0020 §3), built on
+  §8's typed, per-frame double-buffered events. §8's "the detailed event and observer design
+  follows with the gameplay framework (ADR-0008)" is D-22, as is §4 amendment item 6's
+  "observers across crates".
+- **§4 stands, made checkable by ADR-0020 §3:** an engine hook may emit an event by recording it
+  into a resource (§4 amendment item 6). Gameplay code never registers hooks and never reacts
+  inside one.

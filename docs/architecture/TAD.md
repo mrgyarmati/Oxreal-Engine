@@ -157,8 +157,9 @@ The design is open (D-02) but must be decided before M2.
   systems run with declared access (D-12).
 - **"Actor" is an authoring term:** an object placed in a level, with a stable object ID.
   **Actor templates** (prefabs, Unreal's Blueprint classes) are authoring assets whose
-  instances store overrides (ADR-0006). Levels are instantiated into worlds, and Play in Editor
-  runs in its own world, so runtime changes never write back to authored data.
+  instances store overrides (decided with D-07, reusing ADR-0006's model where it fits). The
+  editor edits an ECS world. Levels are instantiated into worlds, and Play in Editor runs in its
+  own world, so runtime changes never write back to authored data.
 - Unreal tick groups map to schedule stages (ADR-0014 §5):
   `Input → PrePhysics → DuringPhysics → PostPhysics → PostUpdate → Extract`.
   Gameplay runs in `PrePhysics` by default, like Unreal's default actor tick group.
