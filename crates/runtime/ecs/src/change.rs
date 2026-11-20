@@ -1,14 +1,17 @@
 //! Change detection (ADR-0014 §6): ticks, and mutable access that records writes.
 //!
-//! - The world keeps a **tick**, a 32-bit counter. Every component value (and resource) records
-//!   the tick it was **added** at and the tick it was last **changed** at.
+//! - The world counts **ticks** in 64 bits. Every component value (and resource) records the
+//!   tick it was **added** at and the tick it was last **changed** at, in 32 bits.
 //! - Each system run gets the current tick as its *now*, and the world moves to the next tick
 //!   after the run. So a system's own writes carry its *now*, and every write made after it ran
 //!   (by later systems, commands, hooks, or code using the [`crate::World`] directly) carries a
 //!   later tick.
 //! - A system's [`crate::Changed`] and [`crate::Added`] filters compare a value's tick with the
-//!   system's previous run. It sees what changed since then, never its own writes. On its first
-//!   run, everything counts as added and changed.
+//!   system's previous completed run. It sees every write made since: other systems', hooks',
+//!   direct [`crate::World`] writes, and commands, its own included (they apply at the sync
+//!   point after it). It doesn't see what it wrote itself, through its `SystemWorld` or
+//!   `SystemResources`, in that previous run. On its first run, everything counts as added and
+//!   changed. A run that panicked doesn't count: its changes are seen again.
 //! - Writing through [`Mut`] ([`DerefMut`], [`Mut::into_inner`]) stamps the value as changed.
 //!   Merely fetching it doesn't.
 //!

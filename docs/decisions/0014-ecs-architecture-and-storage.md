@@ -739,65 +739,94 @@ ADR-0020 supersedes ADR-0008. This ADR's references to ADR-0008 read as follows:
 
 §6 is implemented. What it settles beyond §6's text:
 
-- **When a tick advances.** The world counts ticks. Each system run takes the current count as
-  its *now* and moves the world to the next. So a system's writes carry its *now*, and every
-  later write, whether by a later system, a sync point's commands, a hook, or code using the
-  `World` directly, carries a later tick. A system's `Added<T>`/`Changed<T>` see what happened
-  after its previous run, up to *now*:
-  - others' writes, never its own;
-  - everything, on its first run.
-- **Queries on the `World` directly** have no previous run, so `Added` and `Changed` let every
-  value through, as on a system's first run. Code that tracks changes runs as a system.
-- **What counts as a change:** writing through `Mut` (`DerefMut`, `into_inner`), `modify`, and
-  replacing a component by `insert`. Fetching mutably without writing doesn't count. Replacing
-  isn't *adding*; removing and inserting again is. Moving between archetypes keeps a value's
-  ticks.
+- **When a tick advances.** The world counts ticks in 64 bits. Each system run takes the current
+  count as its *now* and moves the world to the next. So a system's own writes carry its *now*,
+  and every later write carries a later tick: a later system's, a sync point's commands, a
+  hook's, or a direct `World` write.
+- **What a system sees.** A system's `Added<T>`/`Changed<T>` see every write made after its
+  previous *completed* run:
+  - other systems', hooks', direct `World` writes, and commands, its own included (they apply
+    at the sync point after it);
+  - not what it wrote itself through `ctx.world` or `ctx.resources` in that previous run;
+  - everything, on its first run;
+  - after a panic, everything again: a run that panicked doesn't count, so its changes, its own
+    partial writes included, are reported twice rather than lost.
+- **A schedule is bound to the world it last ran on.** Previous runs are counts in that world's
+  ticks, so a schedule run on a different world starts over: every system's next run is a first
+  run. Worlds carry an internal identity (`WorldId`) for this, from a process-wide counter. That
+  counter is the one piece of process-wide state: it holds nothing about any world, only
+  guarantees distinct numbers (CLAUDE.md rule 8 forbids global state as a shortcut; this is
+  identity, like `TypeId`). Entity handles still carry no world identity (first slice's notes).
+- **Only systems take change filters.** `World::query_filtered` and `query_filtered_mut` accept
+  a `ComponentFilter` (`With`, `Without`, `()`, tuples of them): code outside a system has no
+  previous run to compare with. A query on the world with `Changed<T>` is a compile error, not a
+  silent "everything changed". Code that tracks changes runs as a system.
+- **What counts as a change:**
+  - writing through `Mut` (`DerefMut`, `into_inner`);
+  - `World::modify`, but only if `edit` writes through its `Mut`. Its `on_insert` hook
+    (`HookCause::Modify`) runs either way, so hooks and filters can disagree about an edit that
+    wrote nothing;
+  - replacing a component with `insert`.
+
+  Fetching mutably without writing doesn't count. Replacing isn't *adding*; removing and
+  inserting again is. Moving between archetypes keeps a value's ticks. A replacement is stamped
+  before the old value is dropped, so a panicking `Drop` can't lose it.
 - **Resources** record the same ticks. `SystemResources::{is_added, is_changed}` answer the
-  same way (ADR-0014 §8 anticipated it).
+  same way (§8 anticipated it).
 - **Filters read data.** Using `Added<T>` or `Changed<T>` in a system needs `reads::<T>()` or
-  `writes::<T>()`, like any query data. `(&mut T, Changed<T>)` is allowed.
-- **Storage stays free of `unsafe`.** Ticks live beside each type-erased column, row for row:
-  32-bit added ticks, and 32-bit *changed* ticks as relaxed atomics. The atomics are what let a
-  query stamp a value through `&mut T` while its `Changed<T>` filter reads the same column,
-  without `unsafe`. On common hardware a relaxed atomic is an ordinary load or store, and the
-  scheduler orders systems that touch the same data. `Mut` stamps once per access, however many
-  times it's written through.
+  `writes::<T>()`, like query data. `(&mut T, Changed<T>)` is allowed.
+- **Storage stays free of `unsafe`.** Each type-erased column has a tick column beside it, one
+  entry per row holding the 32-bit added tick and the 32-bit *changed* tick. The changed tick is
+  a relaxed atomic: that's what lets a query stamp a value through `&mut T` while its
+  `Changed<T>` filter reads the same column, without `unsafe`. A relaxed atomic is an ordinary
+  load or store on common hardware, and the scheduler orders systems that touch the same data.
+  `Mut` stamps once per access, however many times it's written through.
+- **Row filters.** `With`/`Without` choose whole archetypes. `Added`/`Changed` test rows, and
+  the per-row test is compiled out of queries without them. Rows are matched to items by
+  counting, so every query data yields exactly one item per row; a debug assertion checks it.
 - **Wraparound, and why nothing is lost.**
-  - The world counts in 64 bits, and systems remember their previous run as a 64-bit count, so a
-    system idle for any length of time compares correctly.
+  - Systems remember their previous run as a 64-bit count, so a system idle for any length of
+    time compares correctly.
   - Values store 32 bits, compared by age relative to *now*.
   - Every 2²⁸ ticks (during a system run), the world clamps stored ticks to at most `3 × 2³⁰`
-    old. Without that, an ancient change would wrap around and look new again.
+    old. Without that, an ancient change would wrap around and look new again. The pass walks
+    every stored tick: a bounded hitch, roughly every 12 hours at 100 systems at 60 Hz.
   - A system's comparison point is clamped one interval *older* than any stored tick can be.
     Clamping can therefore report a value as changed when it wasn't, but never miss a change.
   - Tests cross the 2³² horizon in realistic steps, and each mechanism has a test that fails
-    without it (checked by removing it).
-- **Row filters cost nothing when unused.** `With`/`Without` still choose whole archetypes.
-  `Added`/`Changed` test rows, and the per-row test is compiled out of queries without them.
+    without it (checked by removing it), as do the world binding and the stamp-before-replace
+    order.
 - **Measured** (Windows, 32 logical CPUs, release builds, median of 11 runs, same machine and
-  session for both):
+  session). The middle column is `main` with only the iterator inline fix below, so the last
+  column against it is the cost of change detection itself:
 
-  | Workload | Before | After |
-  |---|---|---|
-  | iterate `(&mut Position, &Velocity)`, 100k, 1 archetype | 0.341 ms | **0.126 ms** |
-  | same, 100 archetypes | 0.367 ms | 0.172 ms |
-  | spawn 100k `(Position, Velocity)` | 5.2 ms | 6.4 ms |
-  | despawn 100k | 1.5 ms | 1.8 ms |
-  | tag churn, 10k | 1.36 ms | 1.32 ms |
-  | propagate 111,100 entities | 5.4 ms | 5.7 ms |
-  | attach 10,000 children one by one | 14.4 ms | 14.7 ms |
+  | Workload | `main` | `main` + inline fix | change detection |
+  |---|---|---|---|
+  | iterate `(&mut Position, &Velocity)`, 100k, 1 archetype | 0.341 ms | 0.097 ms | 0.137 ms |
+  | same, 100 archetypes | 0.367 ms | 0.136 ms | 0.172 ms |
+  | spawn 100k `(Position, Velocity)` | 5.2 ms | 5.3 ms | 6.4 ms |
+  | despawn 100k | 1.5 ms | 1.5 ms | 1.7 ms |
+  | tag churn, 10k | 1.36 ms | 1.34 ms | 1.50 ms |
 
-  - **Iteration is faster** than before, despite stamping. Measuring variants of the first version
-    showed the cost wasn't the ticks: `QueryIter::next` and the tuple zip weren't `#[inline]`,
-    so each item was passed through memory. Marking them fixed that. The fix applies to every
-    query, including read-only ones (not separately measured).
-  - **Spawn and despawn** are about 20% slower: each value now pushes and removes two ticks.
-  - **One benchmark arrangement isn't explained.** With exactly the attach benchmark's original
-    list of sizes (`[1_000, 10_000]`), the 10,000 case measured 25 ms against 14 ms. With any
-    other list (`[2_500, 5_000, 10_000, 20_000]`, or `[1_000, 10_000]` repeated), both measure
-    14–15 ms. The code measured is identical, so this is how that one benchmark binary was
-    compiled (inlining and layout), not the ECS. It's recorded so a future reader doesn't chase
-    it twice.
+  - **The inline fix is separate from change detection.** While measuring the first version
+    (which made iteration 60% slower), varying the code showed that `QueryIter::next` and the
+    tuple zip weren't `#[inline]`, so each item was passed through memory. Marking them made
+    `main`'s own iteration 3.5× faster.
+  - **Change detection costs about 40%** in the tightest write loop (one stamp per entity in a
+    loop that does almost nothing else), and about 15–20% on spawn and despawn (one more tick
+    entry per value). Keeping both ticks in one entry, rather than two vectors, roughly halved
+    the despawn cost.
+  - **Filtering on changes** (a system summing one field of 100k entities): no filter 0.066 ms;
+    `Changed<T>` with 1% changed 0.050 ms; with all changed 0.130 ms. The filter still checks
+    every row's tick, so it pays off when the work per changed entity is expensive (uploads,
+    rebuilds), not for trivial work.
+  - **Transform propagation** (111,100 entities): 5.4 ms before, 5.7 ms after.
+  - **An unexplained benchmark result.** With exactly the hierarchy benchmark's original list of
+    attach sizes (`[1_000, 10_000]`), attaching 10,000 children measured 25 ms against 14 ms on
+    `main`, reproducibly. With other lists (`[2_500, 5_000, 10_000, 20_000]`, or
+    `[1_000, 10_000]` repeated), both measure 14–15 ms. The hypothesis is code generation in
+    that one benchmark binary (inlining or layout), since the measured code is identical. It
+    wasn't confirmed with a profiler, so treat it as an open question if attach times matter.
 - **Not done here:** dynamic queries (§7); `Ref<T>`-style query data that exposes a value's
   ticks; and a "removed" history (hooks see removals as they happen). Render extraction and the
   hierarchy don't use the filters yet: making them incremental is its own change, measured

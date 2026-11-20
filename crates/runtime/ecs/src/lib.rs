@@ -66,10 +66,11 @@
 //! # Change detection
 //!
 //! Every component value and resource records when it was added and last changed. A system's
-//! [`Added`] and [`Changed`] filters see what happened since its previous run: others' writes,
-//! never its own, and everything on its first run. [`SystemResources::is_added`] and
-//! [`SystemResources::is_changed`] do the same for resources. Queries made on the [`World`]
-//! directly have no previous run, so there everything counts.
+//! [`Added`] and [`Changed`] filters see what happened since its previous run: every write since
+//! then (commands included, its own too), except what it wrote itself during that run. On its
+//! first run, everything counts. [`SystemResources::is_added`] and
+//! [`SystemResources::is_changed`] do the same for resources. Only systems have a previous run,
+//! so queries on the [`World`] itself don't accept these filters.
 //!
 //! Relations (`ChildOf` and `Children`) live in `oxreal-hierarchy`, built on hooks. Dynamic
 //! (reflection-driven) queries follow.
@@ -98,7 +99,8 @@ pub use component::{Component, ComponentHooks, Hook, HookCause, HookContext};
 pub use entity::Entity;
 pub use hook::HookWorld;
 pub use query::{
-    Added, Changed, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With, Without,
+    Added, Changed, ComponentFilter, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With,
+    Without,
 };
 pub use resource::Resource;
 pub use schedule::{

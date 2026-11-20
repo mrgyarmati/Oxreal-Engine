@@ -3,6 +3,7 @@
 use std::any::TypeId;
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use oxreal_diagnostics::warn;
@@ -13,7 +14,7 @@ use crate::command::{CommandQueue, Source};
 use crate::component::{Component, ComponentId, Components, HookCause, HookContext, HookKind};
 use crate::entity::{Entities, Entity, Location};
 use crate::hook::HookWorld;
-use crate::query::{self, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
+use crate::query::{self, ComponentFilter, QueryData, QueryIter, ReadOnlyQueryData};
 use crate::resource::{Resource, Resources};
 use crate::storage::{self, ArchetypeId, Archetypes};
 use crate::type_map::TypeIdMap;
@@ -29,6 +30,23 @@ pub enum EcsError {
     /// change any more.
     #[error("{0:?} is being despawned, so its components can't change")]
     Despawning(Entity),
+}
+
+/// Identifies a world, so a [`crate::Schedule`] can tell when it runs on a different one (its
+/// systems' previous runs were then in another world's ticks, ADR-0014 §6). Internal: entity
+/// handles carry no world identity (ADR-0014, first slice's notes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorldId(u64);
+
+impl WorldId {
+    /// A new, unique identity.
+    fn unique() -> Self {
+        // A process-wide counter, not shared state: it holds nothing about any world, only
+        // guarantees that no two worlds get the same number (CLAUDE.md rule 8 forbids global
+        // state as a shortcut; this is identity, like `TypeId`). 64 bits never run out.
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
 }
 
 /// Every entity, component and resource of one simulation (ADR-0014).
@@ -64,6 +82,8 @@ pub struct World {
     change_tick: Tick,
     /// The count when stored ticks were last clamped.
     last_clamp: u64,
+    /// This world's identity.
+    id: WorldId,
 }
 
 /// What the world knows about a bundle type.
@@ -132,6 +152,7 @@ impl World {
             tick_count: 1,
             change_tick: Tick::from_count(1),
             last_clamp: 1,
+            id: WorldId::unique(),
         }
     }
 
@@ -281,7 +302,8 @@ impl World {
     /// like [`World::get_mut`], except that it refuses an entity being despawned.
     ///
     /// `edit` gets the value as [`Mut`]: writing through it marks the value changed
-    /// ([`crate::Changed`], ADR-0014 §6).
+    /// ([`crate::Changed`], ADR-0014 §6). The hooks run either way, so an edit that writes nothing
+    /// still runs `on_insert` but isn't a change.
     ///
     /// ```
     /// use oxreal_ecs::{Component, World};
@@ -332,7 +354,7 @@ impl World {
             .and_then(|(column, ticks)| {
                 Some((
                     column.get_mut(location.row)?,
-                    ticks.changed().get(location.row)?,
+                    &ticks.rows().get(location.row)?.changed,
                 ))
             })
         else {
@@ -430,14 +452,24 @@ impl World {
     }
 
     /// Like [`World::query`], visiting only entities that pass filter `F` ([`crate::With`],
-    /// [`crate::Without`], [`crate::Added`], [`crate::Changed`]). A query on the world has no
-    /// previous run to compare with, so `Added` and `Changed` let every value through: track
-    /// changes in a [`crate::System`].
+    /// [`crate::Without`], or a tuple of them: a [`ComponentFilter`]).
+    ///
+    /// [`crate::Added`] and [`crate::Changed`] compare with a system's previous run, which a query
+    /// on the world doesn't have, so they're refused here at compile time. Track changes in a
+    /// [`crate::System`].
+    ///
+    /// ```compile_fail
+    /// # use oxreal_ecs::{Changed, Component, Entity, World};
+    /// struct Health(u32);
+    /// impl Component for Health {}
+    /// let world = World::new();
+    /// let changed = world.query_filtered::<Entity, Changed<Health>>().count();
+    /// ```
     ///
     /// # Panics
     ///
     /// If `D` accesses a component mutably and another way too (see [`QueryData`]).
-    pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> QueryIter<'_, D, F> {
+    pub fn query_filtered<D: ReadOnlyQueryData, F: ComponentFilter>(&self) -> QueryIter<'_, D, F> {
         QueryIter::shared(
             self.archetypes.iter(),
             query::prepare::<D, F>(&self.components),
@@ -480,7 +512,7 @@ impl World {
     /// # Panics
     ///
     /// If `D` accesses a component mutably and another way too (see [`QueryData`]).
-    pub fn query_filtered_mut<D: QueryData, F: QueryFilter>(&mut self) -> QueryIter<'_, D, F> {
+    pub fn query_filtered_mut<D: QueryData, F: ComponentFilter>(&mut self) -> QueryIter<'_, D, F> {
         let state = query::prepare::<D, F>(&self.components);
         QueryIter::unique(
             self.archetypes.iter_mut(),
@@ -575,6 +607,11 @@ impl World {
         self.despawning.clear();
         self.applying = false;
         had
+    }
+
+    /// This world's identity.
+    pub(crate) fn id(&self) -> WorldId {
+        self.id
     }
 
     /// Starts a system run: returns the tick count its writes are stamped with, and moves the
@@ -791,7 +828,7 @@ pub(crate) fn get_component_mut<'a, T: Component>(
     let (column, ticks) = archetypes.get_mut(location.archetype).column_mut::<T>(id)?;
     Some(Mut::new(
         column.get_mut(location.row)?,
-        ticks.changed().get(location.row)?,
+        &ticks.rows().get(location.row)?.changed,
         now,
     ))
 }

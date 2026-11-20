@@ -15,7 +15,7 @@ use crate::entity::{Entities, Entity};
 use crate::query::{self, AccessKind, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
 use crate::resource::{Resource, Resources};
 use crate::storage::Archetypes;
-use crate::world::{self, World};
+use crate::world::{self, World, WorldId};
 
 /// When in a frame a system runs: Unreal's tick groups, preceded by input (ADR-0014 §5,
 /// ADR-0020 §5). Each stage ends with a **sync point**, where the commands its systems recorded
@@ -526,6 +526,8 @@ pub struct Schedule {
     stages: [Vec<System>; STAGE_COUNT],
     /// Per stage, indices into `stages` in run order. `None` until validated.
     order: Option<[Vec<usize>; STAGE_COUNT]>,
+    /// The world it last ran on. Its systems' previous runs are counted in that world's ticks.
+    world: Option<WorldId>,
 }
 
 impl Schedule {
@@ -575,6 +577,10 @@ impl Schedule {
     /// Commands are applied per system in the stage's run order, and each system's commands in
     /// the order it recorded them (ADR-0014 §5).
     ///
+    /// Systems' [`crate::Added`] and [`crate::Changed`] filters compare with their previous run on
+    /// the same world. Run on a different world than last time, every system starts over: its
+    /// next run counts everything as added and changed, as a first run does.
+    ///
     /// # Errors
     ///
     /// As for [`Schedule::validate`]. Nothing runs if the schedule is invalid.
@@ -586,12 +592,22 @@ impl Schedule {
     /// - component values already written stay written;
     /// - none of the stage's remaining commands are applied: they're discarded, with a warning;
     /// - handles that discarded `spawn` commands reserved never become live, and their slots are
-    ///   never reused, so they can't alias.
+    ///   never reused, so they can't alias;
+    /// - the panicking system's run doesn't count as its previous run: next time it sees again
+    ///   everything that run saw, and the writes it made before panicking. Changes are reported
+    ///   twice rather than lost.
     ///
     /// The schedule and the world stay usable for the next run.
     pub fn run(&mut self, world: &mut World) -> Result<(), ScheduleError> {
         oxreal_diagnostics::profile_function!();
         self.validate()?;
+        // Previous runs on another world mean nothing here: start over, as on a first run.
+        if self.world != Some(world.id()) {
+            for system in self.stages.iter_mut().flatten() {
+                system.last_run = None;
+            }
+            self.world = Some(world.id());
+        }
         let Some(order) = &self.order else {
             return Ok(());
         };

@@ -4,10 +4,10 @@ use std::any::{TypeId, type_name};
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::change::{ChangeWindow, ChangedTick, Mut, Tick};
+use crate::change::{ChangeWindow, Mut, Tick};
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
-use crate::storage::{Archetype, TableView};
+use crate::storage::{Archetype, ColumnTicks, RowTicks, TableView};
 
 use self::sealed::RowTest as _;
 
@@ -34,6 +34,11 @@ pub trait ReadOnlyQueryData: QueryData {}
 /// hold).
 pub trait QueryFilter: sealed::Filter {}
 
+/// A [`QueryFilter`] on which components an entity has: [`With<T>`], [`Without<T>`], `()`, or a
+/// tuple of these. Unlike [`Added`] and [`Changed`], it doesn't depend on a previous run, so
+/// queries on the [`crate::World`] itself accept it.
+pub trait ComponentFilter: QueryFilter {}
+
 pub(crate) mod sealed {
     use super::{Access, Archetype, ChangeWindow, Components, TableView, TypeId};
 
@@ -51,7 +56,8 @@ pub(crate) mod sealed {
         fn prepare(components: &Components) -> Self::State;
         /// Whether an archetype's entities have what this needs.
         fn matches(state: &Self::State, archetype: &Archetype) -> bool;
-        /// Iterates the items of a matching archetype. Writes are stamped at `window.now`.
+        /// Iterates the items of a matching archetype: exactly one per row, in row order (row
+        /// filters rely on it). Writes are stamped at `window.now`.
         fn iter<'w>(
             state: &Self::State,
             view: &mut TableView<'w>,
@@ -189,7 +195,7 @@ fn take_for_writing<'w, T: Component>(
         );
     };
     Some(MutIter {
-        rows: values.iter_mut().zip(ticks.changed()),
+        rows: values.iter_mut().zip(ticks.rows()),
         now,
     })
 }
@@ -232,7 +238,7 @@ impl<T: Component> QueryData for &mut T {}
 pub struct MutIter<'w, T> {
     /// Values and their changed ticks, stepped together (`Zip` of two slices steps both with one
     /// index).
-    rows: std::iter::Zip<std::slice::IterMut<'w, T>, std::slice::Iter<'w, ChangedTick>>,
+    rows: std::iter::Zip<std::slice::IterMut<'w, T>, std::slice::Iter<'w, RowTicks>>,
     now: Tick,
 }
 
@@ -241,8 +247,8 @@ impl<'w, T> Iterator for MutIter<'w, T> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let (value, changed) = self.rows.next()?;
-        Some(Mut::new(value, changed, self.now))
+        let (value, ticks) = self.rows.next()?;
+        Some(Mut::new(value, &ticks.changed, self.now))
     }
 
     #[inline]
@@ -448,6 +454,7 @@ macro_rules! tuple_queries {
         }
 
         impl<$($name: QueryFilter),+> QueryFilter for ($($name,)+) {}
+        impl<$($name: ComponentFilter),+> ComponentFilter for ($($name,)+) {}
     };
 }
 
@@ -494,6 +501,7 @@ impl sealed::Filter for () {
 }
 
 impl QueryFilter for () {}
+impl ComponentFilter for () {}
 
 /// A filter: only entities that have component `T`. `T` isn't fetched.
 pub struct With<T>(PhantomData<fn() -> T>);
@@ -504,20 +512,23 @@ pub struct Without<T>(PhantomData<fn() -> T>);
 /// A filter: only entities whose component `T` was **added** since the system last ran: spawned
 /// with it, or given it by an insert. Replacing a `T` it already had isn't adding.
 ///
-/// It compares with the system's previous run, so each addition is seen once per system. On a
-/// system's first run, and in queries made on the [`crate::World`] directly (which have no
-/// previous run), every `T` counts as added. A system using it must declare reading or writing
-/// `T`.
+/// It compares with the system's previous run, so each addition is seen once per system (see
+/// [`Changed`] for exactly what counts). On a system's first run, every `T` counts as added. A
+/// system using it must declare reading or writing `T`. Only systems have a previous run, so
+/// queries on the [`crate::World`] itself don't accept it.
 pub struct Added<T>(PhantomData<fn() -> T>);
 
 /// A filter: only entities whose component `T` was **added or changed** since the system last
 /// ran. A value changes when it's written through [`crate::Mut`] or replaced by an insert;
 /// fetching it mutably without writing isn't a change.
 ///
-/// It compares with the system's previous run, so a system sees the changes others made since
-/// then, never its own. On a system's first run, and in queries made on the
-/// [`crate::World`] directly (which have no previous run), every `T` counts as changed. A system
-/// using it must declare reading or writing `T`.
+/// It compares with the system's previous run. The system sees every change made since: by other
+/// systems, hooks, direct [`crate::World`] writes, and commands, its own included (they apply at
+/// the sync point after it). It doesn't see what it wrote itself, through `ctx.world` or
+/// `ctx.resources`, in that previous run. On a system's first run, every `T` counts as changed;
+/// a run that panicked doesn't count, so its changes are seen again. A system using it must
+/// declare reading or writing `T`. Only systems have a previous run, so queries on the
+/// [`crate::World`] itself don't accept it.
 ///
 /// ```
 /// use oxreal_ecs::{Changed, Component, Resource, Schedule, Stage, System, World};
@@ -592,6 +603,7 @@ impl<T: Component> sealed::Filter for With<T> {
 }
 
 impl<T: Component> QueryFilter for With<T> {}
+impl<T: Component> ComponentFilter for With<T> {}
 
 impl<T: Component> sealed::Filter for Without<T> {
     type State = Option<ComponentId>;
@@ -614,36 +626,37 @@ impl<T: Component> sealed::Filter for Without<T> {
 }
 
 impl<T: Component> QueryFilter for Without<T> {}
+impl<T: Component> ComponentFilter for Without<T> {}
 
 /// The row test of [`Added`]: each row's added tick against the window.
 #[derive(Debug)]
 pub struct AddedRows<'w> {
-    added: &'w [Tick],
+    ticks: &'w [RowTicks],
     window: ChangeWindow,
 }
 
 impl sealed::RowTest for AddedRows<'_> {
     #[inline]
     fn keep(&self, row: usize) -> bool {
-        self.added
+        self.ticks
             .get(row)
-            .is_some_and(|&tick| self.window.contains(tick))
+            .is_some_and(|ticks| self.window.contains(ticks.added))
     }
 }
 
 /// The row test of [`Changed`]: each row's changed tick against the window.
 #[derive(Debug)]
 pub struct ChangedRows<'w> {
-    changed: &'w [ChangedTick],
+    ticks: &'w [RowTicks],
     window: ChangeWindow,
 }
 
 impl sealed::RowTest for ChangedRows<'_> {
     #[inline]
     fn keep(&self, row: usize) -> bool {
-        self.changed
+        self.ticks
             .get(row)
-            .is_some_and(|tick| self.window.contains(tick.get()))
+            .is_some_and(|ticks| self.window.contains(ticks.changed.get()))
     }
 }
 
@@ -662,9 +675,9 @@ impl<T: Component> sealed::Filter for Added<T> {
 
     fn rows<'w>(state: &Self::State, view: &TableView<'w>, window: ChangeWindow) -> Self::Rows<'w> {
         AddedRows {
-            added: state
+            ticks: state
                 .and_then(|id| view.ticks(id))
-                .map_or(&[], |ticks| ticks.added()),
+                .map_or(&[], ColumnTicks::rows),
             window,
         }
     }
@@ -691,9 +704,9 @@ impl<T: Component> sealed::Filter for Changed<T> {
 
     fn rows<'w>(state: &Self::State, view: &TableView<'w>, window: ChangeWindow) -> Self::Rows<'w> {
         ChangedRows {
-            changed: state
+            ticks: state
                 .and_then(|id| view.ticks(id))
-                .map_or(&[], |ticks| ticks.changed()),
+                .map_or(&[], ColumnTicks::rows),
             window,
         }
     }
@@ -719,9 +732,11 @@ pub struct QueryIter<'w, D: QueryData, F: QueryFilter = ()> {
     filter: F::State,
     window: ChangeWindow,
     current: Option<D::Iter<'w>>,
-    /// The current archetype's row test, and the row the next item comes from.
+    /// The current archetype's row test, the row the next item comes from, and how many rows it
+    /// has.
     rows: Option<F::Rows<'w>>,
     row: usize,
+    table_len: usize,
 }
 
 impl<'w, D: QueryData, F: QueryFilter> QueryIter<'w, D, F> {
@@ -750,6 +765,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryIter<'w, D, F> {
             current: None,
             rows: None,
             row: 0,
+            table_len: 0,
         }
     }
 
@@ -788,11 +804,18 @@ impl<'w, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, D, F> {
                             return Some(item);
                         }
                     }
+                    // Rows are matched to items by counting, so every query data must yield
+                    // exactly one item per row (`sealed::Fetch::iter`).
+                    debug_assert_eq!(
+                        self.row, self.table_len,
+                        "query data yielded a different number of items than its table has rows: \n                         a bug in oxreal-ecs"
+                    );
                 }
             }
             let mut view = self.next_table()?;
             self.rows = Some(F::rows(&self.filter, &view, self.window));
             self.row = 0;
+            self.table_len = view.len();
             self.current = Some(D::iter(&self.data, &mut view, self.window));
         }
     }

@@ -89,47 +89,48 @@ fn column_type_mismatch<T>() -> ! {
 /// its ticks shared at once.
 #[derive(Debug, Default)]
 pub(crate) struct ColumnTicks {
-    added: Vec<Tick>,
-    changed: Vec<ChangedTick>,
+    rows: Vec<RowTicks>,
+}
+
+/// One value's ticks. Kept together, so adding, moving or removing a row is one operation.
+#[derive(Debug)]
+pub(crate) struct RowTicks {
+    pub(crate) added: Tick,
+    pub(crate) changed: ChangedTick,
 }
 
 impl ColumnTicks {
     fn len(&self) -> usize {
-        self.added.len()
+        self.rows.len()
     }
 
     /// Appends the ticks of a value added at `tick`.
     fn push(&mut self, tick: Tick) {
-        self.added.push(tick);
-        self.changed.push(ChangedTick::new(tick));
+        self.rows.push(RowTicks {
+            added: tick,
+            changed: ChangedTick::new(tick),
+        });
     }
 
     fn swap_remove(&mut self, row: usize) {
-        self.added.swap_remove(row);
-        self.changed.swap_remove(row);
+        self.rows.swap_remove(row);
     }
 
     /// Moves a row's ticks to the end of `to`, like [`AnyColumn::swap_remove_into`].
     fn swap_remove_into(&mut self, row: usize, to: &mut ColumnTicks) {
-        to.added.push(self.added.swap_remove(row));
-        to.changed.push(self.changed.swap_remove(row));
+        to.rows.push(self.rows.swap_remove(row));
     }
 
-    pub(crate) fn added(&self) -> &[Tick] {
-        &self.added
-    }
-
-    pub(crate) fn changed(&self) -> &[ChangedTick] {
-        &self.changed
+    /// Each row's ticks.
+    pub(crate) fn rows(&self) -> &[RowTicks] {
+        &self.rows
     }
 
     /// Clamps every tick to at most `max_age` before `now`.
     fn clamp(&mut self, now: Tick, max_age: u32) {
-        for added in &mut self.added {
-            *added = added.clamped(now, max_age);
-        }
-        for changed in &self.changed {
-            changed.set(changed.get().clamped(now, max_age));
+        for row in &mut self.rows {
+            row.added = row.added.clamped(now, max_age);
+            row.changed.set(row.changed.get().clamped(now, max_age));
         }
     }
 }
@@ -258,9 +259,10 @@ impl Archetype {
         let column = typed_mut::<T>(&mut *self.columns[index]);
         let ticks = &mut self.ticks[index];
         if let Some(slot) = column.get_mut(row) {
-            // The entity already had this component: replace it, dropping the old value.
+            // The entity already had this component: replace it, dropping the old value. Stamped
+            // first, so a panic in the old value's `Drop` can't lose the change.
+            ticks.rows[row].changed.set(tick);
             *slot = value;
-            ticks.changed[row].set(tick);
         } else {
             debug_assert_eq!(column.len(), row, "bundle rows must be written in order");
             column.push(value);
@@ -458,8 +460,9 @@ pub(crate) fn move_row(
                 ticks.swap_remove_into(row, &mut to.ticks[target]);
             }
             None => {
-                leftover(id, column, row);
+                // Ticks first: `leftover` may drop the value, and its `Drop` may panic.
                 ticks.swap_remove(row);
+                leftover(id, column, row);
             }
         }
     }

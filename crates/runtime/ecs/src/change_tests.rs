@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::change::CHECK_INTERVAL;
 use crate::{
-    Added, Changed, Commands, Component, Entity, Resource, Schedule, Stage, System, World,
+    Added, Changed, Commands, Component, ComponentHooks, Entity, Resource, Schedule, Stage, System,
+    World,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,32 +288,6 @@ fn commands_applied_at_a_sync_point_are_seen_by_later_stages() {
 }
 
 #[test]
-fn queries_on_the_world_have_no_previous_run_so_everything_counts() {
-    let mut world = World::new();
-    let a = world.spawn(Health(1));
-    let _ = world.spawn(Armor(1));
-    assert_eq!(
-        world
-            .query_filtered::<Entity, Changed<Health>>()
-            .collect::<Vec<_>>(),
-        [a]
-    );
-    assert_eq!(
-        world
-            .query_filtered::<Entity, Added<Health>>()
-            .collect::<Vec<_>>(),
-        [a]
-    );
-    assert_eq!(
-        world
-            .query_filtered::<Entity, (Changed<Health>, Added<Armor>)>()
-            .count(),
-        0,
-        "every filter of a tuple must hold"
-    );
-}
-
-#[test]
 #[should_panic(expected = "reads component")]
 fn filtering_on_an_undeclared_component_panics() {
     let mut world = World::new();
@@ -481,4 +456,265 @@ fn a_system_idle_across_the_32_bit_horizon_still_sees_what_changed() {
     let fresh = world.spawn(Health(3));
     run(&mut watcher, &mut world);
     assert_eq!(last(&changed), [fresh]);
+}
+
+#[test]
+fn a_schedule_run_on_another_world_starts_over() {
+    let changed = seen();
+    let mut schedule = Schedule::new();
+    schedule.add(Stage::PostUpdate, changed_health("changed", &changed));
+
+    // The second world has a value stamped early, and has counted further since.
+    let mut second = World::new();
+    let fresh = second.spawn(Health(2));
+    let mut elsewhere = idle_schedule();
+    for _ in 0..20 {
+        run(&mut elsewhere, &mut second);
+    }
+
+    let mut first = World::new();
+    first.spawn(Health(1));
+    for _ in 0..5 {
+        run(&mut schedule, &mut first);
+    }
+    // Compared with the previous runs on `first` (count 5), the second world's value (count 1)
+    // would look old and be missed.
+    run(&mut schedule, &mut second);
+    assert_eq!(
+        last(&changed),
+        [fresh],
+        "a first run on the new world sees everything"
+    );
+    run(&mut schedule, &mut second);
+    assert!(last(&changed).is_empty());
+}
+
+#[test]
+fn a_panicked_run_does_not_count_so_its_changes_are_seen_again() {
+    let mut world = World::new();
+    let e = world.spawn(Health(1));
+    let panic_next = Arc::new(Mutex::new(false));
+    let saw = seen();
+    let (should_panic, saw_in_system) = (Arc::clone(&panic_next), Arc::clone(&saw));
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PostUpdate,
+        System::new("flaky", move |ctx| {
+            let entities = ctx
+                .world
+                .query_filtered::<Entity, Changed<Health>>()
+                .collect();
+            saw_in_system.lock().expect("not poisoned").push(entities);
+            for mut health in ctx.world.query_mut::<&mut Health>() {
+                health.0 += 1;
+            }
+            if *should_panic.lock().expect("not poisoned") {
+                panic!("interrupted after writing");
+            }
+        })
+        .writes::<Health>(),
+    );
+    run(&mut schedule, &mut world);
+    run(&mut schedule, &mut world);
+    assert!(
+        last(&saw).is_empty(),
+        "a completed run's own writes aren't seen"
+    );
+
+    *panic_next.lock().expect("not poisoned") = true;
+    let interrupted =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schedule.run(&mut world)));
+    assert!(interrupted.is_err());
+    *panic_next.lock().expect("not poisoned") = false;
+    run(&mut schedule, &mut world);
+    assert_eq!(
+        last(&saw),
+        [e],
+        "the panicked run's own write is reported again, not lost"
+    );
+}
+
+#[test]
+fn a_systems_own_commands_are_seen_on_its_next_run() {
+    let mut world = World::new();
+    let e = world.spawn(Armor(1));
+    let added = seen();
+    let added_seen = Arc::clone(&added);
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PostUpdate,
+        System::new("give and watch", move |ctx| {
+            let entities = ctx
+                .world
+                .query_filtered::<Entity, Added<Health>>()
+                .collect();
+            added_seen.lock().expect("not poisoned").push(entities);
+            if !ctx.world.has::<Health>(e) {
+                ctx.commands.insert(e, Health(1));
+            }
+        })
+        .reads::<Health>(),
+    );
+    run(&mut schedule, &mut world);
+    assert!(last(&added).is_empty(), "nothing had health yet");
+    run(&mut schedule, &mut world);
+    assert_eq!(
+        last(&added),
+        [e],
+        "commands apply at the sync point, after the run, like anyone's writes"
+    );
+}
+
+/// Inserting it makes its hook heal the entity: a write made by a hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Healer;
+impl Component for Healer {
+    const HOOKS: ComponentHooks = ComponentHooks::NONE.on_insert(|world, ctx| {
+        if let Some(mut health) = world.get_mut::<Health>(ctx.entity) {
+            health.0 += 10;
+        }
+    });
+}
+
+#[test]
+fn writes_made_by_hooks_are_seen() {
+    let mut world = World::new();
+    let healed = world.spawn(Health(1));
+    let untouched = world.spawn(Health(1));
+    let changed = seen();
+    let mut schedule = Schedule::new();
+    schedule.add(Stage::PostUpdate, changed_health("changed", &changed));
+    run(&mut schedule, &mut world);
+
+    world.insert(healed, Healer).expect("alive");
+    run(&mut schedule, &mut world);
+    assert_eq!(last(&changed), [healed]);
+    assert_eq!(world.get::<Health>(healed), Some(&Health(11)));
+    assert!(world.contains(untouched));
+}
+
+/// A visited row: the entity, its health, and its armor if it has one.
+type VisitedRow = (Entity, u32, Option<u32>);
+
+#[test]
+fn row_filters_follow_rows_across_archetypes_with_optional_data() {
+    let mut world = World::new();
+    // Two archetypes, changed and unchanged rows interleaved differently in each.
+    let plain: Vec<Entity> = (0..5).map(|i| world.spawn(Health(i))).collect();
+    let armored: Vec<Entity> = (0..5)
+        .map(|i| world.spawn((Health(10 + i), Armor(i))))
+        .collect();
+    let report: Arc<Mutex<Vec<VisitedRow>>> = Arc::default();
+    let report_in_system = Arc::clone(&report);
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PostUpdate,
+        System::new("visit changed", move |ctx| {
+            let mut rows = Vec::new();
+            for (entity, armor, health) in ctx
+                .world
+                .query_filtered_mut::<(Entity, Option<&mut Armor>, &Health), Changed<Health>>()
+            {
+                rows.push((entity, health.0, armor.as_ref().map(|armor| armor.0)));
+            }
+            *report_in_system.lock().expect("not poisoned") = rows;
+        })
+        .reads::<Health>()
+        .writes::<Armor>(),
+    );
+    run(&mut schedule, &mut world);
+    assert_eq!(report.lock().expect("not poisoned").len(), 10, "first run");
+
+    let changed = [plain[0], plain[3], armored[1], armored[2], armored[4]];
+    for &entity in &changed {
+        if let Some(mut health) = world.get_mut::<Health>(entity) {
+            health.0 += 100;
+        }
+    }
+    run(&mut schedule, &mut world);
+    let mut rows = report.lock().expect("not poisoned").clone();
+    rows.sort_by_key(|&(entity, ..)| entity);
+    let mut expected: Vec<VisitedRow> = changed
+        .iter()
+        .map(|&entity| {
+            let health = world.get::<Health>(entity).map_or(0, |h| h.0);
+            (entity, health, world.get::<Armor>(entity).map(|a| a.0))
+        })
+        .collect();
+    expected.sort_by_key(|&(entity, ..)| entity);
+    assert_eq!(rows, expected, "each item belongs to the row that passed");
+}
+
+#[test]
+fn a_resource_removed_and_inserted_again_is_added() {
+    let mut world = World::new();
+    world.insert_resource(Score(1));
+    let added: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let added_in_system = Arc::clone(&added);
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PostUpdate,
+        System::new("watch", move |ctx| {
+            let is_added = ctx.resources.is_added::<Score>();
+            added_in_system.lock().expect("not poisoned").push(is_added);
+        })
+        .reads_resource::<Score>(),
+    );
+    run(&mut schedule, &mut world);
+    run(&mut schedule, &mut world);
+    world.remove_resource::<Score>();
+    world.insert_resource(Score(2));
+    run(&mut schedule, &mut world);
+    assert_eq!(*added.lock().expect("not poisoned"), [true, false, true]);
+}
+
+/// Panics when dropped, if told to.
+#[derive(Debug)]
+struct Fragile {
+    explode: bool,
+}
+impl Component for Fragile {}
+impl Drop for Fragile {
+    fn drop(&mut self) {
+        if self.explode {
+            panic!("dropped while replaced");
+        }
+    }
+}
+
+#[test]
+fn a_replacement_is_recorded_even_if_dropping_the_old_value_panics() {
+    let mut world = World::new();
+    let e = world.spawn(Fragile { explode: true });
+    let changed = seen();
+    let changed_in_system = Arc::clone(&changed);
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PostUpdate,
+        System::new("watch", move |ctx| {
+            let entities = ctx
+                .world
+                .query_filtered::<Entity, Changed<Fragile>>()
+                .collect();
+            changed_in_system
+                .lock()
+                .expect("not poisoned")
+                .push(entities);
+        })
+        .reads::<Fragile>(),
+    );
+    run(&mut schedule, &mut world);
+
+    let replaced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.insert(e, Fragile { explode: false })
+    }));
+    assert!(replaced.is_err(), "the old value's drop panicked");
+    assert!(
+        world
+            .get::<Fragile>(e)
+            .is_some_and(|fragile| !fragile.explode),
+        "the new value is in place"
+    );
+    run(&mut schedule, &mut world);
+    assert_eq!(last(&changed), [e], "and the change isn't lost");
 }
