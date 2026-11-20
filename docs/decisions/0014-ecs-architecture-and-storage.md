@@ -553,3 +553,72 @@ The decisions are in §4's amendment. These notes cover how they're implemented.
   | insert + remove a tag on 10k entities | 1.53 ms | 1.38 ms |
 
   Iteration and despawn are unchanged.
+
+## Implementation notes (2026-11-20, relations and the hierarchy)
+
+The first relation is `ChildOf`/`Children`, in `oxreal-hierarchy`. The decisions are in §3's
+amendment and ADR-0005's amendment.
+
+- **Both components are immutable.**
+  - `ChildOf` holds the parent and the link's despawn policy.
+  - `Children` records its owner, and every edit replaces it through a command. The command
+    reads the current list when it runs, so edits from many hooks in one flush never lose each
+    other.
+  - A `Children` inserted from outside (taken off another entity, or put back stale) is checked
+    against the links, and rebuilt from them if it doesn't match. The rebuild scans the world,
+    which correct code never triggers.
+- **Refused links:** a link to a dead or despawning parent, one that would form a cycle, or one
+  deeper than `MAX_DEPTH` is removed again by the hook, with a warning. `set_parent` reports
+  each case as an error (`Ecs`, `Cycle`, `TooDeep`) before changing anything.
+- **Despawn:**
+  - The parent's `Children` hook queues one command per child.
+  - Each command re-checks that the child still belongs to that parent, so a child moved away
+    earlier in the cascade is spared.
+  - It then despawns the child, or detaches it keeping its place in the world, as the link
+    says.
+  - Removing `Children` alone always detaches.
+- **"Keep world"** computes placements from the local transforms up the chain, not from
+  `WorldTransform`, which is stale between gameplay and propagation. It decomposes the result
+  into a `Transform`, which loses shear under non-uniform scale, as Unreal's `FTransform` does.
+- **Propagation:**
+  - It walks each tree with an explicit stack.
+  - Adding `LocalTransform` adds `WorldTransform`, and removing it removes it, so nothing is
+    drawn at a stale place.
+  - The system's name is exported (`PROPAGATE_TRANSFORMS`) for ordering.
+- **The §10 benchmark** (`cargo bench -p oxreal-hierarchy`): 111,100 entities in trees four
+  levels deep, on a Ryzen 9 5950X with Windows 11 and rustc 1.100.0, release build:
+  - **propagation: 5.0 ms**;
+  - building the trees: 79 ms.
+
+  Building costs that much because each attach replaces `Children` (copying the list and
+  checking it). The cost per attach grows with the number of siblings. A bulk attach, or a
+  hook-private way to edit the list, can fix that if profiling points there.
+
+  Propagation costs three lookups by handle per entity. Cached query state is the next step.
+- **Tests (19):**
+  - attach, order, move, detach, and re-setting the same parent;
+  - each error, with its message;
+  - the hooks' refusals of direct inserts;
+  - detaching in place by default;
+  - opt-in despawn in post-order (recorded through `Drop`), mixed with detaching links;
+  - removing `Children`, and both repair routes;
+  - attaching to a despawning parent;
+  - a child moved away during a cascade;
+  - `KeepWorld` against `KeepLocal`;
+  - propagation against matrix products;
+  - the depth limit.
+
+  **Two randomized tests** check every invariant after **every** operation, and compare each
+  `WorldTransform` with an on-demand reference:
+  - 3,000 direct operations;
+  - 400 frames of operations batched as one system's commands, including reserved handles.
+
+  Both include links inserted directly and `Reactor` components whose hooks re-parent or
+  despawn other entities in the middle of a despawn.
+
+  These deliberately broken versions each fail the tests:
+  - the default policy despawning;
+  - the hook accepting a despawning parent;
+  - a moved child not re-checked;
+  - detaching keeping the local transform instead of the world placement;
+  - a stale `WorldTransform` kept.

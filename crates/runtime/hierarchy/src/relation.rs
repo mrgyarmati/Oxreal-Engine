@@ -7,41 +7,85 @@ use oxreal_ecs::{
     Component, ComponentHooks, EcsError, Entity, HookCause, HookContext, HookWorld, World,
 };
 
-/// The most ancestors a cycle check walks before it gives up and treats the chain as broken.
-/// Far deeper than any real hierarchy.
-const MAX_DEPTH: usize = 1 << 16;
+use crate::transform::{TransformRule, keep_world_on_attach, keep_world_on_detach};
 
-/// Makes an entity the child of `parent`. Insert it to attach, replace it to move, remove it to
-/// detach. The parent's [`Children`] is kept in step automatically.
+/// The most ancestors a walk up the hierarchy visits. Far deeper than any real hierarchy: a
+/// deeper chain is refused ([`HierarchyError::TooDeep`]).
+pub const MAX_DEPTH: usize = 1 << 16;
+
+/// What happens to a child when its parent is despawned (ADR-0014, §3 amendment, item 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum OnParentDespawn {
+    /// The child is detached and keeps its place in the world. The default, as in Unreal.
+    #[default]
+    Detach,
+    /// The child is despawned too, before its parent: for the parts of one object.
+    Despawn,
+}
+
+/// Makes an entity the child of `parent`. Insert it to attach, insert another to move, remove it
+/// to detach. The parent's [`Children`] is kept in step automatically.
 ///
-/// The parent can only be read: changing it means inserting a new `ChildOf`, which keeps
-/// `Children` consistent. An entity can't become its own ancestor: such an insert is refused,
-/// and so is a parent that isn't alive. The entity is then left without a parent, and a warning
-/// says why. [`set_parent`] reports these cases as errors instead.
+/// It's **immutable** (ADR-0014 §3 amendment): changing the parent means inserting a new
+/// `ChildOf`, which runs the hooks that keep `Children` consistent.
+///
+/// A link is refused, leaving the entity without a parent and logging a warning, when:
+/// - the parent isn't alive, or is being despawned;
+/// - the parent is the entity itself or one of its descendants;
+/// - the chain above the parent is deeper than [`MAX_DEPTH`].
+///
+/// [`set_parent`] reports these cases as errors instead, before changing anything.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChildOf(Entity);
+pub struct ChildOf {
+    parent: Entity,
+    on_parent_despawn: OnParentDespawn,
+}
 
 impl ChildOf {
-    /// A link to `parent`.
+    /// A link to `parent`. When the parent is despawned, the child is detached and keeps its
+    /// place in the world.
     #[must_use]
     pub const fn new(parent: Entity) -> Self {
-        Self(parent)
+        Self {
+            parent,
+            on_parent_despawn: OnParentDespawn::Detach,
+        }
+    }
+
+    /// The same link, but the child is despawned with its parent (before it), as a part of the
+    /// same object, such as a character's weapon.
+    #[must_use]
+    pub const fn despawn_with_parent(mut self) -> Self {
+        self.on_parent_despawn = OnParentDespawn::Despawn;
+        self
     }
 
     /// The parent.
     #[must_use]
     pub const fn parent(&self) -> Entity {
-        self.0
+        self.parent
+    }
+
+    /// What happens to the child when the parent is despawned.
+    #[must_use]
+    pub const fn on_parent_despawn(&self) -> OnParentDespawn {
+        self.on_parent_despawn
     }
 }
 
 impl fmt::Debug for ChildOf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ChildOf({:?})", self.0)
+        write!(
+            f,
+            "ChildOf({:?}, {:?})",
+            self.parent, self.on_parent_despawn
+        )
     }
 }
 
 impl Component for ChildOf {
+    const MUTABLE: bool = false;
     const HOOKS: ComponentHooks = ComponentHooks::NONE
         .on_insert(child_of_inserted)
         .on_replace(child_of_replaced);
@@ -50,33 +94,40 @@ impl Component for ChildOf {
 /// An entity's children, in order. Maintained by [`ChildOf`]: it can be read, never built or
 /// edited directly. It exists only while there is at least one child.
 ///
-/// Despawning an entity despawns its children first, recursively (ADR-0014 §4). Removing
-/// `Children` itself detaches the children instead, leaving them as roots.
+/// It's immutable, and records which entity it belongs to. A `Children` taken off one entity
+/// (with `remove`) and inserted anywhere is checked against the actual `ChildOf` links and
+/// repaired, with a warning.
+///
+/// Removing `Children` detaches the children, keeping their place in the world. Despawning the
+/// entity treats each child by its link's [`OnParentDespawn`].
 #[derive(Debug, PartialEq, Eq)]
-pub struct Children(Vec<Entity>);
+pub struct Children {
+    owner: Entity,
+    list: Vec<Entity>,
+}
 
 impl Children {
     /// The children, in order.
     #[must_use]
     pub fn as_slice(&self) -> &[Entity] {
-        &self.0
+        &self.list
     }
 
     /// Iterates the children in order.
     pub fn iter(&self) -> std::slice::Iter<'_, Entity> {
-        self.0.iter()
+        self.list.iter()
     }
 
     /// How many children there are. At least one.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.list.len()
     }
 
     /// Always `false` while the component exists. Provided for completeness.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.list.is_empty()
     }
 }
 
@@ -85,99 +136,160 @@ impl<'a> IntoIterator for &'a Children {
     type IntoIter = std::slice::Iter<'a, Entity>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.list.iter()
     }
 }
 
 impl Component for Children {
-    const HOOKS: ComponentHooks = ComponentHooks::NONE.on_remove(children_removed);
+    const MUTABLE: bool = false;
+    const HOOKS: ComponentHooks = ComponentHooks::NONE
+        .on_insert(children_inserted)
+        .on_remove(children_removed);
 }
 
 /// Why a parent can't be set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HierarchyError {
     /// The child or the parent isn't alive, or is being despawned.
-    Ecs(EcsError),
-    /// The parent is the child itself, or one of its descendants: the link would form a cycle.
-    Cycle {
-        /// The entity that was to be moved.
+    #[error("can't make {parent:?} the parent of {child:?}")]
+    Ecs {
+        /// The entity to attach.
         child: Entity,
-        /// The parent that is already below it.
+        /// The intended parent.
         parent: Entity,
+        /// Which of them isn't usable, and why.
+        #[source]
+        source: EcsError,
+    },
+    /// The parent is the child itself, or one of its descendants: the link would form a cycle.
+    #[error(
+        "can't make {parent:?} the parent of {child:?}: it's {child:?} itself or one of its \
+         descendants, which would form a cycle. Detach it first, or choose a parent outside \
+         {child:?}'s subtree"
+    )]
+    Cycle {
+        /// The entity to attach.
+        child: Entity,
+        /// The intended parent, already at or below it.
+        parent: Entity,
+    },
+    /// The chain above the parent is deeper than [`MAX_DEPTH`].
+    #[error(
+        "can't make {parent:?} the parent of {child:?}: the hierarchy above it is deeper than \
+         {limit} levels. Flatten the hierarchy"
+    )]
+    TooDeep {
+        /// The entity to attach.
+        child: Entity,
+        /// The intended parent.
+        parent: Entity,
+        /// The deepest chain allowed.
+        limit: usize,
     },
 }
 
-impl fmt::Display for HierarchyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HierarchyError::Ecs(error) => error.fmt(f),
-            HierarchyError::Cycle { child, parent } => write!(
-                f,
-                "{parent:?} is {child:?} itself or one of its descendants, so it can't be its \
-                 parent: that would form a cycle"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for HierarchyError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            HierarchyError::Ecs(error) => Some(error),
-            HierarchyError::Cycle { .. } => None,
-        }
-    }
-}
-
 /// Makes `child` a child of `parent`, appended after its existing children, moving it from its
-/// previous parent if it had one.
+/// previous parent if it had one. `rule` says whether it keeps its local transform (and so
+/// moves with its new parent) or its place in the world. There's deliberately no default.
+///
+/// Setting the parent it already has changes nothing, not even its place among its siblings.
 ///
 /// # Errors
 ///
-/// - [`HierarchyError::Ecs`] if either entity isn't alive.
+/// Nothing changes on error:
+/// - [`HierarchyError::Ecs`] if either entity isn't alive, or is being despawned.
 /// - [`HierarchyError::Cycle`] if `parent` is `child` or one of its descendants.
-///
-/// Nothing changes in either case.
-pub fn set_parent(world: &mut World, child: Entity, parent: Entity) -> Result<(), HierarchyError> {
-    if !world.contains(parent) {
-        return Err(HierarchyError::Ecs(EcsError::NoSuchEntity(parent)));
+/// - [`HierarchyError::TooDeep`] if the chain above `parent` is deeper than [`MAX_DEPTH`].
+pub fn set_parent(
+    world: &mut World,
+    child: Entity,
+    parent: Entity,
+    rule: TransformRule,
+) -> Result<(), HierarchyError> {
+    let ecs = |source| HierarchyError::Ecs {
+        child,
+        parent,
+        source,
+    };
+    for entity in [child, parent] {
+        if !world.contains(entity) {
+            return Err(ecs(EcsError::NoSuchEntity(entity)));
+        }
+        if world.is_despawning(entity) {
+            return Err(ecs(EcsError::Despawning(entity)));
+        }
     }
-    if is_ancestor_or_self(
+    match ancestry(
         |e| world.get::<ChildOf>(e).map(ChildOf::parent),
         child,
         parent,
     ) {
-        return Err(HierarchyError::Cycle { child, parent });
+        Ancestry::Unrelated => {}
+        Ancestry::Ancestor => return Err(HierarchyError::Cycle { child, parent }),
+        Ancestry::TooDeep => {
+            return Err(HierarchyError::TooDeep {
+                child,
+                parent,
+                limit: MAX_DEPTH,
+            });
+        }
     }
-    world
-        .insert(child, ChildOf::new(parent))
-        .map_err(HierarchyError::Ecs)
+    let current = world.get::<ChildOf>(child).copied();
+    if current.map(|link| link.parent()) == Some(parent) {
+        return Ok(());
+    }
+    if rule == TransformRule::KeepWorld {
+        keep_world_on_attach(world, child, parent);
+    }
+    // Keep the link's despawn policy when moving it.
+    let link = ChildOf {
+        parent,
+        on_parent_despawn: current.map_or(OnParentDespawn::Detach, |c| c.on_parent_despawn),
+    };
+    world.insert(child, link).map_err(ecs)
 }
 
-/// Detaches `child` from its parent, making it a root. Returns the parent it had.
-pub fn remove_parent(world: &mut World, child: Entity) -> Option<Entity> {
+/// Detaches `child` from its parent, making it a root. Returns the parent it had. `rule` says
+/// whether it keeps its local transform (and so moves to where that places it in the world) or
+/// its place in the world.
+pub fn remove_parent(world: &mut World, child: Entity, rule: TransformRule) -> Option<Entity> {
+    if !world.has::<ChildOf>(child) {
+        return None;
+    }
+    if rule == TransformRule::KeepWorld {
+        keep_world_on_detach(world, child);
+    }
     world.remove::<ChildOf>(child).map(|link| link.parent())
 }
 
+/// How `ancestor` relates to `entity`.
+enum Ancestry {
+    /// `ancestor` is neither `entity` nor above it.
+    Unrelated,
+    /// `ancestor` is `entity` itself or above it.
+    Ancestor,
+    /// The chain above `entity` is deeper than [`MAX_DEPTH`].
+    TooDeep,
+}
+
 /// Whether `ancestor` is `entity` itself or above it, walking up through `parent_of`.
-fn is_ancestor_or_self(
+fn ancestry(
     parent_of: impl Fn(Entity) -> Option<Entity>,
     ancestor: Entity,
     entity: Entity,
-) -> bool {
+) -> Ancestry {
     let mut current = entity;
     for _ in 0..MAX_DEPTH {
         if current == ancestor {
-            return true;
+            return Ancestry::Ancestor;
         }
         match parent_of(current) {
             Some(parent) => current = parent,
-            None => return false,
+            None => return Ancestry::Unrelated,
         }
     }
-    // A chain this long is broken (or a cycle slipped in). Refusing is the safe answer.
-    true
+    Ancestry::TooDeep
 }
 
 fn child_of_inserted(world: &mut HookWorld<'_>, context: HookContext) {
@@ -187,14 +299,18 @@ fn child_of_inserted(world: &mut HookWorld<'_>, context: HookContext) {
     };
     let refused = if !world.contains(parent) {
         Some("the parent isn't alive")
-    } else if is_ancestor_or_self(
-        |e| world.get::<ChildOf>(e).map(ChildOf::parent),
-        child,
-        parent,
-    ) {
-        Some("the parent is the entity itself or one of its descendants")
+    } else if world.is_despawning(parent) {
+        Some("the parent is being despawned")
     } else {
-        None
+        match ancestry(
+            |e| world.get::<ChildOf>(e).map(ChildOf::parent),
+            child,
+            parent,
+        ) {
+            Ancestry::Unrelated => None,
+            Ancestry::Ancestor => Some("the parent is the entity itself or one of its descendants"),
+            Ancestry::TooDeep => Some("the hierarchy above the parent is too deep"),
+        }
     };
     if let Some(reason) = refused {
         warn!(
@@ -206,17 +322,16 @@ fn child_of_inserted(world: &mut HookWorld<'_>, context: HookContext) {
         world.commands().remove::<ChildOf>(child);
         return;
     }
-    if let Some(mut children) = world.get_mut::<Children>(parent) {
-        if !children.0.contains(&child) {
-            children.0.push(child);
+    world.commands().run(move |world| {
+        // Re-checked when it runs: the link may have changed since.
+        if world.get::<ChildOf>(child).map(ChildOf::parent) == Some(parent) {
+            edit_children(world, parent, |list| {
+                if !list.contains(&child) {
+                    list.push(child);
+                }
+            });
         }
-    } else {
-        // Inserting `Children` changes structure, so it waits for a command. Checked again then:
-        // another child may have created it, or the link may have changed.
-        world
-            .commands()
-            .run(move |world| add_child(world, parent, child));
-    }
+    });
 }
 
 fn child_of_replaced(world: &mut HookWorld<'_>, context: HookContext) {
@@ -224,62 +339,164 @@ fn child_of_replaced(world: &mut HookWorld<'_>, context: HookContext) {
     let Some(parent) = world.get::<ChildOf>(child).map(ChildOf::parent) else {
         return;
     };
-    let now_empty = match world.get_mut::<Children>(parent) {
-        Some(mut children) => {
-            children.0.retain(|&c| c != child);
-            children.0.is_empty()
+    world
+        .commands()
+        .run(move |world| edit_children(world, parent, |list| list.retain(|&c| c != child)));
+}
+
+/// Applies `edit` to `parent`'s children by replacing its `Children` (it's immutable), or
+/// removing it when the list ends up empty. Does nothing to a dead or despawning parent, whose
+/// children are being resolved by its despawn.
+fn edit_children(world: &mut World, parent: Entity, edit: impl FnOnce(&mut Vec<Entity>)) {
+    if !world.contains(parent) || world.is_despawning(parent) {
+        return;
+    }
+    let mut list = world
+        .get::<Children>(parent)
+        .map(|c| c.list.clone())
+        .unwrap_or_default();
+    edit(&mut list);
+    let unchanged = world.get::<Children>(parent).map(|c| &c.list) == Some(&list);
+    if list.is_empty() {
+        if world.has::<Children>(parent) {
+            world.remove::<Children>(parent);
         }
-        None => false,
+    } else if !unchanged {
+        // Can't fail: the parent is alive and not despawning.
+        let _ = world.insert(
+            parent,
+            Children {
+                owner: parent,
+                list,
+            },
+        );
+    }
+}
+
+/// Repairs a `Children` that doesn't match the `ChildOf` links: one taken off another entity,
+/// or a stale list put back after its children were detached.
+fn children_inserted(world: &mut HookWorld<'_>, context: HookContext) {
+    let parent = context.entity;
+    let Some(children) = world.get::<Children>(parent) else {
+        return;
     };
-    if now_empty {
+    let consistent = children.owner == parent
+        && children
+            .list
+            .iter()
+            .all(|&c| world.get::<ChildOf>(c).map(ChildOf::parent) == Some(parent));
+    if consistent {
+        return;
+    }
+    warn!(
+        ?parent,
+        "a Children that doesn't match its ChildOf links was inserted; repairing it"
+    );
+    world.commands().run(move |world| {
+        // Rebuilt from the links themselves, which are the truth. The inserted list may have
+        // replaced a correct one, so filtering it alone could lose real children. This scans
+        // the world, which is fine for a repair that correct code never needs.
+        let links: std::collections::HashSet<Entity> = world
+            .query::<(Entity, &ChildOf)>()
+            .filter(|(_, link)| link.parent() == parent)
+            .map(|(child, _)| child)
+            .collect();
+        let mut repaired: Vec<Entity> = Vec::with_capacity(links.len());
+        // Listed children keep their order; the others follow in a stable order.
+        if let Some(listed) = world.get::<Children>(parent) {
+            for &kid in &listed.list {
+                if links.contains(&kid) && !repaired.contains(&kid) {
+                    repaired.push(kid);
+                }
+            }
+        }
+        let mut rest: Vec<Entity> = links
+            .into_iter()
+            .filter(|k| !repaired.contains(k))
+            .collect();
+        rest.sort_unstable();
+        repaired.extend(rest);
+        if repaired.is_empty() {
+            world.remove::<Children>(parent);
+        } else {
+            let _ = world.insert(
+                parent,
+                Children {
+                    owner: parent,
+                    list: repaired,
+                },
+            );
+        }
+    });
+}
+
+/// Resolves the children when `Children` goes: by each link's policy when the parent is
+/// despawned, by detaching (keeping their place in the world) when `Children` is removed alone.
+fn children_removed(world: &mut HookWorld<'_>, context: HookContext) {
+    let parent = context.entity;
+    let Some(children) = world.get::<Children>(parent) else {
+        return;
+    };
+    if children.owner != parent {
+        // A foreign list that's about to be repaired away: its children aren't ours.
+        return;
+    }
+    let children = children.list.clone();
+    let despawning = context.cause == HookCause::Despawn;
+    for child in children {
         world.commands().run(move |world| {
-            if world
-                .get::<Children>(parent)
-                .is_some_and(Children::is_empty)
-            {
-                world.remove::<Children>(parent);
+            // Re-checked when it runs: an earlier command may have moved the child.
+            let Some(link) = world.get::<ChildOf>(child).copied() else {
+                return;
+            };
+            if link.parent() != parent || world.is_despawning(child) {
+                return;
+            }
+            if despawning && link.on_parent_despawn() == OnParentDespawn::Despawn {
+                world.despawn(child);
+            } else {
+                remove_parent(world, child, TransformRule::KeepWorld);
             }
         });
     }
 }
 
-fn children_removed(world: &mut HookWorld<'_>, context: HookContext) {
-    let parent = context.entity;
-    let children = world
-        .get::<Children>(parent)
-        .map(|c| c.0.clone())
-        .unwrap_or_default();
-    if context.cause == HookCause::Despawn {
-        // The despawn finishes after these, so every child sees its parent whole (ADR-0014 §4).
-        for child in children {
-            world.commands().despawn(child);
-        }
-    } else {
-        // `Children` was removed on its own: detach the children rather than despawn them.
-        for child in children {
-            world.commands().run(move |world| {
-                if world.get::<ChildOf>(child).map(ChildOf::parent) == Some(parent) {
-                    world.remove::<ChildOf>(child);
-                }
-            });
-        }
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Adds `child` to `parent`'s `Children`, creating it, if `child` is still linked to `parent`.
-fn add_child(world: &mut World, parent: Entity, child: Entity) {
-    if world.get::<ChildOf>(child).map(ChildOf::parent) != Some(parent) {
-        return;
+    fn entity(index: u32) -> Entity {
+        Entity::from_bits((1 << 32) | u64::from(index)).expect("valid bits")
     }
-    if let Some(mut children) = world.get_mut::<Children>(parent) {
-        if !children.0.contains(&child) {
-            children.0.push(child);
+
+    #[test]
+    fn ancestry_finds_ancestors_and_stops_at_the_depth_limit() {
+        // A chain 0 <- 1 <- 2 <- ... where each index's parent is the one before it.
+        let parent_of = |e: Entity| e.index().checked_sub(1).map(entity);
+        assert!(matches!(
+            ancestry(parent_of, entity(0), entity(5)),
+            Ancestry::Ancestor
+        ));
+        assert!(matches!(
+            ancestry(parent_of, entity(5), entity(5)),
+            Ancestry::Ancestor
+        ));
+        assert!(matches!(
+            ancestry(parent_of, entity(9), entity(5)),
+            Ancestry::Unrelated
+        ));
+        // An endless chain upward: the walk gives up rather than looping.
+        let endless = |e: Entity| Some(entity(e.index() + 1));
+        assert!(matches!(
+            ancestry(endless, entity(0), entity(1)),
+            Ancestry::TooDeep
+        ));
+        let message = HierarchyError::TooDeep {
+            child: entity(1),
+            parent: entity(2),
+            limit: MAX_DEPTH,
         }
-        return;
-    }
-    if let Err(error) = world.insert(parent, Children(vec![child])) {
-        // The parent went away (or started despawning) before the link settled.
-        warn!(?child, ?parent, %error, "ChildOf dropped; the entity stays without a parent");
-        world.remove::<ChildOf>(child);
+        .to_string();
+        assert!(message.contains("Flatten"), "{message}");
     }
 }

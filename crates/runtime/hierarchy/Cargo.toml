@@ -15,6 +15,7 @@ layer = "runtime"
 oxreal-diagnostics.workspace = true
 oxreal-ecs.workspace = true
 oxreal-math.workspace = true
+thiserror.workspace = true
 
 [[bench]]
 name = "propagation"

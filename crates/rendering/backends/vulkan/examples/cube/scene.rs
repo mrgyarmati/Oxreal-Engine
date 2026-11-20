@@ -61,7 +61,8 @@ pub(crate) fn world() -> World {
         3.0,
     ));
     let cube = world.spawn((LocalTransform::default(), Mesh, Spin { elapsed: 0.0 }));
-    // Children of the cube: they turn with it, through transform propagation alone.
+    // Children of the cube, and parts of it: they turn with it, through transform propagation
+    // alone, and go when it does.
     for (offset, scale) in [
         (Vec3::new(1.4, 0.0, 0.0), 0.3),
         (Vec3::new(-1.2, 0.5, 0.3), 0.2),
@@ -69,7 +70,7 @@ pub(crate) fn world() -> World {
         world.spawn((
             LocalTransform(Transform::from_translation(offset).with_scale(Vec3::splat(scale))),
             Mesh,
-            ChildOf::new(cube),
+            ChildOf::new(cube).despawn_with_parent(),
         ));
     }
     for x in -4_i8..=4 {

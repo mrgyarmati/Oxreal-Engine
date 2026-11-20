@@ -29,14 +29,32 @@ cache-optimized runtime store.
 - Significant implementation effort, which reflection integration and editor needs justify.
 - Hierarchy and ECS must be kept consistent, so the sync points must be tested explicitly.
 
-## Implementation notes (2026-11-20)
+## Amendment (2026-11-20, with `oxreal-hierarchy`)
 
-- `runtime/hierarchy` is `oxreal-hierarchy`. Its parentage is the `ChildOf` component, and the
-  ordered `Children` component is its inverse, kept consistent by ECS hooks (ADR-0014 §4). So
-  the hierarchy *is* ECS data: there's no second store to keep in sync. The sync points this
-  ADR asks to test are the hooks, which a randomized invariant test exercises.
-- Local transforms are `LocalTransform`. World transforms (`WorldTransform`, affine, so
-  non-uniform scale stays exact) are computed by the `propagate transforms` system in
-  `PostUpdate`: after gameplay and physics, before `Extract`.
-- Details, including the despawn policy and measurements, are in ADR-0014's fourth-slice
-  notes.
+This amends the Decision above. The "(proposed)" in its heading predates acceptance: the
+Decision is Accepted.
+
+1. **The authoring hierarchy is ECS data, not a separate store.** The Context asked for a
+   hierarchy with "different requirements from a cache-optimized runtime store": stable order,
+   parent links, local transforms. ECS components meet them:
+   - an immutable `ChildOf` link on the child;
+   - an ordered, read-only `Children` list on the parent, kept consistent by ECS hooks
+     (ADR-0014 §3 and §4);
+   - a `LocalTransform`.
+
+   One source of truth removes the sync points the Consequences warned about. What remains to
+   test is the hooks, which randomized invariant tests exercise. Stable object IDs for saved
+   scenes remain separate, as decided above.
+2. **When a parent is despawned, each link decides** (ADR-0014, §3 amendment, item 4). The
+   child is detached and keeps its place in the world (the default, as in Unreal), or it's
+   despawned first (opt-in, for the parts of one object).
+3. **Attaching and detaching take an explicit rule:** keep the local transform, or keep the
+   place in the world. There's no default. The editor's attach and detach will always keep the
+   place in the world, as Unreal's do.
+4. **World transforms** (`WorldTransform`, affine, so non-uniform scale stays exact) are
+   computed by the `propagate transforms` system in `PostUpdate`, after gameplay and physics
+   and before `Extract`, as decided above. Between gameplay changes and the next propagation,
+   they're stale. Code that needs a current world placement mid-frame computes it from the local
+   transforms.
+
+Implementation details and measurements are in ADR-0014's notes on relations and the hierarchy.
