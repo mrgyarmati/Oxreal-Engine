@@ -21,6 +21,14 @@
   The build uses a pinned `slangc`, downloaded and hash-verified by `cargo xtask slang install` (run
   automatically by `cargo xtask ci`; needs `curl`), not the copy in the Vulkan SDK, which may be
   a different version. It lives in the git-ignored `.tools/` folder.
+- **Cooked shaders** ([ADR-0019](../decisions/0019-player-renderer-and-cooked-shaders.md)). Games
+  don't compile shaders. They load the directory that `cargo xtask cook-shaders` writes to
+  `target/<profile>/cooked/shaders/` (`--profile release` for release builds). Cooking
+  **requires `spirv-val`**: install the Vulkan SDK and set `VULKAN_SDK`, or install the distro's
+  `spirv-tools` package. It also requires exactly the pinned Slang, which it installs if needed.
+  Each crate lists its shaders in `shaders/cook.json`, including every file they import: the
+  cook fails if a shader reads an undeclared file. `cargo xtask ci` runs the cook tests, which
+  skip without `spirv-val`. CI requires it on every platform.
 - Minimum: a Vulkan 1.3 driver with dynamic rendering, synchronization2 and maintenance4
   ([ADR-0012](../decisions/0012-vulkan-baseline-bindings-and-memory.md)). Tested hardware is listed
   in [gpu-support.md](gpu-support.md). Reference development setup: SDK 1.4.363.1.

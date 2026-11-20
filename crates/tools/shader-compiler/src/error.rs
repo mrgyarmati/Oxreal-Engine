@@ -52,6 +52,27 @@ pub enum ShaderError {
         /// What was wrong.
         details: String,
     },
+    /// `spirv-val` isn't installed. Compiling can skip validation, but cooking can't
+    /// (ADR-0019 §4).
+    #[error(
+        "spirv-val not found: install the Vulkan SDK (and set VULKAN_SDK) or the spirv-tools \
+         package, so it's on PATH"
+    )]
+    ValidatorNotFound,
+    /// The compiler isn't exactly the version pinned in `tools/slang.json`. Cooking requires it
+    /// (ADR-0019 §4).
+    #[error(
+        "{path} reports Slang version `{found}`, but cooking requires exactly the pinned \
+         `{expected}`: run `cargo xtask slang install`, or point OXREAL_SLANGC at that version"
+    )]
+    UnpinnedCompiler {
+        /// The compiler.
+        path: PathBuf,
+        /// The version `tools/slang.json` pins.
+        expected: String,
+        /// The version it reported.
+        found: String,
+    },
     /// `spirv-val` rejected the generated SPIR-V.
     #[error("spirv-val rejected {source_file}:\n{diagnostics}")]
     Validation {

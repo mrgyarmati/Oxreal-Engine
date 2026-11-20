@@ -9,6 +9,7 @@
 )]
 
 mod changelog;
+mod cook;
 mod layers;
 mod slang;
 
@@ -21,9 +22,9 @@ Usage: cargo xtask <command>
 
 Commands:
   ci                           Run everything CI runs: fmt check; clippy (-D warnings) and tests
-                               with default and with all features; shader compiler tests with
-                               the pinned Slang (installed if needed); rustdoc; layer check;
-                               changelog fragment check
+                               with default and with all features; shader compiler and cook
+                               tests with the pinned Slang (installed if needed); rustdoc; layer
+                               check; changelog fragment check
   layers                       Check workspace crate layering rules (docs/architecture/TAD.md section 4)
   changelog check              Validate changelog fragments in changelog.d/ (ADR-0009)
   changelog release <X.Y.Z> [--dry-run]
@@ -31,6 +32,11 @@ Commands:
                                (--dry-run: print the section only, change nothing)
   slang install                Download, verify and unpack the pinned Slang compiler (ADR-0013)
   slang path                   Print the path of the pinned slangc
+  cook-shaders [--profile <name>] [--target <triple>] [--out <dir>]
+                               Cook every crate's shaders/cook.json with the pinned Slang
+                               (installed if needed) and spirv-val (required; Vulkan SDK) into
+                               <target dir>/<profile dir>/cooked/shaders (ADR-0019). The default
+                               profile is dev. --out replaces the cooked root
   help                         Show this message";
 
 fn main() -> ExitCode {
@@ -40,6 +46,7 @@ fn main() -> ExitCode {
         Some("layers") => layers::run(&cargo(), &workspace_root()),
         Some("changelog") => changelog::run(&workspace_root(), &args[1..]),
         Some("slang") => slang::run(&workspace_root(), &args[1..]),
+        Some("cook-shaders") => cook::run(&cargo(), &workspace_root(), &args[1..]),
         Some("help" | "-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -111,7 +118,9 @@ fn ci() -> Result<(), String> {
         "warnings",
     ])?;
     run_cargo(&["test", "--workspace", "--all-features"])?;
-    // Shader compilation against the pinned Slang (ADR-0013), installed on demand.
+    // Shader compilation and cooking against the pinned Slang (ADR-0013, ADR-0019), installed
+    // on demand. The cook tests skip without spirv-val unless OXREAL_REQUIRE_SPIRV_VAL=1, as CI
+    // sets. This doesn't cook the workspace: `cargo xtask cook-shaders` does.
     println!("\n==> pinned Slang");
     slang::ensure_installed(&workspace_root())?;
     run_cargo(&[
@@ -120,6 +129,8 @@ fn ci() -> Result<(), String> {
         "oxreal-shader-compiler",
         "--test",
         "compile",
+        "--test",
+        "cook",
         "--",
         "--ignored",
     ])?;

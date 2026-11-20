@@ -255,3 +255,31 @@ constraints shape them:
   - The cook step proving error-prone in daily work. The next step would then be automatic
     cooking when building or running, never a compiler in the game.
   - A second backend, whose shaders need per-target cooked output.
+
+## Implementation notes (2026-11-20, first slice: cooking)
+
+- **`cargo xtask cook-shaders` runs a tool binary, `oxreal-shader-tool cook`** (the
+  `applications/shader-tool` the TAD planned), instead of linking the cook into xtask. xtask
+  has depended on no engine crate since M0, so `cargo xtask ci` still runs when engine crates
+  don't build. xtask finds the recipes and the output directory from `cargo metadata`; the cook
+  logic stays in `oxreal-shader-compiler` (`cook` module), as decided.
+- **Recipe** (`shaders/cook.json`, format 1): a `shaders` array of `output`, `source`,
+  `entry_points`, `include_dirs` and `inputs`. The source must be among the inputs. Unknown
+  fields are errors. Every path is checked to exist with exactly its written case, so a recipe
+  that would only work on Windows fails there too.
+- **Source key:** the encoding is documented in `cook/key.rs`. A golden test pins the key of a
+  fixture tree, and the value was confirmed by an independent shell implementation (`printf`
+  and `sha256sum`) of the documented encoding. The renderer's build script will be tested
+  against the same value.
+- **Manifest** (format 1): `format`, `slang_version`, `spirv_val_version`, `target`, and
+  `shaders` sorted by name, each with `name`, `file`, `entry_points`, `optimization`,
+  `spirv_sha256` and `source_key`.
+- **Atomicity:** every shader is compiled and validated before any file changes. Files are
+  replaced through a temporary file and a rename, and the manifest is written last.
+- **Windows CI** gets `spirv-val` from the LunarG Vulkan SDK 1.4.363.1 installer, pinned by
+  SHA-256 and installed copy-only. The hash was computed from the download after checking its
+  LunarG code signature. Linux uses the distro's `spirv-tools`. The cook tests run on all three
+  build jobs with `OXREAL_REQUIRE_SPIRV_VAL=1`, and every build job also runs
+  `cargo xtask cook-shaders`.
+- **Not yet:** no crate has a recipe until the renderer arrives (the next slice), so the
+  workspace cook writes an empty manifest for now.
