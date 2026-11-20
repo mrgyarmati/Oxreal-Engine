@@ -98,7 +98,13 @@ impl Shared {
         let buffer = unsafe { self.raw().create_buffer(&info, None) }
             .map_err(|e| from_vk("vkCreateBuffer", e))?;
         // SAFETY: `buffer` was just created.
-        let requirements = unsafe { self.raw().get_buffer_memory_requirements(buffer) };
+        let mut requirements = unsafe { self.raw().get_buffer_memory_requirements(buffer) };
+        // Every buffer starts on a multiple of `BUFFER_ADDRESS_ALIGNMENT`, which
+        // `Device::buffer_address` promises. Alignments are powers of two, so the larger one
+        // still satisfies the driver's.
+        requirements.alignment = requirements
+            .alignment
+            .max(oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT);
         let allocation = match self.allocate(label, requirements, location, true) {
             Ok(allocation) => allocation,
             Err(error) => {

@@ -15,6 +15,35 @@ use crate::{ShaderError, depfile};
 /// (xtask depends on no engine crate): change both together.
 pub const SLANGC_ENV_VAR: &str = "OXREAL_SLANGC";
 
+/// The arguments every compile passes `slangc`, besides the source, entry points, include
+/// directories, optimization and output files.
+///
+/// They decide the target and memory layouts, so cooked shaders' source keys include them
+/// ([`compile_options`], ADR-0019 §4). Changing them changes every key.
+const FIXED_ARGS: &[&str] = &[
+    "-target",
+    "spirv",
+    "-profile",
+    "spirv_1_6",
+    // Slang's texture functions declare these capability atoms, so without them every
+    // sampling shader warns "profile implicitly upgraded" (E41012). Declaring them only
+    // says the target *may* use them. A shader that actually does emits the SPIR-V
+    // capability, and the allowlist rejects it. Verified with Slang 2026.22: the SPIR-V
+    // is byte-identical with and without this flag.
+    "-capability",
+    "SPV_GOOGLE_user_type+spvDerivativeControl+spvImageQuery+spvImageGatherExtended+\
+     spvSparseResidency+spvMinLod+spvFragmentFullyCoveredEXT",
+    "-matrix-layout-column-major",
+    "-fvk-use-entrypoint-name",
+];
+
+/// The fixed `slangc` arguments as one string, for source keys: a cooked shader built with other
+/// flags must not pass for current (ADR-0019 §4).
+#[must_use]
+pub fn compile_options() -> String {
+    FIXED_ARGS.join(" ")
+}
+
 /// How much the compiler optimizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Optimization {
@@ -201,22 +230,7 @@ impl SlangCompiler {
         let depfile_path = dir.join("module.d");
 
         let mut command = Command::new(&self.slangc);
-        command.arg(request.source).args([
-            "-target",
-            "spirv",
-            "-profile",
-            "spirv_1_6",
-            // Slang's texture functions declare these capability atoms, so without them every
-            // sampling shader warns "profile implicitly upgraded" (E41012). Declaring them only
-            // says the target *may* use them. A shader that actually does emits the SPIR-V
-            // capability, and the allowlist rejects it. Verified with Slang 2026.22: the SPIR-V
-            // is byte-identical with and without this flag.
-            "-capability",
-            "SPV_GOOGLE_user_type+spvDerivativeControl+spvImageQuery+spvImageGatherExtended+\
-             spvSparseResidency+spvMinLod+spvFragmentFullyCoveredEXT",
-            "-matrix-layout-column-major",
-            "-fvk-use-entrypoint-name",
-        ]);
+        command.arg(request.source).args(FIXED_ARGS);
         for entry in request.entry_points {
             command.args(["-entry", entry]);
         }

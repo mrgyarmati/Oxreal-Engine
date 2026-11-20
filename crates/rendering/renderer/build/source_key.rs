@@ -12,10 +12,18 @@
 use sha2::{Digest, Sha256};
 
 /// The source-key encoding version, as in `oxreal-shader-compiler`.
-pub(crate) const SOURCE_KEY_FORMAT: &str = "oxreal-shader-source-key/1";
+pub(crate) const SOURCE_KEY_FORMAT: &str = "oxreal-shader-source-key/2";
 
 /// What cooked shaders target, as in `oxreal-shader-compiler`.
 pub(crate) const TARGET: &str = "spirv-1.6/vulkan-1.3";
+
+/// The fixed `slangc` arguments the cook compiles with
+/// (`oxreal_shader_compiler::compile_options`), which decide memory layouts. A test checks it
+/// equals the cook's.
+pub(crate) const COMPILE_OPTIONS: &str = "-target spirv -profile spirv_1_6 -capability \
+    SPV_GOOGLE_user_type+spvDerivativeControl+spvImageQuery+spvImageGatherExtended+\
+    spvSparseResidency+spvMinLod+spvFragmentFullyCoveredEXT -matrix-layout-column-major \
+    -fvk-use-entrypoint-name";
 
 /// One `cook.json` entry, as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +103,7 @@ pub(crate) fn source_key(
         SOURCE_KEY_FORMAT,
         slang_version,
         TARGET,
+        COMPILE_OPTIONS,
         &shader.output,
         &shader.source,
     ] {

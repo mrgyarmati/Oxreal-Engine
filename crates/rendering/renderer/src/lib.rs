@@ -22,7 +22,7 @@
 //! let cube = renderer.register_mesh(&MeshData::cube())?;
 //!
 //! let mut world = RenderWorld::default();
-//! world.draws.push(DrawItem { mesh: cube, object_to_world: oxreal_math::Mat4::IDENTITY });
+//! world.draws.push(DrawItem::new(cube, oxreal_math::Mat4::IDENTITY));
 //! if let Some(mut frame) = device.begin_frame(surface)? {
 //!     let target = RenderTarget::backbuffer(&frame);
 //!     renderer.render(frame.encoder(), &target, &world)?;
@@ -41,7 +41,7 @@ mod world;
 pub use cache::{CookedShaders, ShaderCacheError};
 pub use mesh::{Indices, MAX_VERTICES, MeshData, MeshError, MeshHandle, Vertex};
 pub use renderer::{RenderError, RenderStats, RenderTarget, Renderer};
-pub use world::{Camera, DrawItem, RenderWorld};
+pub use world::{Camera, DrawItem, Projection, RenderWorld};
 
 /// The build script's source-key code, compiled here too so its golden test checks the code
 /// the build runs.
@@ -58,7 +58,7 @@ mod tests {
     /// The golden key of `oxreal-shader-compiler`'s cook fixture with Slang version `0.0`. The
     /// cook's own implementation is tested against the same value (its `cook/key.rs`); if they
     /// disagree, a cache cooked for this build would be refused as stale.
-    const GOLDEN: &str = "f867b0755d6f4c25c800544202628fa0e53bdc29de1e6ad50e5f9fc8c0086bda";
+    const GOLDEN: &str = "a48e9c1c4f9726634f69e55fb5e33605a5688f1aafba879f1a0ef139bf90f05c";
 
     #[test]
     fn the_build_scripts_key_matches_the_cooks_golden_value() {
@@ -72,6 +72,21 @@ mod tests {
             .map(|input| std::fs::read(fixture.join(input)).unwrap())
             .collect();
         assert_eq!(hex(&source_key("0.0", &shaders[0], &contents)), GOLDEN);
+    }
+
+    #[test]
+    fn the_build_scripts_constants_equal_the_cooks() {
+        use oxreal_shader_compiler::cook;
+        assert_eq!(
+            super::build_source_key::SOURCE_KEY_FORMAT,
+            cook::SOURCE_KEY_FORMAT
+        );
+        assert_eq!(super::build_source_key::TARGET, cook::TARGET);
+        assert_eq!(
+            super::build_source_key::COMPILE_OPTIONS,
+            oxreal_shader_compiler::compile_options(),
+            "the cook's slangc flags changed: update COMPILE_OPTIONS and both golden values"
+        );
     }
 
     #[test]

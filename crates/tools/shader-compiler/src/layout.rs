@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use crate::ShaderError;
+
 const OP_NAME: u32 = 5;
 const OP_TYPE_POINTER: u32 = 32;
 const OP_DECORATE: u32 = 71;
@@ -38,22 +40,31 @@ impl SpirvLayouts {
     ///
     /// # Errors
     ///
-    /// A description of the problem if the module is truncated or malformed.
-    pub fn parse(spirv: &[u32]) -> Result<Self, String> {
+    /// [`ShaderError::MalformedSpirv`] if the module is truncated or malformed.
+    pub fn parse(spirv: &[u32]) -> Result<Self, ShaderError> {
+        let malformed = |details: String| ShaderError::MalformedSpirv { details };
+        if spirv.len() < HEADER_WORDS {
+            return Err(malformed(format!(
+                "{} words is shorter than the {HEADER_WORDS}-word header",
+                spirv.len()
+            )));
+        }
         let mut layouts = Self::default();
         let mut at = HEADER_WORDS;
         while at < spirv.len() {
             let count = (spirv[at] >> 16) as usize;
             let opcode = spirv[at] & 0xFFFF;
             if count == 0 || at + count > spirv.len() {
-                return Err(format!("malformed SPIR-V instruction at word {at}"));
+                return Err(malformed(format!(
+                    "instruction at word {at} overruns the module"
+                )));
             }
             let operands = &spirv[at + 1..at + count];
             let operand = |i: usize| {
                 operands
                     .get(i)
                     .copied()
-                    .ok_or_else(|| format!("opcode {opcode} at word {at} is too short"))
+                    .ok_or_else(|| malformed(format!("opcode {opcode} at word {at} is too short")))
             };
             match opcode {
                 OP_NAME => {
@@ -178,6 +189,10 @@ mod tests {
 
     #[test]
     fn malformed_modules_are_errors_not_panics() {
+        assert!(matches!(
+            SpirvLayouts::parse(&[0x0723_0203]),
+            Err(ShaderError::MalformedSpirv { .. })
+        ));
         let header = vec![0x0723_0203, 0x0001_0600, 0, 100, 0];
         let mut zero_count = header.clone();
         zero_count.push(OP_NAME);

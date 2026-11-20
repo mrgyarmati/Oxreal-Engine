@@ -99,7 +99,40 @@ pub struct RenderPassDesc<'a> {
 /// The `*_raw` methods exist for backends to implement. Renderer code uses
 /// [`begin_render_pass`](trait.CommandEncoder.html#method.begin_render_pass) on
 /// `dyn CommandEncoder`, which ends the pass when its guard drops.
-pub trait CommandEncoder: Send + fmt::Debug {
+///
+/// # Safety
+///
+/// Only backends implement this trait. An implementation must be **one encoder**, so that
+/// [`crate::Device::owns_encoder`] and `submit` can rely on its identity:
+/// - [`as_any`](CommandEncoder::as_any) and [`into_any`](CommandEncoder::into_any) return
+///   the implementing object itself, never another encoder;
+/// - the `*_raw` methods record into that same object.
+///
+/// Otherwise a wrapper could pass one device's ownership check and record into another device's
+/// command buffer, where code that vouched for its addresses and indices
+/// (`ShaderCode::from_spirv_unchecked`) would have them used on objects it never saw
+/// (ADR-0017, implementation notes of 2026-11-20).
+///
+/// A type outside a backend can't implement it without `unsafe`:
+///
+/// ```compile_fail
+/// # use std::any::Any;
+/// # use oxreal_rhi::*;
+/// #[derive(Debug)]
+/// struct Wrapper;
+/// impl CommandEncoder for Wrapper {
+///     fn begin_render_pass_raw(&mut self, _: &RenderPassDesc<'_>) {}
+///     fn end_render_pass_raw(&mut self) {}
+///     fn set_pipeline_raw(&mut self, _: PipelineHandle) {}
+///     fn set_push_constants_raw(&mut self, _: &[u8]) {}
+///     fn draw_raw(&mut self, _: u32, _: u32, _: u32, _: u32) {}
+///     fn set_index_buffer_raw(&mut self, _: BufferHandle, _: u64, _: IndexFormat) {}
+///     fn draw_indexed_raw(&mut self, _: std::ops::Range<u32>, _: i32, _: u32, _: u32) {}
+///     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> { self }
+///     fn as_any(&self) -> &dyn Any { self }
+/// }
+/// ```
+pub unsafe trait CommandEncoder: Send + fmt::Debug {
     /// Backend hook: begin a render pass. Called only by [`RenderPass`].
     fn begin_render_pass_raw(&mut self, desc: &RenderPassDesc<'_>);
 
@@ -290,7 +323,9 @@ mod tests {
         calls: Vec<&'static str>,
     }
 
-    impl CommandEncoder for Recorder {
+    // SAFETY: `as_any` and `into_any` return the recorder itself, and every hook records into
+    // it.
+    unsafe impl CommandEncoder for Recorder {
         fn begin_render_pass_raw(&mut self, _desc: &RenderPassDesc<'_>) {
             self.calls.push("begin");
         }

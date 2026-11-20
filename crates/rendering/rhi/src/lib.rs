@@ -40,7 +40,7 @@ pub use adapter::{
 pub use bindless::{
     AddressMode, BINDLESS_SET, Filter, SAMPLERS_BINDING, SamplerDesc, TEXTURES_BINDING,
 };
-pub use buffer::{BufferDesc, BufferUsage, IndexFormat};
+pub use buffer::{BUFFER_ADDRESS_ALIGNMENT, BufferDesc, BufferUsage, IndexFormat};
 pub use command::{
     ColorAttachment, CommandEncoder, DepthAttachment, DepthLoadOp, Frame, LoadOp, RenderPass,
     RenderPassDesc, StoreOp,

@@ -20,8 +20,6 @@ use sha2::{Digest, Sha256};
 
 /// The manifest format this build reads.
 const MANIFEST_FORMAT: u64 = 1;
-/// What cooked shaders must target.
-const TARGET: &str = "spirv-1.6/vulkan-1.3";
 /// The SPIR-V magic number, the first word of every module.
 const SPIRV_MAGIC: u32 = 0x0723_0203;
 
@@ -41,7 +39,10 @@ include!(concat!(env!("OUT_DIR"), "/expected_shaders.rs"));
 #[non_exhaustive]
 pub enum ShaderCacheError {
     /// The directory holds no cooked shaders.
-    #[error("no cooked shaders in {dir}: run `cargo xtask cook-shaders`")]
+    #[error(
+        "no cooked shaders in {dir}: run `cargo xtask cook-shaders` (with `--profile release` \
+         for release builds)"
+    )]
     NotCooked {
         /// The `shaders` directory looked in.
         dir: PathBuf,
@@ -57,7 +58,7 @@ pub enum ShaderCacheError {
     /// A shader was cooked from other sources than this build was made with.
     #[error(
         "cooked shader `{shader}` doesn't match this build ({details}): run \
-         `cargo xtask cook-shaders` (with `--profile release` for release builds)"
+         `cargo xtask cook-shaders`"
     )]
     Stale {
         /// The shader.
@@ -119,22 +120,21 @@ impl CookedShaders {
         })?;
         let spirv = EXPECTED_SHADERS
             .iter()
-            .map(|expected| load_shader(&dir, &manifest, expected))
+            .map(|expected| load_shader(&dir, &manifest_path, &manifest, expected))
             .collect::<Result<_, _>>()?;
         Ok(Self { spirv })
     }
 
-    /// The SPIR-V of the shader named `name`, which this build expects.
-    pub(crate) fn spirv(&self, name: &str) -> Option<&[u32]> {
-        EXPECTED_SHADERS
-            .iter()
-            .position(|e| e.name == name)
-            .map(|i| self.spirv[i].as_slice())
+    /// The mesh shader's SPIR-V. `build.rs` guarantees this build expects it, and `load` loads
+    /// every expected shader.
+    pub(crate) fn mesh(&self) -> &[u32] {
+        &self.spirv[MESH_SHADER]
     }
 }
 
 fn load_shader(
     dir: &Path,
+    manifest_path: &Path,
     manifest: &Manifest,
     expected: &ExpectedShader,
 ) -> Result<Vec<u32>, ShaderCacheError> {
@@ -160,10 +160,13 @@ fn load_shader(
     // for this shader is malformed, not followed.
     let file = format!("{}.spv", expected.name);
     if entry.file != file {
-        return Err(stale(format!(
-            "the manifest names `{}`, not `{file}`",
-            entry.file
-        )));
+        return Err(ShaderCacheError::Malformed {
+            path: manifest_path.to_owned(),
+            details: format!(
+                "shader `{}` names file `{}`, not `{file}`",
+                expected.name, entry.file
+            ),
+        });
     }
     let path = dir.join(&file);
     let bytes = std::fs::read(&path).map_err(|source| ShaderCacheError::Io {
@@ -354,8 +357,7 @@ mod tests {
     fn a_matching_cache_loads() {
         let cooked = Cooked::valid(&MODULE);
         let shaders = CookedShaders::load(&cooked.0).unwrap();
-        assert_eq!(shaders.spirv("Mesh"), Some(&MODULE[..]));
-        assert_eq!(shaders.spirv("Other"), None);
+        assert_eq!(shaders.mesh(), &MODULE[..]);
     }
 
     #[test]
@@ -428,7 +430,7 @@ mod tests {
         cooked.edit_manifest("\"file\":\"Mesh.spv\"", "\"file\":\"../../elsewhere.spv\"");
         assert!(matches!(
             CookedShaders::load(&cooked.0).unwrap_err(),
-            ShaderCacheError::Stale { .. }
+            ShaderCacheError::Malformed { .. }
         ));
     }
 

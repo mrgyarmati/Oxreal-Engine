@@ -402,3 +402,35 @@ fn concurrent_writes_and_reads_are_safe() {
     }
     assert_no_validation_errors(&device);
 }
+
+#[test]
+#[ignore = "requires a Vulkan 1.3 device and validation layers; run with --ignored"]
+fn every_buffer_address_is_aligned_to_the_documented_minimum() {
+    let device = device();
+    // Odd sizes interleaved, so allocations would otherwise pack tightly.
+    let buffers: Vec<BufferHandle> = [3, 5, 1, 7, 33, 2, 9, 65]
+        .into_iter()
+        .map(|size| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: "aligned",
+                    size,
+                    usage: BufferUsage::SHADER_ADDRESS,
+                })
+                .expect("buffer")
+        })
+        .collect();
+    for &buffer in &buffers {
+        let address = device.buffer_address(buffer).expect("address");
+        assert_eq!(
+            address % oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT,
+            0,
+            "{address:#x} isn't {}-byte aligned",
+            oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT
+        );
+    }
+    for buffer in buffers {
+        device.destroy_buffer(buffer).expect("destroy");
+    }
+    assert_no_validation_errors(&device);
+}

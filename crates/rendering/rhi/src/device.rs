@@ -219,8 +219,9 @@ pub trait Device: fmt::Debug + Send + Sync {
     fn read_buffer(&self, buffer: BufferHandle) -> Result<Vec<u8>, RhiError>;
 
     /// The buffer's 64-bit GPU address, for shaders to read and write it through (pass it in
-    /// push constants or another buffer). It stays the same for the buffer's lifetime. The
-    /// buffer needs [`crate::BufferUsage::SHADER_ADDRESS`].
+    /// push constants or another buffer). It stays the same for the buffer's lifetime, and is a
+    /// multiple of [`crate::BUFFER_ADDRESS_ALIGNMENT`]. The buffer needs
+    /// [`crate::BufferUsage::SHADER_ADDRESS`].
     ///
     /// Shaders that use an address are bound by
     /// [`ShaderCode::from_spirv_unchecked`](crate::ShaderCode::from_spirv_unchecked)'s contract:

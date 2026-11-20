@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use oxreal_math::{LinearRgba, Mat4, Transform, Vec3};
 use oxreal_renderer::{
-    Camera, CookedShaders, DrawItem, Indices, MeshData, RenderError, RenderTarget, RenderWorld,
-    Renderer, Vertex,
+    Camera, CookedShaders, DrawItem, Indices, MeshData, Projection, RenderError, RenderTarget,
+    RenderWorld, Renderer, Vertex,
 };
 use oxreal_rhi::{
     Device, DeviceDesc, GpuSelection, TextureDesc, TextureFormat, TextureHandle, TextureUsage,
@@ -65,14 +65,14 @@ fn target(device: &dyn Device, size: u32) -> RenderTarget {
 
 /// A world seen from 3 m in front of the origin, cleared to pure blue.
 fn world(draws: Vec<DrawItem>) -> RenderWorld {
-    RenderWorld {
-        camera: Camera {
-            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 3.0)),
-            ..Camera::default()
-        },
-        background: LinearRgba::new(0.0, 0.0, 1.0, 1.0),
-        draws,
-    }
+    let mut world = RenderWorld::default();
+    world.camera = Camera::new(
+        Transform::from_translation(Vec3::new(0.0, 0.0, 3.0)),
+        Projection::default(),
+    );
+    world.background = LinearRgba::new(0.0, 0.0, 1.0, 1.0);
+    world.draws = draws;
+    world
 }
 
 /// Renders `world` into a new target and reads it back.
@@ -121,14 +121,8 @@ fn draws_registered_meshes_and_skips_stale_handles() {
     assert_eq!(renderer.mesh_count(), 1);
 
     let draws = vec![
-        DrawItem {
-            mesh: cube,
-            object_to_world: Mat4::IDENTITY,
-        },
-        DrawItem {
-            mesh: gone,
-            object_to_world: Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
-        },
+        DrawItem::new(cube, Mat4::IDENTITY),
+        DrawItem::new(gone, Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0))),
     ];
     let device = Arc::clone(renderer.device());
     let target = target(device.as_ref(), SIZE);
@@ -169,10 +163,7 @@ fn another_devices_encoder_is_refused() {
     let other = device();
     let target = target(other.as_ref(), SIZE);
     let mut encoder = other.create_encoder("foreign").expect("encoder");
-    let draws = vec![DrawItem {
-        mesh: cube,
-        object_to_world: Mat4::IDENTITY,
-    }];
+    let draws = vec![DrawItem::new(cube, Mat4::IDENTITY)];
     assert!(matches!(
         renderer.render(encoder.as_mut(), &target, &world(draws)),
         Err(RenderError::ForeignEncoder)
@@ -207,10 +198,7 @@ fn targets_of_any_size_and_32_bit_indices_render() {
         indices: Indices::U32(vec![0, 1, 2]),
     };
     let mesh = renderer.register_mesh(&triangle).expect("triangle");
-    let draws = vec![DrawItem {
-        mesh,
-        object_to_world: Mat4::IDENTITY,
-    }];
+    let draws = vec![DrawItem::new(mesh, Mat4::IDENTITY)];
     let world = world(draws);
     // The depth target is recreated for each size.
     let device = Arc::clone(renderer.device());
@@ -250,7 +238,10 @@ fn invalid_inputs_are_errors_and_record_nothing() {
     let device = Arc::clone(renderer.device());
     let target = target(device.as_ref(), SIZE);
     let mut bad_camera = world(Vec::new());
-    bad_camera.camera.vertical_fov = 0.0;
+    bad_camera.camera.projection = Projection::Perspective {
+        vertical_fov: 0.0,
+        near: 0.05,
+    };
     let mut encoder = device.create_encoder("invalid").expect("encoder");
     assert!(matches!(
         renderer.render(encoder.as_mut(), &target, &bad_camera),

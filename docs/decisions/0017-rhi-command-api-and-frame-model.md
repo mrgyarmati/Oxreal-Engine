@@ -220,11 +220,22 @@ check, or turning primitive restart on.
 - **Who uses it:** code that records with its own `from_spirv_unchecked` pipelines on behalf of
   callers, starting with `oxreal-renderer` (ADR-0019 §1). Its `render` returns
   `RenderError::ForeignEncoder` and records nothing.
+- **`CommandEncoder` is an `unsafe trait`** (found by the renderer's `unsafe` audit). As a safe
+  trait, a wrapper could answer `as_any` with one device's encoder and record into another's,
+  passing the ownership check without forging anything. Its contract: `as_any` and `into_any`
+  return the implementing object itself, and the `*_raw` methods record into it. Only backends
+  implement it (`unsafe impl`). A `compile_fail` example shows a plain `impl` is refused.
 - **What it doesn't cover:** handles stay plain numbers that safe code can forge
   (`from_raw`), so the program-wide obligations of `ShaderCode::from_spirv_unchecked`
-  (ADR-0016 §2) are unchanged.
-- **Tested** by `tests/device.rs` (two devices, each owning only its own encoder) and the
-  renderer's GPU tests.
+  (ADR-0016 §2) are unchanged. The contract now says that addresses, indices and pipelines are
+  only valid in encoders of the device that created them.
+- **Buffer addresses are aligned:** every buffer's address is a multiple of
+  `BUFFER_ADDRESS_ALIGNMENT` (16 bytes). The backend raises each buffer's memory alignment to
+  at least that, which still satisfies the driver's requirement because alignments are powers
+  of two. Shaders reading types up to 16 bytes at aligned offsets meet
+  `from_spirv_unchecked`'s alignment obligation without relying on driver-specific alignment.
+- **Tested** by `tests/device.rs` (two devices, each owning only its own encoder),
+  `tests/buffers.rs` (addresses of odd-sized buffers are aligned), and the renderer's GPU tests.
 
 ## Consequences
 

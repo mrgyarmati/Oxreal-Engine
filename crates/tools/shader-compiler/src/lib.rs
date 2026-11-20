@@ -42,7 +42,8 @@ mod spirv;
 mod validate;
 
 pub use compiler::{
-    CompileRequest, CompiledShader, Optimization, SLANGC_ENV_VAR, SlangCompiler, pinned_version,
+    CompileRequest, CompiledShader, Optimization, SLANGC_ENV_VAR, SlangCompiler, compile_options,
+    pinned_version,
 };
 pub use error::ShaderError;
 pub use layout::SpirvLayouts;

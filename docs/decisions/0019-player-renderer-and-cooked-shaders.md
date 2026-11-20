@@ -348,3 +348,31 @@ constraints shape them:
 
   The GPU tests ran on an AMD Radeon RX 9070 XT, and run on Lavapipe in CI. The round-trip and
   layout tests run on every CI build job.
+- **After review** (the architecture review and the `unsafe` audit):
+  - **The source key includes the fixed `slangc` flags** (`compile_options()`, built from the
+    same list the compiler passes), because they decide memory layouts. Otherwise a cache cooked
+    with other flags could pass for current. The key format is now
+    `oxreal-shader-source-key/2`. Both golden values changed, and were confirmed again by the
+    independent shell implementation. A renderer unit test checks that its copies of the format
+    string, target and flags equal the cook's.
+  - **The RHI changes:** `CommandEncoder` became an `unsafe trait`, and buffer addresses are
+    16-byte aligned (ADR-0017, implementation notes of 2026-11-20).
+  - **A camera is a transform plus a `#[non_exhaustive]` `Projection`.** The bridge's camera
+    component can hold the renderer's `Projection` directly. `RenderWorld`, `Camera` and
+    `DrawItem` are `#[non_exhaustive]`, with constructors.
+  - **`build.rs` fails if the recipe lacks the `Mesh` shader and its entry points,** so a
+    missing shader is a build error, not a run-time error variant.
+  - **Other fixes:**
+    - `render` refuses the renderer's own material texture as a target;
+    - one pipeline is cached per color format;
+    - skipped draws are logged only when their count changes;
+    - mesh capacity is checked before uploading;
+    - the push-constant packing is unit-tested at the shader's offsets;
+    - `SpirvLayouts::parse` returns `ShaderError::MalformedSpirv`.
+  - **Known limits, documented on `Renderer`:**
+    - one depth target, recreated when the target size changes;
+    - one unsubmitted encoder per renderer at a time;
+    - mesh handles belong to the renderer that issued them.
+  - **The safety argument's layout step holds for sources that pass
+    `tests/shader_layout.rs`,** which CI and `cargo xtask ci` run. Editing the shader means
+    running it.

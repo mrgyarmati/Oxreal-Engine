@@ -2,6 +2,11 @@
 
 use std::ops::BitOr;
 
+/// Every buffer's device address ([`crate::Device::buffer_address`]) is a multiple of this many
+/// bytes, so a shader may read any type up to 16 bytes, aligned to its size, at offset 0 and at
+/// offsets that are multiples of 16.
+pub const BUFFER_ADDRESS_ALIGNMENT: u64 = 16;
+
 /// How a buffer may be used. Combine flags with `|`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct BufferUsage(u32);

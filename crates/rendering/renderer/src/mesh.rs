@@ -121,12 +121,16 @@ pub enum MeshError {
 impl MeshData {
     /// Checks everything the mesh shader's safety contract relies on: every index names a
     /// vertex, and vertex IDs stay in `0..=i32::MAX`. Also that it holds whole triangles.
-    /// Returns the index count.
     ///
     /// # Errors
     ///
     /// The first problem found.
-    pub fn validate(&self) -> Result<u32, MeshError> {
+    pub fn validate(&self) -> Result<(), MeshError> {
+        self.checked_index_count().map(|_| ())
+    }
+
+    /// [`Self::validate`], returning the index count.
+    pub(crate) fn checked_index_count(&self) -> Result<u32, MeshError> {
         let vertex_count = self.vertices.len();
         let index_count = self.indices.len();
         if vertex_count == 0 || index_count == 0 {
@@ -207,7 +211,8 @@ impl MeshData {
 }
 
 /// A registered mesh. Handles are generational: once the mesh is unregistered, its handle
-/// names nothing, even after the slot is reused.
+/// names nothing, even after the slot is reused. A handle names a mesh of the renderer that
+/// registered it; another renderer may have a different mesh under the same handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MeshHandle {
     index: u32,
@@ -295,6 +300,11 @@ impl MeshPool {
         handles.into_iter().filter_map(|h| self.remove(h)).collect()
     }
 
+    /// Whether no more meshes fit: every slot index is taken and none is free.
+    pub(crate) fn is_full(&self) -> bool {
+        self.free.is_empty() && u32::try_from(self.slots.len()).is_err()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.slots.iter().filter(|s| s.mesh.is_some()).count()
     }
@@ -317,7 +327,8 @@ mod tests {
     #[test]
     fn the_cube_is_valid_and_packs_32_bytes_per_vertex() {
         let cube = MeshData::cube();
-        assert_eq!(cube.validate(), Ok(36));
+        assert_eq!(cube.validate(), Ok(()));
+        assert_eq!(cube.checked_index_count(), Ok(36));
         assert_eq!(cube.vertices.len(), 24);
         assert_eq!(cube.indices.len(), 36);
         assert_eq!(cube.vertex_bytes().len(), 24 * VERTEX_BYTES);

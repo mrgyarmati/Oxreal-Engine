@@ -2,11 +2,9 @@
 
 use std::sync::Arc;
 
-use oxreal_diagnostics::{debug, warn};
+use oxreal_diagnostics::{debug, profile_function, warn};
 use oxreal_math::Mat4;
-use oxreal_math::projection::{
-    ProjectionError, REVERSED_DEPTH_CLEAR, perspective_infinite_reversed, view_matrix,
-};
+use oxreal_math::projection::{ProjectionError, REVERSED_DEPTH_CLEAR, view_matrix};
 use oxreal_rhi::{
     AddressMode, BufferDesc, BufferUsage, ColorAttachment, CommandEncoder, CullMode,
     DepthAttachment, DepthLoadOp, DepthState, Device, Filter, Frame, LoadOp, PipelineHandle,
@@ -17,9 +15,13 @@ use oxreal_rhi::{
 use crate::mesh::{GpuMesh, MeshPool};
 use crate::{CookedShaders, MeshData, MeshError, MeshHandle, RenderWorld};
 
-/// The mesh shader's push constants: object-to-clip matrix, vertex buffer address, texture and
-/// sampler indices (`shaders/Mesh.slang`, checked by tests/shader_layout.rs).
-const CONSTANT_BYTES: usize = 80;
+/// The mesh shader's push constants (`shaders/Mesh.slang`'s `MeshConstants`, which
+/// tests/shader_layout.rs checks): the object-to-clip matrix at 0, the vertex buffer address,
+/// then the texture and sampler indices.
+pub(crate) const CONSTANT_BYTES: usize = 80;
+pub(crate) const ADDRESS_OFFSET: usize = 64;
+pub(crate) const TEXTURE_INDEX_OFFSET: usize = 72;
+pub(crate) const SAMPLER_INDEX_OFFSET: usize = 76;
 /// The default material's checkerboard: its size in texels, and squares per side.
 const BOARD_TEXELS: u32 = 64;
 const BOARD_SQUARES: u32 = 4;
@@ -31,11 +33,15 @@ pub enum RenderError {
     /// The encoder wasn't created by the renderer's device.
     #[error("the command encoder belongs to another device than the renderer's")]
     ForeignEncoder,
-    /// The target has no area, or a format the mesh pass can't render to.
+    /// The target has no area, a format the mesh pass can't render to, or is a texture the
+    /// renderer samples.
     #[error(
-        "can't render to a {width}x{height} {format:?} target: it needs an area and a color format"
+        "can't render to {texture:?} ({width}x{height} {format:?}): a target needs an area, a \
+         color format, and must not be the renderer's own texture"
     )]
     InvalidTarget {
+        /// The texture.
+        texture: TextureHandle,
         /// Its width.
         width: u32,
         /// Its height.
@@ -55,9 +61,6 @@ pub enum RenderError {
     /// Every mesh slot is taken.
     #[error("too many meshes are registered")]
     TooManyMeshes,
-    /// The cooked shaders lack one the renderer needs. A bug: loading checks it.
-    #[error("the cooked shaders lack `{0}`")]
-    MissingShader(&'static str),
     /// The device failed.
     #[error("{action} failed")]
     Device {
@@ -75,6 +78,9 @@ fn device_error(action: &'static str) -> impl FnOnce(RhiError) -> RenderError {
 
 /// Where a frame is rendered: a color texture of the renderer's device, with
 /// [`TextureUsage::RENDER_TARGET`]. The application owns it (ADR-0019 §1).
+///
+/// `format` and `size` must describe the texture. If they don't, the device refuses the pass
+/// when the encoder is submitted, and nothing is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderTarget {
     /// The texture.
@@ -97,11 +103,11 @@ impl RenderTarget {
     }
 }
 
-/// What a [`Renderer::render`] call drew.
+/// What a [`Renderer::render`] call recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct RenderStats {
-    /// Draws recorded.
+    /// Draws recorded. The device can still refuse them at submit (ADR-0017 §3).
     pub drawn: u32,
     /// Draws skipped because their mesh handle names no registered mesh.
     pub skipped: u32,
@@ -118,25 +124,37 @@ struct Material {
 
 /// Draws [`RenderWorld`]s through the RHI (ADR-0019 §1).
 ///
-/// It holds the device as `Arc<dyn Device>` (ADR-0017 §1) and owns the mesh pass: its pipeline,
-/// depth target, meshes and default material. The application owns surfaces, the frame loop
-/// and the color target, and hands [`Renderer::render`] an encoder to record into.
+/// It holds the device as `Arc<dyn Device>` (ADR-0017 §1) and owns the mesh pass: its
+/// pipelines, depth target, meshes and default material. The application owns surfaces, the
+/// frame loop and the color target, and hands [`Renderer::render`] an encoder to record into.
 ///
-/// **Safety by construction.** The mesh shader reads vertices through buffer addresses and
+/// **The shader's obligations.** The mesh shader reads vertices through buffer addresses and
 /// samples through bindless indices, which `ShaderCode::from_spirv_unchecked` makes the
-/// program's responsibility (ADR-0016 §2). The renderer takes all of it on: no pipeline,
-/// shader code, address or index appears in its API; meshes are validated when registered;
-/// stale handles are skipped; and it records only into its own device's encoders.
+/// program's responsibility (ADR-0016 §2). The renderer discharges them for everything it
+/// records: no pipeline, shader code, address or index appears in its API; meshes are
+/// validated when registered; stale handles are skipped; and it records only into its own
+/// device's encoders. RHI handles are plain numbers, so code that forges them (`from_raw`)
+/// remains the program's responsibility, as ADR-0016 §2 says.
+///
+/// **Limits.**
+/// - One depth target, sized to the last target. Rendering to targets of different sizes
+///   recreates it each time (an editor with several viewports will want one renderer each, or
+///   a cache keyed by size). Render with one unsubmitted encoder at a time: two open encoders
+///   can't share the depth target, and the device refuses the second pass at submit.
+/// - Mesh handles name meshes of the renderer that registered them. Another renderer may have a
+///   different mesh under the same handle.
 #[derive(Debug)]
 pub struct Renderer {
     device: Arc<dyn Device>,
     shaders: CookedShaders,
-    /// The pipeline and the color format it was created for.
-    pipeline: Option<(PipelineHandle, TextureFormat)>,
+    /// One pipeline per color format rendered to.
+    pipelines: Vec<(TextureFormat, PipelineHandle)>,
     /// The depth target and the size it was created for.
     depth: Option<(TextureHandle, (u32, u32))>,
     meshes: MeshPool,
     material: Material,
+    /// How many draws the last `render` skipped, so a lasting stale handle is logged once.
+    last_skipped: u32,
 }
 
 impl Renderer {
@@ -150,10 +168,11 @@ impl Renderer {
         Ok(Self {
             device,
             shaders,
-            pipeline: None,
+            pipelines: Vec::new(),
             depth: None,
             meshes: MeshPool::default(),
             material,
+            last_skipped: 0,
         })
     }
 
@@ -168,15 +187,16 @@ impl Renderer {
     ///
     /// # Errors
     ///
-    /// [`RenderError::Mesh`] if it's invalid (nothing is uploaded),
-    /// [`RenderError::TooManyMeshes`], or [`RenderError::Device`].
+    /// [`RenderError::Mesh`] if it's invalid, [`RenderError::TooManyMeshes`], or
+    /// [`RenderError::Device`]. Nothing is uploaded then.
     pub fn register_mesh(&mut self, mesh: &MeshData) -> Result<MeshHandle, RenderError> {
-        let index_count = mesh.validate().map_err(RenderError::Mesh)?;
-        let gpu = self.upload(mesh, index_count)?;
-        match self.meshes.insert(gpu) {
-            Some(handle) => Ok(handle),
-            None => Err(RenderError::TooManyMeshes),
+        profile_function!();
+        let index_count = mesh.checked_index_count().map_err(RenderError::Mesh)?;
+        if self.meshes.is_full() {
+            return Err(RenderError::TooManyMeshes);
         }
+        let gpu = self.upload(mesh, index_count)?;
+        self.meshes.insert(gpu).ok_or(RenderError::TooManyMeshes)
     }
 
     fn upload(&self, mesh: &MeshData, index_count: u32) -> Result<GpuMesh, RenderError> {
@@ -256,14 +276,14 @@ impl Renderer {
     /// background and draws its meshes with depth testing.
     ///
     /// The encoder must be the renderer's device's: from [`Device::create_encoder`] or a frame
-    /// of [`Device::begin_frame`]. Draws whose mesh handle is stale are skipped, counted and
-    /// logged. Recording itself can't fail: the device reports misuse when the encoder is
-    /// submitted (ADR-0017 §3).
+    /// of [`Device::begin_frame`]. Draws whose mesh handle is stale are skipped and counted, and
+    /// logged when their number changes. Recording itself can't fail: the device reports misuse
+    /// when the encoder is submitted (ADR-0017 §3).
     ///
     /// # Errors
     ///
     /// [`RenderError::ForeignEncoder`], [`RenderError::InvalidTarget`],
-    /// [`RenderError::Camera`], or [`RenderError::Device`] if the pipeline or depth target
+    /// [`RenderError::Camera`], or [`RenderError::Device`] if a pipeline or the depth target
     /// can't be created. Nothing is recorded then.
     pub fn render(
         &mut self,
@@ -271,14 +291,21 @@ impl Renderer {
         target: &RenderTarget,
         world: &RenderWorld,
     ) -> Result<RenderStats, RenderError> {
+        profile_function!();
         // Recording looks handles up in the encoder's device. In another device's encoder our
         // handles could name unrelated objects, and the shader would read our addresses.
         if !self.device.owns_encoder(encoder) {
             return Err(RenderError::ForeignEncoder);
         }
         let (width, height) = target.size;
-        if width == 0 || height == 0 || target.format.is_depth() {
+        // The material texture is the one the shader samples: it must never be the attachment.
+        if width == 0
+            || height == 0
+            || target.format.is_depth()
+            || target.texture == self.material.texture
+        {
             return Err(RenderError::InvalidTarget {
+                texture: target.texture,
                 width,
                 height,
                 format: target.format,
@@ -286,10 +313,12 @@ impl Renderer {
         }
         // Sizes are far below 2^24, where f32 would lose precision.
         let aspect = width as f32 / height as f32;
-        let projection =
-            perspective_infinite_reversed(world.camera.vertical_fov, aspect, world.camera.near)
-                .map_err(RenderError::Camera)?;
-        let clip_from_world = projection * view_matrix(&world.camera.transform);
+        let clip_from_view = world
+            .camera
+            .projection
+            .clip_from_view(aspect)
+            .map_err(RenderError::Camera)?;
+        let clip_from_world = clip_from_view * view_matrix(&world.camera.transform);
         let pipeline = self.pipeline_for(target.format)?;
         let depth = self.depth_for(target.size)?;
 
@@ -315,80 +344,64 @@ impl Renderer {
                 continue;
             };
             pass.set_index_buffer(mesh.indices, 0, mesh.index_format);
-            pass.set_push_constants(&self.constants(clip_from_world, &draw.object_to_world, mesh));
+            pass.set_push_constants(&pack_constants(
+                clip_from_world * draw.object_to_world,
+                mesh.address,
+                self.material.texture_index,
+                self.material.sampler_index,
+            ));
             // The whole index buffer, with vertex offset 0: registration checked every index.
             pass.draw_indexed(0..mesh.index_count, 0, 1);
             stats.drawn += 1;
         }
         drop(pass);
-        if stats.skipped > 0 {
-            warn!(
-                skipped = stats.skipped,
-                "draws named unregistered meshes and were skipped"
-            );
+        if stats.skipped != self.last_skipped {
+            if stats.skipped > 0 {
+                warn!(
+                    skipped = stats.skipped,
+                    "draws name unregistered meshes and are skipped"
+                );
+            }
+            self.last_skipped = stats.skipped;
         }
         Ok(stats)
     }
 
-    /// Push constants for drawing `mesh` with object-to-world matrix `model`.
-    fn constants(
-        &self,
-        clip_from_world: Mat4,
-        model: &Mat4,
-        mesh: &GpuMesh,
-    ) -> [u8; CONSTANT_BYTES] {
-        let clip_from_object = clip_from_world * *model;
-        let mut bytes = [0; CONSTANT_BYTES];
-        let (words, _) = bytes.as_chunks_mut::<4>();
-        for (chunk, value) in words.iter_mut().zip(clip_from_object.to_cols_array()) {
-            *chunk = value.to_le_bytes();
-        }
-        bytes[64..72].copy_from_slice(&mesh.address.to_le_bytes());
-        bytes[72..76].copy_from_slice(&self.material.texture_index.to_le_bytes());
-        bytes[76..80].copy_from_slice(&self.material.sampler_index.to_le_bytes());
-        bytes
-    }
-
-    /// The pipeline for color `format`, created (or recreated) as needed.
+    /// The pipeline for color `format`, created the first time it's needed.
     fn pipeline_for(&mut self, format: TextureFormat) -> Result<PipelineHandle, RenderError> {
-        if let Some((pipeline, created_for)) = self.pipeline {
-            if created_for == format {
-                return Ok(pipeline);
-            }
-            self.pipeline = None;
-            // Destruction is deferred until the GPU and open encoders are done with it.
-            self.device
-                .destroy_render_pipeline(pipeline)
-                .map_err(device_error("destroying the previous pipeline"))?;
+        if let Some(&(_, pipeline)) = self.pipelines.iter().find(|(f, _)| *f == format) {
+            return Ok(pipeline);
         }
-        let spirv = self
-            .shaders
-            .spirv("Mesh")
-            .ok_or(RenderError::MissingShader("Mesh"))?;
-        // SAFETY: `ShaderCode::from_spirv_unchecked`'s obligations:
+        // SAFETY: `ShaderCode::from_spirv_unchecked`'s obligations, for every draw this renderer
+        // records with the pipeline:
         // - Valid SPIR-V within Oxreal's features: `CookedShaders::load` accepted these words
         //   only if their SHA-256 matches a manifest whose source key equals the one this crate
         //   was built with (build.rs). Such manifests are written only by the cook, which uses
-        //   exactly the pinned Slang with its capability allowlist and fails unless `spirv-val`
-        //   accepts the module (ADR-0019 §4). Tampering with the cooked directory is out of
-        //   scope, as for the executable itself.
-        // - Layouts: the source key ties the words to exactly the `Mesh.slang` and
-        //   `Bindless.slang` this build packs for; tests/shader_layout.rs checks those sources
-        //   read `Vertex` with a 32-byte stride (`mesh::VERTEX_BYTES`) and the push constants
-        //   at the offsets `constants` writes, and every draw writes all 80 bytes first.
+        //   exactly the pinned Slang with its fixed flags and capability allowlist, and fails
+        //   unless `spirv-val` accepts the module (ADR-0019 §4). Tampering with the cooked
+        //   directory is out of scope, as for the executable itself.
+        // - Layouts: the source key covers the Slang version, the fixed compiler flags and the
+        //   exact bytes of `Mesh.slang` and `Bindless.slang`. For those sources,
+        //   tests/shader_layout.rs checks the shader reads `Vertex` with a 32-byte stride at
+        //   offsets 0, 12 and 24 (`mesh::VERTEX_BYTES`) and the push constants at the offsets
+        //   `pack_constants` writes; every draw writes all 80 bytes first. This argument holds
+        //   for sources that test passes, which CI and `cargo xtask ci` run: edit the shader,
+        //   run it.
         // - Addresses: the only address the shader gets is a registered mesh's vertex buffer,
         //   looked up by generational handle in the same `render` call that records the draw.
-        //   Unregistering makes the handle stale at once and destroys the buffer through the
-        //   RHI's deferred destruction, so it outlives every encoder already recording. Only
-        //   this device's encoders are recorded into (`owns_encoder`), so the address and
-        //   handles mean what we created them as.
-        // - Indexed draws: `MeshData::validate` checked at registration that every index names a
-        //   vertex and that vertex counts stay within `0..=i32::MAX`; each draw covers exactly
-        //   the mesh's whole index buffer (bound at offset 0) with vertex offset 0.
+        //   It's a multiple of `BUFFER_ADDRESS_ALIGNMENT` (16), and vertices are 32 bytes of
+        //   4-byte floats, so every read is aligned. Unregistering makes the handle stale at
+        //   once and destroys the buffer through deferred destruction, which outlives every
+        //   encoder already recording. Only this device's encoders are recorded into
+        //   (`owns_encoder`, which `CommandEncoder`'s unsafe contract makes trustworthy), so the
+        //   address and handles mean what we created them as.
+        // - Indexed draws: `MeshData::checked_index_count` checked at registration that every
+        //   index names a vertex and that vertex counts stay within `0..=i32::MAX`; each draw
+        //   covers exactly the mesh's whole index buffer (bound at offset 0) with vertex offset 0.
         // - Bindless indices: only the default material's texture and sampler, which live until
-        //   the renderer is dropped. The material texture is private, so it's never an
-        //   attachment of the pass that samples it.
-        let code = unsafe { ShaderCode::from_spirv_unchecked(spirv) };
+        //   the renderer is dropped. The material texture can't be a render target: `render`
+        //   refuses it, and it lacks `RENDER_TARGET` usage, so the device would too.
+        let code = unsafe { ShaderCode::from_spirv_unchecked(self.shaders.mesh()) };
         let pipeline = self
             .device
             .create_render_pipeline(&RenderPipelineDesc {
@@ -408,7 +421,7 @@ impl Renderer {
             })
             .map_err(device_error("creating the mesh pipeline"))?;
         debug!(?format, "mesh pipeline created");
-        self.pipeline = Some((pipeline, format));
+        self.pipelines.push((format, pipeline));
         Ok(pipeline)
     }
 
@@ -445,7 +458,7 @@ impl Drop for Renderer {
     /// recorded completes first. Failures are logged.
     fn drop(&mut self) {
         let device = self.device.as_ref();
-        if let Some((pipeline, _)) = self.pipeline.take() {
+        for (_, pipeline) in self.pipelines.drain(..) {
             destroy_logged("pipeline", device.destroy_render_pipeline(pipeline));
         }
         if let Some((depth, _)) = self.depth.take() {
@@ -465,6 +478,25 @@ impl Drop for Renderer {
             device.destroy_texture(self.material.texture),
         );
     }
+}
+
+/// The mesh shader's push constants: `clip_from_object` column-major, then the vertex buffer
+/// address and the material's indices, all little-endian.
+pub(crate) fn pack_constants(
+    clip_from_object: Mat4,
+    address: u64,
+    texture_index: u32,
+    sampler_index: u32,
+) -> [u8; CONSTANT_BYTES] {
+    let mut bytes = [0; CONSTANT_BYTES];
+    let (words, _) = bytes[..ADDRESS_OFFSET].as_chunks_mut::<4>();
+    for (chunk, value) in words.iter_mut().zip(clip_from_object.to_cols_array()) {
+        *chunk = value.to_le_bytes();
+    }
+    bytes[ADDRESS_OFFSET..TEXTURE_INDEX_OFFSET].copy_from_slice(&address.to_le_bytes());
+    bytes[TEXTURE_INDEX_OFFSET..SAMPLER_INDEX_OFFSET].copy_from_slice(&texture_index.to_le_bytes());
+    bytes[SAMPLER_INDEX_OFFSET..].copy_from_slice(&sampler_index.to_le_bytes());
+    bytes
 }
 
 fn destroy_mesh(device: &dyn Device, mesh: &GpuMesh) -> Result<(), RenderError> {
@@ -540,5 +572,44 @@ fn create_material(device: &dyn Device) -> Result<Material, RenderError> {
             destroy_logged("material texture", device.destroy_texture(texture));
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oxreal_math::Vec4;
+
+    use super::*;
+
+    #[test]
+    fn constants_are_packed_at_the_shaders_offsets() {
+        let matrix = Mat4::from_cols(
+            Vec4::new(1.0, 2.0, 3.0, 4.0),
+            Vec4::new(5.0, 6.0, 7.0, 8.0),
+            Vec4::new(9.0, 10.0, 11.0, 12.0),
+            Vec4::new(13.0, 14.0, 15.0, 16.0),
+        );
+        let bytes = pack_constants(matrix, 0x0102_0304_0506_0708, 9, 10);
+        // Column-major: the first column's four floats first.
+        for (i, value) in (1_u8..=16).enumerate() {
+            let float = f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+            assert_eq!(float, f32::from(value), "float {i}");
+        }
+        assert_eq!(
+            u64::from_le_bytes(bytes[64..72].try_into().unwrap()),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(u32::from_le_bytes(bytes[72..76].try_into().unwrap()), 9);
+        assert_eq!(u32::from_le_bytes(bytes[76..80].try_into().unwrap()), 10);
+        // The offsets the layout test expects of the shader.
+        assert_eq!(
+            [
+                0,
+                ADDRESS_OFFSET,
+                TEXTURE_INDEX_OFFSET,
+                SAMPLER_INDEX_OFFSET
+            ],
+            [0, 64, 72, 76]
+        );
     }
 }
