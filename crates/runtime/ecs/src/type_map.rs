@@ -50,4 +50,31 @@ mod tests {
         assert_eq!(map.get(&TypeId::of::<(u8, u16)>()), Some(&"tuple"));
         assert_eq!(map.get(&TypeId::of::<u32>()), None);
     }
+
+    #[test]
+    fn hashes_spread_over_the_bits_hash_maps_use() {
+        use std::collections::HashSet;
+        use std::hash::BuildHasher;
+
+        macro_rules! ids {
+            ($($n:literal)*) => { [$(TypeId::of::<[u8; $n]>()),*] };
+        }
+        let ids = ids!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31);
+        let build = BuildHasherDefault::<TypeIdHasher>::default();
+        let hashes: Vec<u64> = ids.iter().map(|id| build.hash_one(id)).collect();
+        // The standard map's table uses the top 7 bits as a tag and the low bits as the bucket.
+        // Both must vary across types, or lookups degrade to scans.
+        let tags: HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
+        let buckets: HashSet<u64> = hashes.iter().map(|h| h & 0xFF).collect();
+        assert!(
+            tags.len() >= 16,
+            "only {} distinct tags in 32 types",
+            tags.len()
+        );
+        assert!(
+            buckets.len() >= 16,
+            "only {} distinct buckets in 32 types",
+            buckets.len()
+        );
+    }
 }

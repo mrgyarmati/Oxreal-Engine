@@ -429,6 +429,8 @@ impl<'w> TableView<'w> {
 
     /// Takes component `T`'s column for writing. `None` if the archetype doesn't have it.
     pub(crate) fn take_slice_mut<T: Component>(&mut self, id: ComponentId) -> Option<&'w mut [T]> {
+        // Every query write goes through here, whatever path prepared the query.
+        const { crate::component::assert_mutable::<T>() };
         match self.take(id)? {
             ColumnRef::Unique(column) => Some(typed_mut::<T>(column)),
             ColumnRef::Shared(_) => unreachable!(

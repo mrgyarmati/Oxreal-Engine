@@ -85,6 +85,8 @@ pub(crate) struct WorldParts<'a> {
     pub(crate) entities: &'a Entities,
     pub(crate) resources: &'a mut Resources,
     pub(crate) queue: &'a mut CommandQueue,
+    /// Entities whose despawn has started, for `HookWorld::is_despawning`.
+    pub(crate) despawning: &'a HashSet<Entity>,
 }
 
 impl Default for World {
@@ -466,6 +468,7 @@ impl World {
             entities: &self.entities,
             resources: &mut self.resources,
             queue: self.queue.get_mut().unwrap_or_else(PoisonError::into_inner),
+            despawning: &self.despawning,
         }
     }
 
@@ -474,8 +477,11 @@ impl World {
         self.queue.get_mut().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether `entity`'s despawn has started. Free when nothing is despawning, the usual case.
-    fn is_despawning(&self, entity: Entity) -> bool {
+    /// Whether `entity`'s despawn has started but not finished: its hooks' commands are
+    /// running. It still counts as alive ([`World::contains`]), and its components can be read but
+    /// not changed. See [`crate::HookWorld::is_despawning`].
+    #[must_use]
+    pub fn is_despawning(&self, entity: Entity) -> bool {
         !self.despawning.is_empty() && self.despawning.contains(&entity)
     }
 
@@ -628,6 +634,7 @@ pub(crate) fn get_component_mut<'a, T: Component>(
     archetypes: &'a mut Archetypes,
     entity: Entity,
 ) -> Option<Mut<'a, T>> {
+    const { crate::component::assert_mutable::<T>() };
     let location = entities.location(entity)?;
     let id = components.id::<T>()?;
     archetypes

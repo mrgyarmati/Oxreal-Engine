@@ -488,3 +488,71 @@ fn hooks_fire_exactly_once_per_change_in_random_sequences() {
         }
     }
 }
+
+/// Immutable: only `insert` can change it, so its hooks see every change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Locked(u32);
+impl Component for Locked {
+    const MUTABLE: bool = false;
+    const HOOKS: ComponentHooks = ComponentHooks::NONE
+        .on_replace(|w, ctx| {
+            let old = w.get::<Locked>(ctx.entity).map(|l| l.0);
+            log(w, format!("replace {old:?}"));
+        })
+        .on_insert(|w, ctx| {
+            let new = w.get::<Locked>(ctx.entity).map(|l| l.0);
+            log(w, format!("insert {new:?}"));
+        });
+}
+
+#[test]
+fn immutable_components_change_only_through_insert_with_hooks() {
+    let mut world = world();
+    let e = world.spawn(Locked(1));
+    assert_eq!(world.get::<Locked>(e), Some(&Locked(1)), "reading is fine");
+    assert_eq!(world.query::<&Locked>().count(), 1);
+    world.insert(e, Locked(2)).expect("alive");
+    assert_eq!(
+        lines(&mut world),
+        ["insert Some(1)", "replace Some(1)", "insert Some(2)"]
+    );
+    assert_eq!(world.remove::<Locked>(e), Some(Locked(2)));
+}
+
+/// Records, from its `on_remove` hook, whether the world reports the entity as despawning.
+#[derive(Debug, Clone, Copy)]
+struct Witness;
+impl Component for Witness {
+    const HOOKS: ComponentHooks = ComponentHooks::NONE.on_remove(|w, ctx| {
+        let entity = ctx.entity;
+        let in_hook = w.is_despawning(entity);
+        log(w, format!("{:?} in hook: {in_hook}", ctx.cause));
+        w.commands().run(move |world| {
+            let in_command = world.is_despawning(entity);
+            let alive = world.contains(entity);
+            if let Some(mut log) = world.resource_mut::<Log>() {
+                log.0
+                    .push(format!("in command: {in_command}, alive: {alive}"));
+            }
+        });
+    });
+}
+
+#[test]
+fn despawning_is_visible_to_hooks_and_their_commands() {
+    let mut world = world();
+    let e = world.spawn(Witness);
+    world.remove::<Witness>(e);
+    assert_eq!(
+        lines(&mut world),
+        ["Remove in hook: false", "in command: false, alive: true"]
+    );
+    world.insert(e, Witness).expect("alive");
+    assert!(!world.is_despawning(e));
+    world.despawn(e);
+    assert_eq!(
+        lines(&mut world),
+        ["Despawn in hook: true", "in command: true, alive: true"]
+    );
+    assert!(!world.is_despawning(e), "not after the despawn finished");
+}
