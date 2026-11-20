@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "shaders": [
+    {
+      "output": "Mesh",
+      "source": "crates/rendering/renderer/shaders/Mesh.slang",
+      "entry_points": ["meshVertex", "meshPixel"],
+      "include_dirs": ["crates/rendering/rhi/shaders"],
+      "inputs": [
+        "crates/rendering/renderer/shaders/Mesh.slang",
+        "crates/rendering/rhi/shaders/Bindless.slang"
+      ]
+    }
+  ]
+}

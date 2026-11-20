@@ -134,6 +134,17 @@ fn ci() -> Result<(), String> {
         "--",
         "--ignored",
     ])?;
+    run_cargo(&[
+        "test",
+        "-p",
+        "oxreal-renderer",
+        "--test",
+        "round_trip",
+        "--test",
+        "shader_layout",
+        "--",
+        "--ignored",
+    ])?;
     // Same flags as the CI `rustdoc` job: broken intra-doc links and doc warnings fail the build.
     run_cargo_with_env(
         &[

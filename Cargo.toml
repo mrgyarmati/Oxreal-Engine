@@ -14,6 +14,7 @@ members = [
     # rendering
     "crates/rendering/rhi",
     "crates/rendering/backends/vulkan",
+    "crates/rendering/renderer",
     # systems
     "crates/systems/input",
     # tools
@@ -88,6 +89,7 @@ oxreal-math = { path = "crates/foundation/math" }
 oxreal-input = { path = "crates/systems/input" }
 oxreal-shader-compiler = { path = "crates/tools/shader-compiler" }
 oxreal-rhi = { path = "crates/rendering/rhi" }
+oxreal-rhi-vulkan = { path = "crates/rendering/backends/vulkan" }
 oxreal-window = { path = "crates/platform/window" }
 
 # Lint policy: docs/development/coding-standards.md. CI runs clippy with `-D warnings`, so every

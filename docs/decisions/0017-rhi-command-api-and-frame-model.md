@@ -209,6 +209,23 @@ check, or turning primitive restart on.
   reads `Mesh.slang`'s vertex stride, member offsets and push-constant offsets from its SPIR-V
   and compares them with the Rust packing. Widening a member makes it fail.
 
+### Implementation notes (2026-11-20, encoder ownership, with `oxreal-renderer`)
+
+- **`Device::owns_encoder(&dyn CommandEncoder) -> bool`** says whether a device created an
+  encoder. Backends implement it through a new hook, `CommandEncoder::as_any`.
+- **Why:** recording looks handles up in the encoder's own device. In another device's
+  encoder, a component's pipeline, buffer and texture handles could name unrelated objects, and
+  its push constants would hand a foreign pipeline addresses and indices nobody vouched for.
+  `submit` already refused another device's encoders, but recording didn't.
+- **Who uses it:** code that records with its own `from_spirv_unchecked` pipelines on behalf of
+  callers, starting with `oxreal-renderer` (ADR-0019 §1). Its `render` returns
+  `RenderError::ForeignEncoder` and records nothing.
+- **What it doesn't cover:** handles stay plain numbers that safe code can forge
+  (`from_raw`), so the program-wide obligations of `ShaderCode::from_spirv_unchecked`
+  (ADR-0016 §2) are unchanged.
+- **Tested** by `tests/device.rs` (two devices, each owning only its own encoder) and the
+  renderer's GPU tests.
+
 ## Consequences
 
 - One renderer code path for every backend, runtime backend choice, and a straightforward C ABI

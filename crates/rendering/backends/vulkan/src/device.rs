@@ -444,6 +444,13 @@ impl oxreal_rhi::Device for VulkanDevice {
         self.end_frame_impl(frame)
     }
 
+    fn owns_encoder(&self, encoder: &dyn CommandEncoder) -> bool {
+        encoder
+            .as_any()
+            .downcast_ref::<crate::encoder::VulkanEncoder>()
+            .is_some_and(|encoder| encoder.belongs_to(&self.shared))
+    }
+
     fn create_texture(&self, desc: &TextureDesc<'_>) -> Result<TextureHandle, RhiError> {
         self.shared.create_texture(desc)
     }

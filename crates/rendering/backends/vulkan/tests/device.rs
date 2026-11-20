@@ -55,3 +55,31 @@ fn an_unknown_gpu_name_is_a_clear_error() {
         other => panic!("expected AdapterNotFound, got {other:?}"),
     }
 }
+
+#[test]
+#[ignore = "requires a Vulkan 1.3 device and validation layers; run with --ignored"]
+fn a_device_owns_only_its_own_encoders() {
+    let first = oxreal_rhi_vulkan::create_device(&validated_desc()).expect("first device");
+    let second = oxreal_rhi_vulkan::create_device(&validated_desc()).expect("second device");
+    let encoder = first.create_encoder("owned").expect("encoder");
+
+    assert!(first.owns_encoder(encoder.as_ref()));
+    assert!(
+        !second.owns_encoder(encoder.as_ref()),
+        "another device's encoder must not count as its own"
+    );
+
+    first.submit(encoder).expect("submit");
+    first.wait_idle().expect("wait idle");
+    second.wait_idle().expect("wait idle");
+    assert_eq!(
+        first.validation_error_count(),
+        0,
+        "validation errors (see log)"
+    );
+    assert_eq!(
+        second.validation_error_count(),
+        0,
+        "validation errors (see log)"
+    );
+}

@@ -289,4 +289,13 @@ pub trait Device: fmt::Debug + Send + Sync {
     /// submitted, so presentation continues) or if the frame isn't the surface's open frame. If
     /// submission fails, the swapchain is recreated at the next [`Device::begin_frame`].
     fn end_frame(&self, frame: Frame) -> Result<(), RhiError>;
+
+    /// Whether this device created `encoder`, through [`Device::create_encoder`] or
+    /// [`Device::begin_frame`].
+    ///
+    /// Recording looks handles up in the encoder's own device, so code that records with its
+    /// own pipelines, buffer addresses and bindless indices must check this first: in another
+    /// device's encoder, its handles could name unrelated objects. `oxreal-renderer` does
+    /// (ADR-0019 §1).
+    fn owns_encoder(&self, encoder: &dyn CommandEncoder) -> bool;
 }

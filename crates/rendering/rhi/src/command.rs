@@ -137,6 +137,10 @@ pub trait CommandEncoder: Send + fmt::Debug {
 
     /// Backend hook: converts the encoder back to its concrete type at the end of the frame.
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
+
+    /// Backend hook: the encoder as its concrete type, so a backend can tell whether it created
+    /// it ([`crate::Device::owns_encoder`]).
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl<'e> dyn CommandEncoder + 'e {
@@ -309,6 +313,9 @@ mod tests {
             self.calls.push("draw_indexed");
         }
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+            self
+        }
+        fn as_any(&self) -> &dyn Any {
             self
         }
     }

@@ -1085,6 +1085,10 @@ impl CommandEncoder for VulkanEncoder {
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
         self
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl VulkanEncoder {
