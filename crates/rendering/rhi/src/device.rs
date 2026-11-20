@@ -56,7 +56,10 @@ impl Default for DeviceDesc {
 /// - handles, buffer addresses and bindless indices it returns name objects it created, valid
 ///   for as long as these docs say (deferred destruction, ADR-0016 §1), and addresses are
 ///   multiples of [`crate::BUFFER_ADDRESS_ALIGNMENT`];
-/// - encoders it creates record against its own objects.
+/// - encoders it creates record against its own objects;
+/// - every method behaves as documented: in particular, buffers hold at least the requested
+///   size, writes land exactly and in submission order, and pipelines run the code they were
+///   created with.
 ///
 /// Otherwise a wrapper could, for example, report another device's encoder as its own, or hand
 /// out an address of nothing (ADR-0017, implementation notes of 2026-11-20).

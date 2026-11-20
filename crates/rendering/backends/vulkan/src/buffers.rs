@@ -102,8 +102,9 @@ impl Shared {
         // Every buffer starts on a multiple of `BUFFER_ADDRESS_ALIGNMENT`, which
         // `Device::buffer_address` promises. Alignments are powers of two, so the larger one
         // still satisfies the driver's. This constrains the offset into the memory object; the
-        // object's own base address is aligned to at least the largest alignment the driver
-        // reports (every driver aligns it to a page), and `tests/buffers.rs` checks the result.
+        // object's base meets the implementation's largest alignment requirement
+        // (`vkAllocateMemory`), which the spec doesn't bound below, so `create_buffer` also checks
+        // every address and refuses a misaligned one.
         requirements.alignment = requirements
             .alignment
             .max(oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT);
@@ -181,6 +182,15 @@ impl Shared {
             // SHADER_DEVICE_ADDRESS usage; bufferDeviceAddress is enabled.
             unsafe { self.raw().get_buffer_device_address(&info) }
         });
+        // `Device::buffer_address` promises the alignment; a driver that breaks it gets an error
+        // here, never a misaligned address in a shader.
+        if let Some(Err(error)) = address.map(check_address_alignment) {
+            self.retire(Retired::Buffer {
+                buffer: raw.buffer,
+                allocation: raw.allocation,
+            });
+            return Err(error);
+        }
         let handle = lock(&self.buffers).insert(Buffer {
             buffer: raw.buffer,
             allocation: raw.allocation,
@@ -486,6 +496,23 @@ impl Shared {
     }
 }
 
+/// Refuses an address `Device::buffer_address` couldn't promise: not a multiple of
+/// [`oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT`].
+fn check_address_alignment(address: u64) -> Result<(), RhiError> {
+    if address.is_multiple_of(oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT) {
+        Ok(())
+    } else {
+        Err(RhiError::Backend {
+            api: "Vulkan",
+            operation: "vkGetBufferDeviceAddress",
+            details: format!(
+                "the driver placed a buffer at {address:#x}, which isn't {}-byte aligned",
+                oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT
+            ),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +533,20 @@ mod tests {
             vk::BufferUsageFlags::INDEX_BUFFER
         );
         assert!(vk_usage(BufferUsage::default()).is_empty());
+    }
+
+    #[test]
+    fn misaligned_addresses_are_refused() {
+        assert!(check_address_alignment(0x1000).is_ok());
+        assert!(check_address_alignment(0x1010).is_ok());
+        for address in [0x1001, 0x1004, 0x1008] {
+            assert!(
+                matches!(
+                    check_address_alignment(address),
+                    Err(RhiError::Backend { .. })
+                ),
+                "{address:#x}"
+            );
+        }
     }
 }

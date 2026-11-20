@@ -401,7 +401,8 @@ impl Drop for VulkanDevice {
 // with this device's, handles, addresses and bindless indices come from its own pools and
 // allocator and live by deferred destruction (`retire.rs`), buffer addresses are aligned to
 // `BUFFER_ADDRESS_ALIGNMENT` (`buffers.rs`), and its encoders record into its own command
-// buffers against its own pools.
+// buffers against its own pools. Its methods do what the RHI documents, which its GPU tests
+// check (sizes, writes, pipelines, draws).
 unsafe impl oxreal_rhi::Device for VulkanDevice {
     fn adapter_info(&self) -> &AdapterInfo {
         &self.adapter_info

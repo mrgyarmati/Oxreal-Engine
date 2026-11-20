@@ -106,7 +106,7 @@ pub struct RenderPassDesc<'a> {
 /// [`crate::Device::owns_encoder`] and `submit` can rely on its identity:
 /// - [`as_any`](CommandEncoder::as_any) and [`into_any`](CommandEncoder::into_any) return
 ///   the implementing object itself, never another encoder;
-/// - the `*_raw` methods record into that same object.
+/// - the `*_raw` methods record into that same object, exactly the command each describes.
 ///
 /// Otherwise a wrapper could pass one device's ownership check and record into another device's
 /// command buffer, where code that vouched for its addresses and indices
