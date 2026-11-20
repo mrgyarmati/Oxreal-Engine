@@ -253,6 +253,84 @@ impl World {
         Ok(())
     }
 
+    /// Edits `entity`'s component `T` in place, running its hooks: `on_replace` sees the value
+    /// before `edit`, and `on_insert` the value after it (cause [`HookCause::Modify`]). Returns
+    /// what `edit` returns, or `None` (without calling it) if `entity` isn't alive, doesn't have a
+    /// `T`, or is being despawned.
+    ///
+    /// The commands the hooks queue run before this returns. When it's called from a command
+    /// (inside `Commands::run`), they run right after that command instead, as for every
+    /// structural change made there.
+    ///
+    /// Because every change still passes through the hooks, this works on **immutable**
+    /// components too ([`Component::MUTABLE`]). It's the in-place counterpart of replacing one
+    /// with `insert`, without moving or copying it. For a mutable component without hooks it's
+    /// like [`World::get_mut`], except that it refuses an entity being despawned.
+    ///
+    /// `edit` gets the value as [`Mut`], so a change can be detected when change detection
+    /// arrives (ADR-0014 §6).
+    ///
+    /// ```
+    /// use oxreal_ecs::{Component, World};
+    ///
+    /// struct Score(Vec<u32>);
+    /// impl Component for Score {
+    ///     const MUTABLE: bool = false;
+    /// }
+    ///
+    /// let mut world = World::new();
+    /// let e = world.spawn(Score(vec![1]));
+    /// let len = world.modify::<Score, _>(e, |mut score| {
+    ///     score.0.push(2);
+    ///     score.0.len()
+    /// });
+    /// assert_eq!(len, Some(2));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// A panic in `edit` propagates. `on_insert` doesn't run, the value keeps whatever `edit` did
+    /// to it, and the commands `on_replace` queued are discarded, so they never run out of
+    /// context later.
+    pub fn modify<T: Component, R>(
+        &mut self,
+        entity: Entity,
+        edit: impl FnOnce(Mut<'_, T>) -> R,
+    ) -> Option<R> {
+        let location = self.entities.location(entity)?;
+        let id = self.components.id::<T>()?;
+        if !self.archetypes.get(location.archetype).contains(id) || self.is_despawning(entity) {
+            return None;
+        }
+        let hooked = self.components.hooks(id).any();
+        if hooked {
+            self.run_hooks(HookKind::Replace, entity, &[id], HookCause::Modify);
+        }
+        // A panic in `edit` must not leave `on_replace`'s commands to run later, out of context.
+        let guard = HookGuard(self);
+        // Hooks can't change structure, so the entity is still where it was. Reached through the
+        // column directly: the in-place-write guard doesn't apply, because the hooks run.
+        let Some(value) = guard
+            .0
+            .archetypes
+            .get_mut(location.archetype)
+            .column_mut::<T>(id)
+            .and_then(|column| column.get_mut(location.row))
+        else {
+            unreachable!(
+                "{entity:?} lost its {} while its on_replace hook ran: a bug in oxreal-ecs",
+                std::any::type_name::<T>()
+            );
+        };
+        let result = edit(Mut::new(value));
+        drop(guard);
+        if hooked {
+            self.run_hooks(HookKind::Insert, entity, &[id], HookCause::Modify);
+        }
+        self.apply_commands();
+        Some(result)
+    }
+
     /// Takes component `T` off `entity` and returns it. `None` if `entity` isn't alive, doesn't
     /// have a `T`, or is being despawned.
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
@@ -593,14 +671,14 @@ impl World {
     }
 }
 
-/// Discards queued commands and despawn marks if a hook panics.
+/// Discards queued commands and despawn marks if a hook, or a `modify` edit, panics.
 struct HookGuard<'a>(&'a mut World);
 
 impl Drop for HookGuard<'_> {
     fn drop(&mut self) {
         if std::thread::panicking() && self.0.discard_commands() {
             warn!(
-                "a panic interrupted a hook; discarding the commands it and earlier hooks queued"
+                "a panic interrupted a hook or an edit; discarding the commands hooks had queued"
             );
         }
     }

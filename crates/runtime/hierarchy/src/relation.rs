@@ -39,6 +39,10 @@ pub enum OnParentDespawn {
 /// - the chain above the parent is deeper than [`MAX_DEPTH`].
 ///
 /// [`set_parent`] reports these cases as errors instead, before changing anything.
+///
+/// Replacing a link with an identical one, by `insert` or `World::modify`, still moves the child to
+/// the end of its siblings: the hooks remove it and add it back. [`set_parent`] with the current
+/// parent changes nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChildOf {
     parent: Entity,
@@ -97,16 +101,19 @@ impl Component for ChildOf {
 /// An entity's children, in order. Maintained by [`ChildOf`]: it can be read, never built or
 /// edited directly. It exists only while there is at least one child.
 ///
-/// It's immutable, and records which entity it belongs to. A `Children` taken off one entity
-/// (with `remove`) and inserted anywhere is checked against the actual `ChildOf` links and
-/// repaired from the links, with a warning. Repair keeps the order of the children it lists, and
-/// puts any others after them, in handle order: their real order is lost.
+/// It's immutable, and records which entity it belongs to and which version of that entity's
+/// list it is. A `Children` taken off one entity (with `remove`) and inserted anywhere is
+/// recognized in constant time and rebuilt from the actual `ChildOf` links, with a warning.
+/// Repair keeps the order of the children it lists, and puts any others after them, in handle
+/// order: their real order is lost.
 ///
 /// Removing `Children` detaches the children, keeping their place in the world. Despawning the
 /// entity treats each child by its link's [`OnParentDespawn`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct Children {
     owner: Entity,
+    /// Matches the owner's `ChildrenStamp` while this is its current list.
+    stamp: u64,
     list: Vec<Entity>,
 }
 
@@ -387,59 +394,97 @@ fn child_of_replaced(world: &mut HookWorld<'_>, context: HookContext) {
         .run(move |world| edit_children(world, parent, |list| list.retain(|&c| c != child)));
 }
 
-/// Applies `edit` to `parent`'s children by replacing its `Children` (it's immutable), or
-/// removing it when the list ends up empty. Does nothing to a dead or despawning parent, whose
-/// children are being resolved by its despawn.
+/// The stamp of an entity's current [`Children`]. Private to this crate, so no other code can
+/// name, change or remove it.
+///
+/// Every legitimate edit of `Children` bumps it and stamps the list to match. Removing `Children`
+/// bumps it too. So a list taken off an entity and put back later carries an old stamp, and a
+/// list taken off another entity carries another owner: [`children_inserted`] detects both in
+/// constant time, without looking at the children.
+///
+/// **Invariant:** it outlives `Children` and must never be removed, reset or copied while the
+/// entity lives: it stays on former parents on purpose (8 bytes, and their own archetype). If it
+/// were removed, numbering would restart and an old list could match again. Paths that copy or
+/// remove components by ID (reflection, scene loading, entity cloning, ADR-0014 §3) must skip it
+/// and `Children` both, and rebuild `Children` from the `ChildOf` links instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChildrenStamp(u64);
+
+impl Component for ChildrenStamp {}
+
+/// Bumps `parent`'s children stamp and returns the new value.
+fn next_stamp(world: &mut World, parent: Entity) -> u64 {
+    if let Some(mut stamp) = world.get_mut::<ChildrenStamp>(parent) {
+        stamp.0 = stamp.0.wrapping_add(1);
+        return stamp.0;
+    }
+    1
+}
+
+/// Applies `edit` to `parent`'s children: in place through [`World::modify`] when it has some
+/// (so the hooks run, without copying the list), by inserting a new `Children` when it has none,
+/// and by removing it when the list ends up empty. Does nothing to a dead or despawning parent,
+/// whose children are being resolved by its despawn.
 fn edit_children(world: &mut World, parent: Entity, edit: impl FnOnce(&mut Vec<Entity>)) {
     if !world.contains(parent) || world.is_despawning(parent) {
         return;
     }
-    let mut list = world
-        .get::<Children>(parent)
-        .map(|c| c.list.clone())
-        .unwrap_or_default();
-    edit(&mut list);
-    // Drop entries whose link points elsewhere by now: several children moving away in one
-    // command leave each other in the list until their own edits run. Keeping the list true
-    // also means correct code never trips the repair in `children_inserted`.
-    list.retain(|&c| world.get::<ChildOf>(c).map(ChildOf::parent) == Some(parent));
-    let unchanged = world.get::<Children>(parent).map(|c| &c.list) == Some(&list);
-    if list.is_empty() {
-        if world.has::<Children>(parent) {
+    if let Some(children) = world.get::<Children>(parent) {
+        if children.owner != parent {
+            // A foreign list, already queued for a rebuild from the links: editing it would only
+            // trigger a second rebuild. The rebuild sees this change's link anyway.
+            return;
+        }
+        let stamp = next_stamp(world, parent);
+        let empty = world.modify::<Children, _>(parent, |mut children| {
+            edit(&mut children.list);
+            children.stamp = stamp;
+            children.list.is_empty()
+        });
+        if empty == Some(true) {
             world.remove::<Children>(parent);
         }
-    } else if !unchanged {
-        // Can't fail: the parent is alive and not despawning.
-        let _ = world.insert(
-            parent,
+        return;
+    }
+    let mut list = Vec::new();
+    edit(&mut list);
+    if list.is_empty() {
+        return;
+    }
+    let stamp = next_stamp(world, parent);
+    // Can't fail: the parent is alive and not despawning. Stamp and list go in as one bundle,
+    // and hooks run after the whole bundle is written, so the list's hook finds them matching.
+    let _ = world.insert(
+        parent,
+        (
+            ChildrenStamp(stamp),
             Children {
                 owner: parent,
+                stamp,
                 list,
             },
-        );
-    }
+        ),
+    );
 }
 
-/// Repairs a `Children` that doesn't match the `ChildOf` links: one taken off another entity,
-/// or a stale list put back after its children were detached.
+/// Checks, in constant time, that an inserted or edited `Children` is this crate's own current
+/// list for this entity. A list taken off another entity (wrong owner), or put back after the
+/// entity's list changed (old stamp), is rebuilt from the `ChildOf` links instead.
 fn children_inserted(world: &mut HookWorld<'_>, context: HookContext) {
     let parent = context.entity;
     let Some(children) = world.get::<Children>(parent) else {
         return;
     };
-    let consistent = children.owner == parent
-        && children
-            .list
-            .iter()
-            .all(|&c| world.get::<ChildOf>(c).map(ChildOf::parent) == Some(parent));
-    if consistent {
+    let current = world.get::<ChildrenStamp>(parent).map(|s| s.0);
+    if children.owner == parent && current == Some(children.stamp) {
         return;
     }
     #[cfg(test)]
     REPAIRS.with(|repairs| repairs.set(repairs.get() + 1));
     warn!(
         ?parent,
-        "a Children that doesn't match its ChildOf links was inserted; repairing it"
+        "a Children that isn't this entity's current list was inserted; rebuilding it from the \
+         ChildOf links"
     );
     world.commands().run(move |world| {
         // Rebuilt from the links themselves, which are the truth. The inserted list may have
@@ -468,12 +513,17 @@ fn children_inserted(world: &mut HookWorld<'_>, context: HookContext) {
         if repaired.is_empty() {
             world.remove::<Children>(parent);
         } else {
+            let stamp = next_stamp(world, parent);
             let _ = world.insert(
                 parent,
-                Children {
-                    owner: parent,
-                    list: repaired,
-                },
+                (
+                    ChildrenStamp(stamp),
+                    Children {
+                        owner: parent,
+                        stamp,
+                        list: repaired,
+                    },
+                ),
             );
         }
     });
@@ -497,6 +547,10 @@ fn children_removed(world: &mut HookWorld<'_>, context: HookContext) {
         return;
     }
     let children = children.list.clone();
+    // This list is now out of date: a copy put back later must be recognized as stale.
+    if let Some(mut stamp) = world.get_mut::<ChildrenStamp>(parent) {
+        stamp.0 = stamp.0.wrapping_add(1);
+    }
     let despawning = context.cause == HookCause::Despawn;
     for child in children {
         world.commands().run(move |world| {

@@ -276,6 +276,16 @@ fn a_children_list_moved_or_put_back_is_repaired() {
     world.insert(b, ChildOf::new(p)).expect("alive");
     world.insert(p, stale).expect("alive");
     assert_eq!(children(&world, p), [b], "only real links survive");
+
+    // Taken off and put straight back: removal detached the children, so the list is stale
+    // even though nothing else changed in between.
+    let list = world.remove::<Children>(p).expect("p had a child");
+    assert_eq!(parent(&world, b), None, "removing Children detached b");
+    world.insert(p, list).expect("alive");
+    assert!(
+        !world.has::<Children>(p),
+        "the stale list was rebuilt from links: none left"
+    );
 }
 
 /// When its entity is despawned, queues commands that try to attach a new child to its dying
