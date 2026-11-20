@@ -2,10 +2,13 @@
 
 use std::any::Any;
 use std::fmt;
+use std::ops::Range;
 
 use oxreal_math::LinearRgba;
 
-use crate::{PipelineHandle, SurfaceHandle, TextureFormat, TextureHandle};
+use crate::{
+    BufferHandle, IndexFormat, PipelineHandle, SurfaceHandle, TextureFormat, TextureHandle,
+};
 
 /// What happens to an attachment's contents when a render pass begins.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,6 +91,8 @@ pub struct RenderPassDesc<'a> {
 /// - A pass whose attachments aren't all valid records nothing. A pipeline must be set in every
 ///   pass, and must match the pass's attachment formats. Every push-constant byte the pipeline
 ///   declares must be written before a draw.
+/// - An indexed draw needs an index buffer set in the same pass, and may only read indices that
+///   lie inside it.
 /// - A pass left open (for example a leaked [`RenderPass`] guard) is closed at submission and
 ///   reported.
 ///
@@ -114,6 +119,19 @@ pub trait CommandEncoder: Send + fmt::Debug {
         vertex_count: u32,
         instance_count: u32,
         first_vertex: u32,
+        first_instance: u32,
+    );
+
+    /// Backend hook: bind the index buffer for indexed draws. Called only by
+    /// [`RenderPass::set_index_buffer`].
+    fn set_index_buffer_raw(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat);
+
+    /// Backend hook: issue an indexed draw. Called only by [`RenderPass::draw_indexed`].
+    fn draw_indexed_raw(
+        &mut self,
+        indices: Range<u32>,
+        vertex_offset: i32,
+        instance_count: u32,
         first_instance: u32,
     );
 
@@ -156,6 +174,27 @@ impl RenderPass<'_, '_> {
     /// push-constant byte the pipeline declares must have been written by this encoder.
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32) {
         self.encoder.draw_raw(vertex_count, instance_count, 0, 0);
+    }
+
+    /// Binds the index buffer for the following indexed draws in this pass. `buffer` needs
+    /// [`crate::BufferUsage::INDEX`], and `offset` (in bytes) must be a multiple of the index size.
+    /// Like the pipeline, it must be set again in every pass.
+    pub fn set_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        self.encoder.set_index_buffer_raw(buffer, offset, format);
+    }
+
+    /// Draws the triangles of the indices in `indices` (positions in the index buffer, counted
+    /// from the offset given to [`Self::set_index_buffer`]), `instance_count` times.
+    ///
+    /// The vertex shader receives each index plus `vertex_offset` as its vertex ID, so meshes
+    /// packed into one vertex buffer can share 0-based indices. Every index in the range must lie
+    /// inside the bound buffer; misuse is reported when the frame ends. The values themselves
+    /// aren't checked: a shader that pulls vertices with them relies on each index plus
+    /// `vertex_offset` being in `0..=i32::MAX` and naming a vertex in its buffer
+    /// ([`crate::ShaderCode::from_spirv_unchecked`]).
+    pub fn draw_indexed(&mut self, indices: Range<u32>, vertex_offset: i32, instance_count: u32) {
+        self.encoder
+            .draw_indexed_raw(indices, vertex_offset, instance_count, 0);
     }
 }
 
@@ -263,6 +302,12 @@ mod tests {
         fn draw_raw(&mut self, _: u32, _: u32, _: u32, _: u32) {
             self.calls.push("draw");
         }
+        fn set_index_buffer_raw(&mut self, _: BufferHandle, _: u64, _: IndexFormat) {
+            self.calls.push("index");
+        }
+        fn draw_indexed_raw(&mut self, _: Range<u32>, _: i32, _: u32, _: u32) {
+            self.calls.push("draw_indexed");
+        }
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
             self
         }
@@ -280,11 +325,21 @@ mod tests {
             pass.set_pipeline(PipelineHandle::from_raw(1));
             pass.set_push_constants(&[0; 4]);
             pass.draw(3, 1);
+            pass.set_index_buffer(BufferHandle::from_raw(2), 0, IndexFormat::Uint16);
+            pass.draw_indexed(0..6, 0, 1);
         }
         let recorder = encoder.into_any().downcast::<Recorder>().unwrap();
         assert_eq!(
             recorder.calls,
-            vec!["begin", "pipeline", "push", "draw", "end"]
+            vec![
+                "begin",
+                "pipeline",
+                "push",
+                "draw",
+                "index",
+                "draw_indexed",
+                "end"
+            ]
         );
     }
 

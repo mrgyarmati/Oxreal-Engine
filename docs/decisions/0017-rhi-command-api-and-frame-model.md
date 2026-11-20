@@ -169,6 +169,46 @@ showed:
 - A test drops an encoder after a depth pass and then loads the depth in a new one. Breaking the
   layout revert for abandoned encoders makes the validation layers fail it.
 
+### Implementation notes (2026-11-19, indexed draws)
+
+Meshes are drawn with indices. Vertices stay in buffers that shaders read by address
+(ADR-0016 §2, "vertex pulling"): there is no vertex input state and no vertex-buffer binding.
+Only indices use fixed-function hardware, which keeps the post-transform vertex cache working.
+
+- **API:** `BufferUsage::INDEX`, `IndexFormat` (`Uint16`, `Uint32`),
+  `RenderPass::set_index_buffer(buffer, offset, format)` and
+  `RenderPass::draw_indexed(indices, vertex_offset, instance_count)`. The vertex shader's vertex
+  ID is each index plus `vertex_offset`, so meshes packed into one buffer can share 0-based
+  indices.
+- **Per pass, like the pipeline:** the index buffer must be set in every pass. A failed
+  `set_index_buffer` leaves the pass with none, so later indexed draws are refused rather than
+  reading a buffer bound earlier.
+- **Checked:** `INDEX` usage, an offset inside the buffer and aligned to the index size, and an
+  index range that ends at or before the last whole index after the offset (what
+  `vkCmdDrawIndexed` requires without `robustBufferAccess2`). Misuse is reported at submit.
+- **Not checkable:** the index *values*. They come from safe buffer writes. Every value is a
+  valid index: primitive restart is off, and `fullDrawIndexUint32` is required (ADR-0016 §3).
+  A shader that reads vertices by its vertex ID must stay in bounds, which makes index data part
+  of `ShaderCode::from_spirv_unchecked`'s program-wide obligation. That covers every draw made
+  with a pipeline built from the code. Each index plus the vertex offset must be in
+  `0..=i32::MAX` (Vulkan leaves other sums unspecified) and name a vertex in the buffer.
+- **Lifetime and ordering:** as for buffers read by address. A buffer destroyed after it's bound
+  stays alive until the encoder's work completes, and `write_buffer` takes effect in submission
+  order.
+
+Tested by `tests/indexed.rs`: 16- and 32-bit indices, bind offsets, first indices, positive and
+negative vertex offsets, `0xFFFF` as an ordinary index, misuse, and destruction while
+recording. Deliberately broken versions showed that each of these fails the tests: ignoring the
+vertex offset, the first index or the bind offset, swapping the index type, dropping the range
+check, or turning primitive restart on.
+
+*After the `unsafe` audit* (no soundness bugs found):
+- The `ShaderCode` contract states the vertex-ID range above.
+- Shaders that pull vertices depend on Slang's layout for pointer targets, which neither
+  `spirv-val` nor the validation layers check against the CPU side. `tests/shader_layout.rs`
+  reads `Mesh.slang`'s vertex stride, member offsets and push-constant offsets from its SPIR-V
+  and compares them with the Rust packing. Widening a member makes it fail.
+
 ## Consequences
 
 - One renderer code path for every backend, runtime backend choice, and a straightforward C ABI

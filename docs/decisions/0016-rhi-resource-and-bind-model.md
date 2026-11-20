@@ -187,6 +187,7 @@ bufferDeviceAddress, timeline semaphores), Oxreal requires this **subset of Road
 | `shaderSampledImageArrayNonUniformIndexing`, `shaderStorageImageArrayNonUniformIndexing` | Indexing per pixel or per thread |
 | `scalarBlockLayout` | Rust-matching (C-like) buffer layouts without std140 padding |
 | `samplerAnisotropy` | Texture quality baseline |
+| `fullDrawIndexUint32` | Indexed draws accept every 32-bit index value, not only those up to 2^24 − 1. Index data comes from safe buffer writes, so the backend can't check the values. Added 2026-11-19 with indexed draws (ADR-0017); also required by Roadmap 2022 and Vulkan 1.4. |
 
 Device selection (ADR-0012 §6) rejects a GPU that lacks any of them, naming the missing feature,
 the GPU and its driver. **CI checks this exact list against Lavapipe on every run.**

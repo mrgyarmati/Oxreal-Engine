@@ -74,6 +74,9 @@ pub(crate) static REQUIRED: &[RequiredFeature] = &[
     required!("scalarBlockLayout", v12.scalar_block_layout),
     // Baseline quality.
     required!("samplerAnisotropy", core.sampler_anisotropy),
+    // Indexed draws: any 32-bit index value is valid (index data is written by safe calls, so
+    // the backend can't check the values).
+    required!("fullDrawIndexUint32", core.full_draw_index_uint32),
 ];
 
 /// Names of the required features that `available` lacks, in list order.

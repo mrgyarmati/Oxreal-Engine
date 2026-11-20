@@ -8,8 +8,13 @@
 //!
 //! The camera uses `oxreal_math`'s view matrix and reversed-depth infinite perspective. The
 //! depth buffer is `Depth32Float`, cleared to `REVERSED_DEPTH_CLEAR` every frame and recreated
-//! when the backbuffer's size changes. The cube's vertices come from the vertex index
-//! (`examples/shaders/Cube.slang`), and every face samples a checkerboard by bindless index.
+//! when the backbuffer's size changes.
+//!
+//! The cube is a mesh: 24 vertices (four per face, each with its face's normal and texture
+//! coordinates) and 36 16-bit indices, in GPU buffers. It's drawn with one indexed draw, and the
+//! vertex shader reads each vertex the indices name through the vertex buffer's address
+//! (`examples/shaders/Mesh.slang`). Every face samples a checkerboard by bindless index.
+//!
 //! Like `clear`, it fails on any validation error or if frames stop arriving before
 //! `--timeout-secs` (default 60).
 
@@ -21,11 +26,11 @@ use oxreal_diagnostics::{info, warn};
 use oxreal_math::projection::{REVERSED_DEPTH_CLEAR, perspective_infinite_reversed, view_matrix};
 use oxreal_math::{LinearRgba, Quat, Transform, Vec3};
 use oxreal_rhi::{
-    AddressMode, ColorAttachment, CullMode, DepthAttachment, DepthLoadOp, DepthState, Device as _,
-    DeviceDesc, Filter, Frame, LoadOp, PipelineHandle, PresentMode, RenderPassDesc,
-    RenderPipelineDesc, RhiError, SamplerDesc, SamplerHandle, ShaderCode, ShaderEntry, StoreOp,
-    SurfaceDesc, SurfaceHandle, TextureDesc, TextureFormat, TextureHandle, TextureUsage,
-    Validation,
+    AddressMode, BufferDesc, BufferHandle, BufferUsage, ColorAttachment, CullMode, DepthAttachment,
+    DepthLoadOp, DepthState, Device as _, DeviceDesc, Filter, Frame, IndexFormat, LoadOp,
+    PipelineHandle, PresentMode, RenderPassDesc, RenderPipelineDesc, RhiError, SamplerDesc,
+    SamplerHandle, ShaderCode, ShaderEntry, StoreOp, SurfaceDesc, SurfaceHandle, TextureDesc,
+    TextureFormat, TextureHandle, TextureUsage, Validation,
 };
 use oxreal_rhi_vulkan::VulkanDevice;
 use oxreal_shader_compiler::{CompileRequest, Optimization, SlangCompiler, validate_spirv};
@@ -34,8 +39,9 @@ use oxreal_window::{App, Context, EventLoop, Window, WindowDesc, WindowEvent, Wi
 /// Checkerboard size in texels, and squares per side.
 const BOARD_TEXELS: u32 = 64;
 const BOARD_SQUARES: u32 = 4;
-/// CubeConstants: a 4×4 matrix, then the texture and sampler indices.
-const CONSTANT_BYTES: usize = 72;
+/// MeshConstants: a 4×4 matrix, the vertex buffer's address, then the texture and sampler
+/// indices.
+const CONSTANT_BYTES: usize = 80;
 /// Vertical field of view, and the near plane in metres.
 const FIELD_OF_VIEW_DEGREES: f32 = 60.0;
 const NEAR: f32 = 0.05;
@@ -53,6 +59,15 @@ struct Board {
     sampler_index: u32,
 }
 
+/// The cube's vertex and index buffers.
+struct Mesh {
+    vertices: BufferHandle,
+    /// The vertex buffer's device address, passed to the shader in the push constants.
+    address: u64,
+    indices: BufferHandle,
+    index_count: u32,
+}
+
 /// The depth buffer and the backbuffer size it was created for.
 struct DepthBuffer {
     texture: TextureHandle,
@@ -64,6 +79,7 @@ struct CubeApp {
     options: Options,
     spirv: Vec<u32>,
     board: Board,
+    mesh: Mesh,
     /// The pipeline and the backbuffer format it was created for.
     pipeline: Option<(PipelineHandle, TextureFormat)>,
     depth: Option<DepthBuffer>,
@@ -103,18 +119,23 @@ impl CubeApp {
         }
         // SAFETY: produced by the pinned `slangc` through oxreal-shader-compiler and checked
         // with `spirv-val` in `compile_shader` when it's installed (always in CI). The only
-        // indices it's given are the board's texture and sampler, which live until `exiting`,
-        // after the last frame, and the board is never rendered into.
+        // address it's given is the cube's vertex buffer, and the only indices the board's
+        // texture and sampler. All of them live until `exiting`, after the last frame, and the
+        // board is never rendered into. Every index in the cube's index buffer is below its
+        // vertex count, and it's drawn with a vertex offset of 0 (`cube_mesh`). The shader reads
+        // `MeshVertex` with a 32-byte stride and 4-byte-aligned loads, matching `cube_mesh`'s
+        // packing, and the push constants at the offsets `constants` writes
+        // (tests/shader_layout.rs checks both in the SPIR-V).
         let code = unsafe { ShaderCode::from_spirv_unchecked(&self.spirv) };
         let pipeline = self.device.create_render_pipeline(&RenderPipelineDesc {
             label: "cube",
             vertex: ShaderEntry {
                 code,
-                entry_point: "cubeVertex",
+                entry_point: "meshVertex",
             },
             pixel: ShaderEntry {
                 code,
-                entry_point: "cubePixel",
+                entry_point: "meshPixel",
             },
             color_formats: &[format],
             depth: Some(DepthState::SCENE),
@@ -169,8 +190,9 @@ impl CubeApp {
         for (chunk, value) in words.iter_mut().zip(clip_from_object.to_cols_array()) {
             *chunk = value.to_le_bytes();
         }
-        bytes[64..68].copy_from_slice(&self.board.texture_index.to_le_bytes());
-        bytes[68..72].copy_from_slice(&self.board.sampler_index.to_le_bytes());
+        bytes[64..72].copy_from_slice(&self.mesh.address.to_le_bytes());
+        bytes[72..76].copy_from_slice(&self.board.texture_index.to_le_bytes());
+        bytes[76..80].copy_from_slice(&self.board.sampler_index.to_le_bytes());
         Ok(bytes)
     }
 
@@ -212,7 +234,8 @@ impl CubeApp {
             });
             pass.set_pipeline(pipeline);
             pass.set_push_constants(&constants);
-            pass.draw(36, 1);
+            pass.set_index_buffer(self.mesh.indices, 0, IndexFormat::Uint16);
+            pass.draw_indexed(0..self.mesh.index_count, 0, 1);
         } // The pass ends here.
         window.pre_present_notify();
         if let Err(e) = self.device.end_frame(frame) {
@@ -295,6 +318,11 @@ impl App for CubeApp {
         {
             warn!(error = %e, "destroying the depth buffer failed");
         }
+        for buffer in [self.mesh.vertices, self.mesh.indices] {
+            if let Err(e) = self.device.destroy_buffer(buffer) {
+                warn!(error = %e, "destroying a mesh buffer failed");
+            }
+        }
         if let Err(e) = self.device.destroy_sampler(self.board.sampler) {
             warn!(error = %e, "destroying the sampler failed");
         }
@@ -346,13 +374,13 @@ fn parse_options() -> Result<Options, String> {
 
 fn compile_shader() -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source = crate_dir.join("examples/shaders/Cube.slang");
+    let source = crate_dir.join("examples/shaders/Mesh.slang");
     // Where `Bindless.slang`, the shader side of the bindless binding model, lives.
     let bindless = crate_dir.join("../../rhi/shaders");
     let compiler = SlangCompiler::locate()?;
     let shader = compiler.compile(&CompileRequest {
         source: &source,
-        entry_points: &["cubeVertex", "cubePixel"],
+        entry_points: &["meshVertex", "meshPixel"],
         include_dirs: &[bindless],
         optimization: Optimization::Release,
     })?;
@@ -407,6 +435,70 @@ fn create_board(device: &VulkanDevice) -> Result<Board, RhiError> {
     })
 }
 
+/// The cube's vertices, in `Mesh.slang`'s `MeshVertex` layout (32 bytes each), and its 16-bit
+/// indices. It spans [-0.5, 0.5] on each axis, and its faces wind counter-clockwise seen from
+/// outside (ADR-0011 §4), so back-face culling keeps the visible ones. Each face shows the whole
+/// texture upright: its first row along the face's top edge.
+fn cube_mesh() -> (Vec<u8>, Vec<u16>) {
+    // Each face's outward normal, and the direction of its top edge seen from outside.
+    let faces = [
+        (Vec3::X, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Y),
+        (Vec3::Y, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::Z),
+        (Vec3::Z, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::Y),
+    ];
+    // Texture coordinates of each face's corners, counter-clockwise seen from outside (u runs
+    // right and v down the face): top left, bottom left, bottom right, top right.
+    let corners = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    let mut vertices = Vec::with_capacity(faces.len() * corners.len() * 32);
+    let mut indices = Vec::with_capacity(faces.len() * 6);
+    for (face, (normal, up)) in (0_u16..).zip(faces) {
+        // Seen from outside, right × up points out of the face.
+        let right = up.cross(normal);
+        for [u, v] in corners {
+            let position = 0.5 * normal + (u - 0.5) * right - (v - 0.5) * up;
+            let floats = position
+                .to_array()
+                .into_iter()
+                .chain(normal.to_array())
+                .chain([u, v]);
+            vertices.extend(floats.flat_map(f32::to_le_bytes));
+        }
+        // Two counter-clockwise triangles: top left, bottom left, bottom right, then top left,
+        // bottom right, top right.
+        let first = face * 4;
+        indices.extend([0, 1, 2, 0, 2, 3].map(|corner| first + corner));
+    }
+    (vertices, indices)
+}
+
+/// Uploads the cube mesh to GPU buffers.
+fn create_mesh(device: &VulkanDevice) -> Result<Mesh, RhiError> {
+    let (vertex_bytes, indices) = cube_mesh();
+    let index_bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+    let vertices = device.create_buffer(&BufferDesc {
+        label: "cube vertices",
+        size: vertex_bytes.len() as u64,
+        usage: BufferUsage::SHADER_ADDRESS | BufferUsage::COPY_DESTINATION,
+    })?;
+    device.write_buffer(vertices, 0, &vertex_bytes)?;
+    let index_buffer = device.create_buffer(&BufferDesc {
+        label: "cube indices",
+        size: index_bytes.len() as u64,
+        usage: BufferUsage::INDEX | BufferUsage::COPY_DESTINATION,
+    })?;
+    device.write_buffer(index_buffer, 0, &index_bytes)?;
+    Ok(Mesh {
+        vertices,
+        address: device.buffer_address(vertices)?,
+        indices: index_buffer,
+        // 36: far below u32::MAX.
+        index_count: indices.len() as u32,
+    })
+}
+
 fn main() -> std::process::ExitCode {
     oxreal_diagnostics::run_application(run)
 }
@@ -420,11 +512,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ..DeviceDesc::default()
     })?;
     let board = create_board(&device)?;
+    let mesh = create_mesh(&device)?;
     let app = CubeApp {
         device,
         options,
         spirv,
         board,
+        mesh,
         pipeline: None,
         depth: None,
         window: None,

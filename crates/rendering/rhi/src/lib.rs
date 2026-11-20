@@ -13,8 +13,8 @@
 //! - Surfaces, frames, command encoders and scoped render passes ([`Device::begin_frame`],
 //!   [`RenderPass`]), as decided in ADR-0017.
 //! - [`HandlePool`]: typed generational handles for backend objects (ADR-0016 §1).
-//! - Textures, buffers (reached by GPU address), render pipelines (push constants up to
-//!   [`MAX_PUSH_CONSTANT_BYTES`]), draws,
+//! - Textures, buffers (reached by GPU address, or bound as index buffers), render pipelines
+//!   (push constants up to [`MAX_PUSH_CONSTANT_BYTES`]), draws and indexed draws,
 //!   standalone submissions and [`Device::read_texture`] for tests and tools.
 //!
 //! See [`BINDLESS_SET`] for how shaders reach textures and samplers by index.
@@ -40,7 +40,7 @@ pub use adapter::{
 pub use bindless::{
     AddressMode, BINDLESS_SET, Filter, SAMPLERS_BINDING, SamplerDesc, TEXTURES_BINDING,
 };
-pub use buffer::{BufferDesc, BufferUsage};
+pub use buffer::{BufferDesc, BufferUsage, IndexFormat};
 pub use command::{
     ColorAttachment, CommandEncoder, DepthAttachment, DepthLoadOp, Frame, LoadOp, RenderPass,
     RenderPassDesc, StoreOp,

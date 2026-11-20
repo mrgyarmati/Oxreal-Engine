@@ -23,3 +23,7 @@ scalarBlockLayout
 
 # Baseline quality
 samplerAnisotropy
+
+# Indexed draws: every 32-bit index value is valid, not only those up to 2^24 - 1
+# (maxDrawIndexedIndexValue). Part of Roadmap 2022 and of Vulkan 1.4.
+fullDrawIndexUint32

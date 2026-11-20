@@ -39,6 +39,9 @@ fn vk_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
     if usage.contains(BufferUsage::COPY_SOURCE) {
         flags |= vk::BufferUsageFlags::TRANSFER_SRC;
     }
+    if usage.contains(BufferUsage::INDEX) {
+        flags |= vk::BufferUsageFlags::INDEX_BUFFER;
+    }
     flags
 }
 
@@ -489,6 +492,10 @@ mod tests {
         assert!(
             copies
                 .contains(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC)
+        );
+        assert_eq!(
+            vk_usage(BufferUsage::INDEX),
+            vk::BufferUsageFlags::INDEX_BUFFER
         );
         assert!(vk_usage(BufferUsage::default()).is_empty());
     }

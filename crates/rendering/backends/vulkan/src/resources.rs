@@ -613,8 +613,11 @@ impl Shared {
                 .name(&pixel_entry),
         ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        // Primitive restart stays off, so every index value is an ordinary index, as
+        // `IndexFormat` documents (tests/indexed.rs checks 0xFFFF).
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
         let viewport = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
