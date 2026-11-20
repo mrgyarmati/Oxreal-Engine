@@ -172,11 +172,50 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Lavapipe, vulkaninfo, validation layers, spirv-val, Xvfb and X11 runtime libraries
+      - name: Install Lavapipe, vulkaninfo, spirv-val, jq, Xvfb and X11 runtime libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools vulkan-validationlayers \
-            spirv-tools xvfb libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools \
+            spirv-tools xvfb jq libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6
+      # Validation runs with the LunarG SDK's layer, the version Windows development uses, not
+      # the distribution's. Ubuntu 24.04's layer (1.3.275) corrupts its own object tracking when
+      # one device is destroyed while another thread uses a different device: the parallel GPU
+      # tests crashed inside it, or it reported live objects as unknown (5 crashes and 1 bogus
+      # error in 30 focused stress runs; 0 in 30 with this layer, and 0 in 60 on Ubuntu 26.04).
+      # One pinned layer also means every job applies the same validation rules. The archive is
+      # pinned by version and SHA-256 (LunarG publishes the hash), and checked on every run,
+      # cached or not. Only the layer (manifest and library) is extracted. VK_LAYER_PATH
+      # replaces the loader's layer search path, so no other copy can be found. See
+      # docs/development/setup.md, "Known upstream issues". To update: download the new
+      # archive, compare its hash with LunarG's published one, and replace both values. The
+      # download is cached outside .tools/downloads, which the Slang cache owns.
+      - name: Cache the Vulkan SDK archive (Linux)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/vulkan-sdk-archive
+          key: vulkan-sdk-archive-linux-1.4.363.1
+      - name: Validation layer from the LunarG Vulkan SDK
+        env:
+          VULKAN_SDK_VERSION: "1.4.363.1"
+          VULKAN_SDK_SHA256: "b7867d8ca658563813af666f34b93db87f1b1c7d9d69d97e924c210c7ba33eb8"
+        run: |
+          archive=".tools/vulkan-sdk-archive/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          if [ ! -f "$archive" ]; then
+            mkdir -p "$(dirname "$archive")"
+            curl -fsSL -o "$archive" \
+              "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          fi
+          echo "$VULKAN_SDK_SHA256  $archive" | sha256sum --check --strict || { rm "$archive"; exit 1; }
+          root="$RUNNER_TEMP/vulkan-validation-layer"
+          mkdir -p "$root"
+          tar -xJf "$archive" -C "$root" --strip-components=1 \
+            "$VULKAN_SDK_VERSION/x86_64/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json" \
+            "$VULKAN_SDK_VERSION/x86_64/lib/libVkLayer_khronos_validation.so"
+          manifest_dir="$root/x86_64/share/vulkan/explicit_layer.d"
+          version=$(jq -r '.layer.api_version' "$manifest_dir/VkLayer_khronos_validation.json")
+          echo "validation layer $version"
+          [ "$version" = "${VULKAN_SDK_VERSION%.*}" ] || { echo "expected ${VULKAN_SDK_VERSION%.*}"; exit 1; }
+          echo "VK_LAYER_PATH=$manifest_dir" >> "$GITHUB_ENV"
       - run: bash tools/ci/check-vulkan-features.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The triangle pixel tests and example compile Slang with the pinned compiler (ADR-0013).

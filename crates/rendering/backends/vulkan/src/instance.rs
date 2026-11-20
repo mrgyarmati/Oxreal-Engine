@@ -74,9 +74,13 @@ impl VulkanInstance {
             unsafe { entry.enumerate_instance_layer_properties() }
         })
         .map_err(|e| from_vk("vkEnumerateInstanceLayerProperties", e))?;
-        let layer_available = layers
+        // The layer's own version, logged below: validation behaviour (and its bugs) differs
+        // between versions, so logs must say which one ran.
+        let validation_layer_version = layers
             .iter()
-            .any(|l| l.layer_name_as_c_str().is_ok_and(|n| n == VALIDATION_LAYER));
+            .find(|l| l.layer_name_as_c_str().is_ok_and(|n| n == VALIDATION_LAYER))
+            .map(|l| l.spec_version);
+        let layer_available = validation_layer_version.is_some();
         let env_override = validation_override(std::env::var(VALIDATION_ENV_VAR).ok().as_deref())?;
         let decision = resolve_validation(
             validation,
@@ -218,6 +222,9 @@ impl VulkanInstance {
         info!(
             vulkan = %format_version(version),
             validation = this.validation,
+            validation_layer = %validation_layer_version
+                .filter(|_| this.validation)
+                .map_or_else(|| "none".to_owned(), format_version),
             sync_validation,
             debug_utils = debug_utils_available,
             surfaces = surface_support,

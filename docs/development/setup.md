@@ -123,6 +123,27 @@ xvfb-run -a cargo run -p oxreal-window --example smoke -- --frames 120   # headl
   `VK_LOADER_DRIVERS_SELECT='*lvp*'` for Lavapipe, as CI does. Your GPU's manifest name is in
   `/usr/share/vulkan/icd.d/`. The setting can go from CI once every runner image ships loader
   1.4.350 or later. It still documents which driver the job tests.
+- **Validation layer crash with several devices on parallel threads, layer 1.3.275 (Ubuntu
+  24.04's `vulkan-validationlayers`).** When one device is destroyed while another thread uses a
+  *different* device, this layer corrupts its own object tracking. The parallel GPU tests then
+  crash inside `libVkLayer_khronos_validation.so`, or the layer reports live objects as unknown
+  ("Couldn't find VkDevice Object"). A focused stress test crashed in 5 of 30 runs with it, and
+  in none of 30 with the SDK 1.4.363.1 layer on the same machine, or of 60 with Ubuntu 26.04's
+  1.4.341 layer. No upstream report matching it was found. The calls involved are legal: it's
+  inside the layer.
+
+  Use the layer from the LunarG Vulkan SDK instead. Extract it from the SDK archive (the same
+  version as on Windows) and point the loader at it, as CI does:
+
+  ```sh
+  tar -xJf vulkansdk-linux-x86_64-1.4.363.1.tar.xz --strip-components=1 \
+    1.4.363.1/x86_64/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json \
+    1.4.363.1/x86_64/lib/libVkLayer_khronos_validation.so
+  export VK_LAYER_PATH="$PWD/x86_64/share/vulkan/explicit_layer.d"
+  ```
+
+  Instance creation logs the version that ran (`validation_layer=` in "Vulkan instance
+  created").
 
 ## Unreal Engine source (UX reference, optional)
 
