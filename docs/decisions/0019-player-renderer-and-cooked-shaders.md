@@ -155,6 +155,9 @@ constraints shape them:
   - the key format version;
   - the pinned Slang version string from `tools/slang.json`;
   - the target;
+  - the fixed `slangc` arguments every compile passes (`compile_options()`), which decide memory
+    layouts. *(Amended 2026-11-20, key format `/2`; see the second slice's implementation
+    notes.)*
   - the entry's normalized `cook.json` record: output name, source, entry points, include
     directories and declared inputs, in that order, so renaming an entry point or reordering
     include directories changes the key;

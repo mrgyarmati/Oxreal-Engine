@@ -393,8 +393,9 @@ impl Renderer {
         //   4-byte floats, so every read is aligned. Unregistering makes the handle stale at
         //   once and destroys the buffer through deferred destruction, which outlives every
         //   encoder already recording. Only this device's encoders are recorded into
-        //   (`owns_encoder`, which `CommandEncoder`'s unsafe contract makes trustworthy), so the
-        //   address and handles mean what we created them as.
+        //   (`owns_encoder`), and the unsafe contracts of `Device` and `CommandEncoder` make the
+        //   device's answers trustworthy: its addresses, indices and ownership checks are real, so
+        //   the address and handles mean what we created them as.
         // - Indexed draws: `MeshData::checked_index_count` checked at registration that every
         //   index names a vertex and that vertex counts stay within `0..=i32::MAX`; each draw
         //   covers exactly the mesh's whole index buffer (bound at offset 0) with vertex offset 0.

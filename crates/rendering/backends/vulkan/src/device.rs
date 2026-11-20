@@ -397,7 +397,12 @@ impl Drop for VulkanDevice {
     }
 }
 
-impl oxreal_rhi::Device for VulkanDevice {
+// SAFETY: this is the device it describes: `owns_encoder` compares the encoder's `Arc<Shared>`
+// with this device's, handles, addresses and bindless indices come from its own pools and
+// allocator and live by deferred destruction (`retire.rs`), buffer addresses are aligned to
+// `BUFFER_ADDRESS_ALIGNMENT` (`buffers.rs`), and its encoders record into its own command
+// buffers against its own pools.
+unsafe impl oxreal_rhi::Device for VulkanDevice {
     fn adapter_info(&self) -> &AdapterInfo {
         &self.adapter_info
     }

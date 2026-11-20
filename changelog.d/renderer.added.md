@@ -6,4 +6,5 @@
 - `oxreal-rhi`: `Device::owns_encoder`, which says whether a device created a command encoder,
   and `BUFFER_ADDRESS_ALIGNMENT`: every buffer address is a multiple of 16 bytes.
 - `oxreal-shader-compiler`: `SpirvLayouts`, which reads struct offsets and pointer strides from
-  SPIR-V, for tests that check a shader's memory layout against Rust; and `compile_options()`.
+  SPIR-V, for tests that check a shader's memory layout against Rust; and `compile_options()`,
+  the fixed `slangc` arguments every compile uses.

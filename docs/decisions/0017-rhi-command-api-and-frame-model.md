@@ -225,6 +225,12 @@ check, or turning primitive restart on.
   passing the ownership check without forging anything. Its contract: `as_any` and `into_any`
   return the implementing object itself, and the `*_raw` methods record into it. Only backends
   implement it (`unsafe impl`). A `compile_fail` example shows a plain `impl` is refused.
+- **`Device` is an `unsafe trait` too** (found by the re-audit): a safe wrapper could answer
+  `owns_encoder` falsely or hand out an address of nothing, and code vouching for shaders trusts
+  what a device reports. Its contract: it is the device it describes. `owns_encoder` is
+  truthful, its handles, addresses and indices name objects it created (alive as documented,
+  addresses aligned), and its encoders record against its own objects. A `compile_fail` example
+  shows a plain `impl` is refused.
 - **What it doesn't cover:** handles stay plain numbers that safe code can forge
   (`from_raw`), so the program-wide obligations of `ShaderCode::from_spirv_unchecked`
   (ADR-0016 §2) are unchanged. The contract now says that addresses, indices and pipelines are
@@ -248,6 +254,10 @@ check, or turning primitive restart on.
   application.
 - Costs: one indirect call per RHI call, and object-safe traits only (generic conveniences
   become helper functions over the traits).
+- Every backend takes on these obligations (implementation notes of 2026-11-20): its device is
+  an `unsafe impl Device` that is the device it describes, its encoder is
+  an `unsafe impl CommandEncoder` that is exactly one encoder, and its buffer addresses are
+  multiples of `BUFFER_ADDRESS_ALIGNMENT` (16 bytes).
 - Revisit triggers: profiling showing RHI dispatch as a measurable share of frame CPU time in
   the benchmark projects (add batching first), or parallel recording needing a different
   encoder ownership model.

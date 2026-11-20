@@ -46,7 +46,62 @@ impl Default for DeviceDesc {
 /// A GPU device. Every backend implements this.
 ///
 /// Dropping a device waits for the GPU to finish and releases everything it owns.
-pub trait Device: fmt::Debug + Send + Sync {
+///
+/// # Safety
+///
+/// Only backends implement this trait. Code that vouches for shaders
+/// (`ShaderCode::from_spirv_unchecked`) relies on what a device reports, so an implementation
+/// must be **the device it describes**:
+/// - [`owns_encoder`](Device::owns_encoder) is true exactly for encoders this device created;
+/// - handles, buffer addresses and bindless indices it returns name objects it created, valid
+///   for as long as these docs say (deferred destruction, ADR-0016 §1), and addresses are
+///   multiples of [`crate::BUFFER_ADDRESS_ALIGNMENT`];
+/// - encoders it creates record against its own objects.
+///
+/// Otherwise a wrapper could, for example, report another device's encoder as its own, or hand
+/// out an address of nothing (ADR-0017, implementation notes of 2026-11-20).
+///
+/// A type outside a backend can't implement it without `unsafe`:
+///
+/// ```compile_fail
+/// # use std::sync::Arc;
+/// # use oxreal_rhi::*;
+/// #[derive(Debug)]
+/// struct Spy;
+/// impl Device for Spy {
+///     fn adapter_info(&self) -> &AdapterInfo { todo!() }
+///     fn validation_enabled(&self) -> bool { todo!() }
+///     fn validation_error_count(&self) -> u64 { todo!() }
+///     fn wait_idle(&self) -> Result<(), RhiError> { todo!() }
+///     fn create_surface(&self, _: Arc<dyn SurfaceTarget>, _: &SurfaceDesc)
+///         -> Result<SurfaceHandle, RhiError> { todo!() }
+///     fn resize_surface(&self, _: SurfaceHandle, _: u32, _: u32) -> Result<(), RhiError> { todo!() }
+///     fn destroy_surface(&self, _: SurfaceHandle) -> Result<(), RhiError> { todo!() }
+///     fn begin_frame(&self, _: SurfaceHandle) -> Result<Option<Frame>, RhiError> { todo!() }
+///     fn create_texture(&self, _: &TextureDesc<'_>) -> Result<TextureHandle, RhiError> { todo!() }
+///     fn destroy_texture(&self, _: TextureHandle) -> Result<(), RhiError> { todo!() }
+///     fn create_render_pipeline(&self, _: &RenderPipelineDesc<'_>)
+///         -> Result<PipelineHandle, RhiError> { todo!() }
+///     fn destroy_render_pipeline(&self, _: PipelineHandle) -> Result<(), RhiError> { todo!() }
+///     fn create_encoder(&self, _: &str) -> Result<Box<dyn CommandEncoder>, RhiError> { todo!() }
+///     fn submit(&self, _: Box<dyn CommandEncoder>) -> Result<SubmissionId, RhiError> { todo!() }
+///     fn wait_for_submission(&self, _: SubmissionId) -> Result<(), RhiError> { todo!() }
+///     fn read_texture(&self, _: TextureHandle) -> Result<Vec<u8>, RhiError> { todo!() }
+///     fn create_buffer(&self, _: &BufferDesc<'_>) -> Result<BufferHandle, RhiError> { todo!() }
+///     fn destroy_buffer(&self, _: BufferHandle) -> Result<(), RhiError> { todo!() }
+///     fn write_buffer(&self, _: BufferHandle, _: u64, _: &[u8]) -> Result<(), RhiError> { todo!() }
+///     fn read_buffer(&self, _: BufferHandle) -> Result<Vec<u8>, RhiError> { todo!() }
+///     fn buffer_address(&self, _: BufferHandle) -> Result<u64, RhiError> { todo!() }
+///     fn write_texture(&self, _: TextureHandle, _: &[u8]) -> Result<(), RhiError> { todo!() }
+///     fn texture_index(&self, _: TextureHandle) -> Result<u32, RhiError> { todo!() }
+///     fn create_sampler(&self, _: &SamplerDesc<'_>) -> Result<SamplerHandle, RhiError> { todo!() }
+///     fn destroy_sampler(&self, _: SamplerHandle) -> Result<(), RhiError> { todo!() }
+///     fn sampler_index(&self, _: SamplerHandle) -> Result<u32, RhiError> { todo!() }
+///     fn end_frame(&self, _: Frame) -> Result<(), RhiError> { todo!() }
+///     fn owns_encoder(&self, _: &dyn CommandEncoder) -> bool { true }
+/// }
+/// ```
+pub unsafe trait Device: fmt::Debug + Send + Sync {
     /// The adapter this device runs on.
     fn adapter_info(&self) -> &AdapterInfo;
 

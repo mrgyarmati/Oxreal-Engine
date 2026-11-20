@@ -101,7 +101,9 @@ impl Shared {
         let mut requirements = unsafe { self.raw().get_buffer_memory_requirements(buffer) };
         // Every buffer starts on a multiple of `BUFFER_ADDRESS_ALIGNMENT`, which
         // `Device::buffer_address` promises. Alignments are powers of two, so the larger one
-        // still satisfies the driver's.
+        // still satisfies the driver's. This constrains the offset into the memory object; the
+        // object's own base address is aligned to at least the largest alignment the driver
+        // reports (every driver aligns it to a page), and `tests/buffers.rs` checks the result.
         requirements.alignment = requirements
             .alignment
             .max(oxreal_rhi::BUFFER_ADDRESS_ALIGNMENT);
