@@ -168,6 +168,10 @@ These choices bind every hook, the relations built on them, ADR-0008's `begin_pl
 4. **The commands a hook queues run right after the change that triggered it,** before any
    other pending command, and before a direct `World` call returns. Cascades of any depth run
    in constant stack.
+   *Refined with the hierarchy:* when one command makes several changes, their hook commands
+   run right after **that command**, in the order the changes were made, before the next
+   pending command. (The first implementation ran them in reverse order: a nested change put
+   its hook commands in front of the previous change's.)
 5. **Despawn is post-order.** A despawned entity's hooks run first, while it's whole. The
    commands they queue run next, with everything those cause in turn. Only then is the entity
    removed. A relation whose hook despawns its dependents therefore removes **children before
@@ -550,10 +554,6 @@ The decisions are in §4's amendment. These notes cover how they're implemented.
   |---|---|---|
   | spawn | 6.5 ms | 5.1 ms |
   | `get` through 100k shuffled handles | 3.2 ms | 2.0 ms |
-  | insert + remove a tag on 10k entities | 1.53 ms | 1.38 ms |
-
-  Iteration and despawn are unchanged.
-
 ## Implementation notes (2026-11-20, relations and the hierarchy)
 
 The first relation is `ChildOf`/`Children`, in `oxreal-hierarchy`. The decisions are in §3's
@@ -561,15 +561,21 @@ amendment and ADR-0005's amendment.
 
 - **Both components are immutable.**
   - `ChildOf` holds the parent and the link's despawn policy.
-  - `Children` records its owner, and every edit replaces it through a command. The command
-    reads the current list when it runs, so edits from many hooks in one flush never lose each
-    other.
+  - `Children` records its owner. Every edit replaces it through a command, which reads the
+    current list when it runs, so edits from many hooks in one flush never lose each other.
+  - Before replacing, an edit drops entries whose link points elsewhere by then. So several
+    children moving in one command never leave a list that disagrees with the links.
   - A `Children` inserted from outside (taken off another entity, or put back stale) is checked
-    against the links, and rebuilt from them if it doesn't match. The rebuild scans the world,
-    which correct code never triggers.
-- **Refused links:** a link to a dead or despawning parent, one that would form a cycle, or one
-  deeper than `MAX_DEPTH` is removed again by the hook, with a warning. `set_parent` reports
-  each case as an error (`Ecs`, `Cycle`, `TooDeep`) before changing anything.
+    against the links, and rebuilt from them if it doesn't match. The rebuild scans the world.
+    Correct code never triggers it: a test-only counter checks this, including across both
+    randomized tests.
+- **Refused links:**
+  - The hook removes, with a warning, a link to a dead or despawning parent, one that would
+    form a cycle, and one under a chain deeper than `MAX_DEPTH`. `set_parent` reports each as
+    an error (`Ecs`, `Cycle`, `TooDeep`) before changing anything.
+  - If the parent dies, or starts despawning, between the link and the command that lists the
+    child, that command resolves the child by its link's policy, just as the parent's despawn
+    would have. So a link to a dead parent can't survive.
 - **Despawn:**
   - The parent's `Children` hook queues one command per child.
   - Each command re-checks that the child still belongs to that parent, so a child moved away
@@ -577,41 +583,58 @@ amendment and ADR-0005's amendment.
   - It then despawns the child, or detaches it keeping its place in the world, as the link
     says.
   - Removing `Children` alone always detaches.
-- **"Keep world"** computes placements from the local transforms up the chain, not from
-  `WorldTransform`, which is stale between gameplay and propagation. It decomposes the result
-  into a `Transform`, which loses shear under non-uniform scale, as Unreal's `FTransform` does.
+- **"Keep world":**
+  - It computes placements from the local transforms up the chain, not from
+    `WorldTransform`, which is stale between gameplay and propagation.
+  - It decomposes the result into a `Transform`, which loses shear under non-uniform scale, as
+    Unreal's `FTransform` does.
+  - A placement with zero scale (a common way to hide something) can't be expressed relative
+    to a parent. `set_parent` then returns `CantKeepWorld` and changes nothing, and a detach
+    keeps the local transform with a warning. It never writes NaN.
 - **Propagation:**
   - It walks each tree with an explicit stack.
   - Adding `LocalTransform` adds `WorldTransform`, and removing it removes it, so nothing is
     drawn at a stale place.
   - The system's name is exported (`PROPAGATE_TRANSFORMS`) for ordering.
-- **The §10 benchmark** (`cargo bench -p oxreal-hierarchy`): 111,100 entities in trees four
-  levels deep, on a Ryzen 9 5950X with Windows 11 and rustc 1.100.0, release build:
-  - **propagation: 5.0 ms**;
-  - building the trees: 79 ms.
+- **The ECS fix found here:** several changes inside one command ran their hook commands in
+  reverse order (§4 amendment, item 4, refined). Nested changes now leave their commands
+  recorded, and the running loop promotes them in order when the command returns. An ECS test
+  covers it.
+- **Benchmarks** (`cargo bench -p oxreal-hierarchy`; Ryzen 9 5950X, Windows 11, rustc 1.100.0,
+  release):
 
-  Building costs that much because each attach replaces `Children` (copying the list and
-  checking it). The cost per attach grows with the number of siblings. A bulk attach, or a
-  hook-private way to edit the list, can fix that if profiling points there.
+  | Workload | Time |
+  |---|---|
+  | **propagate 111,100 entities, 4 levels deep (the §10 benchmark)** | **5.1 ms** |
+  | build those trees (spawn + attach, 10 children per parent) | 85 ms |
+  | attach 1,000 children to one parent, one by one | 8 ms |
+  | attach 10,000 children to one parent, one by one | **750 ms** |
+  | despawn a parent of 10,000 children (all detach) | 3.6 ms |
 
-  Propagation costs three lookups by handle per entity. Cached query state is the next step.
-- **Tests (19):**
+  Attaching one by one costs time proportional to the number of siblings: each attach copies
+  the immutable `Children` and checks every entry. That's fine for M1, but not for an editor
+  folder of 10,000 actors. **The planned fix** is an ECS operation that edits a component in
+  place while running its `on_replace` and `on_insert` hooks, together with an O(1) provenance
+  check for `Children` in place of the per-entry check. That makes each attach O(1) amortized.
+- **Tests (23):**
   - attach, order, move, detach, and re-setting the same parent;
+  - several attaches and moves in one command;
   - each error, with its message;
   - the hooks' refusals of direct inserts;
   - detaching in place by default;
   - opt-in despawn in post-order (recorded through `Drop`), mixed with detaching links;
   - removing `Children`, and both repair routes;
-  - attaching to a despawning parent;
+  - attaching to a despawning parent, before and after the link's command;
   - a child moved away during a cascade;
-  - `KeepWorld` against `KeepLocal`;
+  - `KeepWorld` against `KeepLocal`, and under a zero-scale parent;
   - propagation against matrix products;
   - the depth limit.
 
   **Two randomized tests** check every invariant after **every** operation, and compare each
   `WorldTransform` with an on-demand reference:
   - 3,000 direct operations;
-  - 400 frames of operations batched as one system's commands, including reserved handles.
+  - 400 frames in which one system queues three random changes per command, including
+    reserved handles.
 
   Both include links inserted directly and `Reactor` components whose hooks re-parent or
   despawn other entities in the middle of a despawn.
@@ -620,5 +643,7 @@ amendment and ADR-0005's amendment.
   - the default policy despawning;
   - the hook accepting a despawning parent;
   - a moved child not re-checked;
-  - detaching keeping the local transform instead of the world placement;
-  - a stale `WorldTransform` kept.
+  - detaching keeping the local transform;
+  - a stale `WorldTransform` kept;
+  - an orphaned child left linked;
+  - stale entries kept in an edited list.

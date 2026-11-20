@@ -135,8 +135,12 @@ fn set_parent_refuses_cycles_and_unusable_parents_and_explains() {
     // The message says what failed, and the source says why, without repeating it.
     let shown = error.to_string();
     assert!(
-        shown.contains("can't make") && !shown.contains("despawned"),
+        shown.contains("can't make") && shown.contains("Check that both are alive"),
         "{shown}"
+    );
+    assert!(
+        !shown.contains("doesn't exist"),
+        "the source isn't repeated: {shown}"
     );
     assert!(std::error::Error::source(&error).is_some());
 
@@ -527,6 +531,15 @@ impl Rng {
     }
 }
 
+/// An insert into a live entity succeeds, unless a despawn earlier in the same command has
+/// started on it.
+fn expect_alive_or_despawning(result: Result<(), EcsError>) {
+    assert!(
+        matches!(result, Ok(()) | Err(EcsError::Despawning(_))),
+        "{result:?}"
+    );
+}
+
 /// One random operation, applied directly to `world`.
 fn random_op(world: &mut World, rng: &mut Rng, live: &[Entity], step: usize) {
     let pick = |rng: &mut Rng| live[rng.below(live.len())];
@@ -552,8 +565,17 @@ fn random_op(world: &mut World, rng: &mut Rng, live: &[Entity], step: usize) {
                 KEEP_WORLD
             };
             if let Err(error) = set_parent(world, c, p, rule) {
+                // Cycles are refused, and so are entities mid-despawn (a despawn earlier in the
+                // same command finishes after it). Nothing else may fail.
                 assert!(
-                    matches!(error, HierarchyError::Cycle { .. }),
+                    matches!(
+                        error,
+                        HierarchyError::Cycle { .. }
+                            | HierarchyError::Ecs {
+                                source: EcsError::Despawning(_),
+                                ..
+                            }
+                    ),
                     "step {step}: {error}"
                 );
             }
@@ -561,7 +583,7 @@ fn random_op(world: &mut World, rng: &mut Rng, live: &[Entity], step: usize) {
         4 => {
             // Directly, bypassing set_parent's checks: the hooks must cope.
             let (c, p) = (pick(rng), pick(rng));
-            world.insert(c, ChildOf::new(p)).expect("alive");
+            expect_alive_or_despawning(world.insert(c, ChildOf::new(p)));
         }
         5 => {
             remove_parent(world, pick(rng), KEEP_WORLD);
@@ -578,7 +600,7 @@ fn random_op(world: &mut World, rng: &mut Rng, live: &[Entity], step: usize) {
                 other: pick(rng),
                 despawn: rng.below(2) == 0,
             };
-            world.insert(pick(rng), reactor).expect("alive");
+            expect_alive_or_despawning(world.insert(pick(rng), reactor));
         }
         _ => {
             if let Some(mut local) = world.get_mut::<LocalTransform>(pick(rng)) {
@@ -598,6 +620,11 @@ fn random_direct_operations_keep_the_hierarchy_consistent() {
         run_post_update(&mut world);
         check(&world, &format!("step {step}"));
     }
+    assert_eq!(
+        repairs(),
+        0,
+        "random correct operations never need a repair"
+    );
 }
 
 /// Lets a system's commands run random operations, several per sync point.
@@ -628,12 +655,16 @@ fn random_operations_batched_as_system_commands_keep_the_hierarchy_consistent() 
                 let step = i;
                 let op_seed = seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 ctx.commands.run(move |world| {
-                    let pool: Vec<Entity> = pool
-                        .iter()
-                        .copied()
-                        .filter(|&e| world.contains(e))
-                        .collect();
-                    random_op(world, &mut Rng(op_seed | 1), &pool, step);
+                    // Several changes in one command: where ordering and lost-update bugs live.
+                    let mut rng = Rng(op_seed | 1);
+                    for _ in 0..3 {
+                        let live: Vec<Entity> = pool
+                            .iter()
+                            .copied()
+                            .filter(|&e| world.contains(e))
+                            .collect();
+                        random_op(world, &mut rng, &live, step);
+                    }
                 });
             }
         })
@@ -644,4 +675,114 @@ fn random_operations_batched_as_system_commands_keep_the_hierarchy_consistent() 
         schedule.run(&mut world).expect("valid");
         check(&world, &format!("frame {frame}"));
     }
+    assert_eq!(
+        repairs(),
+        0,
+        "random correct operations never need a repair"
+    );
+}
+
+/// Runs `edit` as one command from a system, so all its changes share one command.
+fn in_one_command(world: &mut World, edit: impl FnOnce(&mut World) + Send + 'static) {
+    let edit = Mutex::new(Some(edit));
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PrePhysics,
+        System::new("one command", move |ctx| {
+            if let Some(edit) = edit.lock().expect("lock").take() {
+                ctx.commands.run(edit);
+            }
+        }),
+    );
+    schedule.run(world).expect("valid");
+}
+
+fn repairs() -> usize {
+    crate::relation::REPAIRS.with(std::cell::Cell::get)
+}
+
+#[test]
+fn several_attaches_in_one_command_keep_their_order() {
+    let mut world = World::new();
+    let q = world.spawn(());
+    let kids: Vec<Entity> = (0..4).map(|_| world.spawn(())).collect();
+    let order = kids.clone();
+    in_one_command(&mut world, move |world| {
+        for &kid in &order {
+            world.insert(kid, ChildOf::new(q)).expect("alive");
+        }
+    });
+    assert_eq!(children(&world, q), kids);
+}
+
+#[test]
+fn moving_several_children_in_one_command_needs_no_repair() {
+    let mut world = World::new();
+    let p = world.spawn(());
+    let q = world.spawn(());
+    let a = world.spawn(ChildOf::new(p));
+    let b = world.spawn(ChildOf::new(p));
+    let c = world.spawn(ChildOf::new(p));
+    let before = repairs();
+    in_one_command(&mut world, move |world| {
+        set_parent(world, b, q, KEEP_LOCAL).expect("valid");
+        set_parent(world, a, q, KEEP_LOCAL).expect("valid");
+    });
+    assert_eq!(repairs(), before, "correct code never triggers a repair");
+    assert_eq!(children(&world, q), [b, a]);
+    assert_eq!(children(&world, p), [c]);
+}
+
+#[test]
+fn a_child_attached_just_before_its_parent_despawns_follows_its_link() {
+    let mut world = World::new();
+    let p = world.spawn(at(5.0, 0.0, 0.0));
+    let kept = world.spawn(at(0.0, 1.0, 0.0));
+    let part = world.spawn(at(0.0, 2.0, 0.0));
+    in_one_command(&mut world, move |world| {
+        world.insert(kept, ChildOf::new(p)).expect("alive");
+        world
+            .insert(part, ChildOf::new(p).despawn_with_parent())
+            .expect("alive");
+        world.despawn(p);
+    });
+    assert!(!world.contains(p));
+    assert_eq!(parent(&world, kept), None, "no link to a dead parent");
+    assert!(near(
+        local(&world, kept)
+            .map(|t| t.translation)
+            .unwrap_or(Vec3::NAN),
+        Vec3::new(5.0, 1.0, 0.0)
+    ));
+    assert!(
+        !world.contains(part),
+        "despawned with its parent, as its link said"
+    );
+}
+
+#[test]
+fn keep_world_under_a_zero_scale_parent_is_refused_without_corruption() {
+    let mut world = World::new();
+    let hidden = world.spawn(LocalTransform(
+        Transform::from_translation(Vec3::X).with_scale(Vec3::ZERO),
+    ));
+    let c = world.spawn(at(1.0, 2.0, 3.0));
+    assert_eq!(
+        set_parent(&mut world, c, hidden, KEEP_WORLD),
+        Err(HierarchyError::CantKeepWorld {
+            child: c,
+            parent: hidden
+        })
+    );
+    assert_eq!(parent(&world, c), None, "nothing changed");
+    assert_eq!(
+        local(&world, c).map(|t| t.translation),
+        Some(Vec3::new(1.0, 2.0, 3.0))
+    );
+
+    // Keeping the local transform works, and detaching a zero-scale child writes no NaN.
+    set_parent(&mut world, c, hidden, KEEP_LOCAL).expect("valid");
+    remove_parent(&mut world, c, KEEP_WORLD);
+    let after = local(&world, c).expect("has one");
+    assert!(after.translation.is_finite() && after.rotation.is_finite() && after.scale.is_finite());
 }

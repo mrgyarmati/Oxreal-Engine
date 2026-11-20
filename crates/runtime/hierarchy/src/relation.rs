@@ -9,8 +9,11 @@ use oxreal_ecs::{
 
 use crate::transform::{TransformRule, keep_world_on_attach, keep_world_on_detach};
 
-/// The most ancestors a walk up the hierarchy visits. Far deeper than any real hierarchy: a
-/// deeper chain is refused ([`HierarchyError::TooDeep`]).
+/// The longest chain a walk up the hierarchy follows: an entity and up to this many ancestors.
+/// Far deeper than any real hierarchy. Attaching under a deeper chain is refused
+/// ([`HierarchyError::TooDeep`]). The limit applies above the parent only, so a subtree being
+/// attached adds its own depth: walks through deeper chains stop at the limit, and
+/// `KeepWorld` placements then ignore the transforms beyond it.
 pub const MAX_DEPTH: usize = 1 << 16;
 
 /// What happens to a child when its parent is despawned (ADR-0014, §3 amendment, item 4).
@@ -96,7 +99,8 @@ impl Component for ChildOf {
 ///
 /// It's immutable, and records which entity it belongs to. A `Children` taken off one entity
 /// (with `remove`) and inserted anywhere is checked against the actual `ChildOf` links and
-/// repaired, with a warning.
+/// repaired from the links, with a warning. Repair keeps the order of the children it lists, and
+/// puts any others after them, in handle order: their real order is lost.
 ///
 /// Removing `Children` detaches the children, keeping their place in the world. Despawning the
 /// entity treats each child by its link's [`OnParentDespawn`].
@@ -152,7 +156,10 @@ impl Component for Children {
 #[non_exhaustive]
 pub enum HierarchyError {
     /// The child or the parent isn't alive, or is being despawned.
-    #[error("can't make {parent:?} the parent of {child:?}")]
+    #[error(
+        "can't make {parent:?} the parent of {child:?}. Check that both are alive and not being \
+         despawned before attaching"
+    )]
     Ecs {
         /// The entity to attach.
         child: Entity,
@@ -172,6 +179,18 @@ pub enum HierarchyError {
         /// The entity to attach.
         child: Entity,
         /// The intended parent, already at or below it.
+        parent: Entity,
+    },
+    /// `TransformRule::KeepWorld` was asked for, but a world placement involved has zero scale,
+    /// so the child's place can't be expressed relative to the parent.
+    #[error(
+        "can't keep {child:?}'s place in the world under {parent:?}: one of their world \
+         placements has zero scale. Use `TransformRule::KeepLocal`, or give it a non-zero scale"
+    )]
+    CantKeepWorld {
+        /// The entity to attach.
+        child: Entity,
+        /// The intended parent.
         parent: Entity,
     },
     /// The chain above the parent is deeper than [`MAX_DEPTH`].
@@ -239,8 +258,8 @@ pub fn set_parent(
     if current.map(|link| link.parent()) == Some(parent) {
         return Ok(());
     }
-    if rule == TransformRule::KeepWorld {
-        keep_world_on_attach(world, child, parent);
+    if rule == TransformRule::KeepWorld && keep_world_on_attach(world, child, parent).is_err() {
+        return Err(HierarchyError::CantKeepWorld { child, parent });
     }
     // Keep the link's despawn policy when moving it.
     let link = ChildOf {
@@ -250,11 +269,12 @@ pub fn set_parent(
     world.insert(child, link).map_err(ecs)
 }
 
-/// Detaches `child` from its parent, making it a root. Returns the parent it had. `rule` says
+/// Detaches `child` from its parent, making it a root. Returns the parent it had, or `None` if it
+/// had none or is being despawned (its links are resolved by the despawn). `rule` says
 /// whether it keeps its local transform (and so moves to where that places it in the world) or
 /// its place in the world.
 pub fn remove_parent(world: &mut World, child: Entity, rule: TransformRule) -> Option<Entity> {
-    if !world.has::<ChildOf>(child) {
+    if !world.has::<ChildOf>(child) || world.is_despawning(child) {
         return None;
     }
     if rule == TransformRule::KeepWorld {
@@ -324,14 +344,37 @@ fn child_of_inserted(world: &mut HookWorld<'_>, context: HookContext) {
     }
     world.commands().run(move |world| {
         // Re-checked when it runs: the link may have changed since.
-        if world.get::<ChildOf>(child).map(ChildOf::parent) == Some(parent) {
-            edit_children(world, parent, |list| {
-                if !list.contains(&child) {
-                    list.push(child);
-                }
-            });
+        let Some(link) = world.get::<ChildOf>(child).copied() else {
+            return;
+        };
+        if link.parent() != parent {
+            return;
         }
+        if !world.contains(parent) || world.is_despawning(parent) {
+            // The parent went (or started going) after the link was made, so its despawn didn't
+            // see this child. Resolve the child now, as the despawn would have.
+            resolve_orphan(world, child, link);
+            return;
+        }
+        edit_children(world, parent, |list| {
+            if !list.contains(&child) {
+                list.push(child);
+            }
+        });
     });
+}
+
+/// Handles a child whose parent has gone, by its link's policy: despawn it, or detach it keeping
+/// its place in the world (as far as the parent's transform can still be read).
+fn resolve_orphan(world: &mut World, child: Entity, link: ChildOf) {
+    if world.is_despawning(child) {
+        return;
+    }
+    if link.on_parent_despawn() == OnParentDespawn::Despawn {
+        world.despawn(child);
+    } else {
+        remove_parent(world, child, TransformRule::KeepWorld);
+    }
 }
 
 fn child_of_replaced(world: &mut HookWorld<'_>, context: HookContext) {
@@ -356,6 +399,10 @@ fn edit_children(world: &mut World, parent: Entity, edit: impl FnOnce(&mut Vec<E
         .map(|c| c.list.clone())
         .unwrap_or_default();
     edit(&mut list);
+    // Drop entries whose link points elsewhere by now: several children moving away in one
+    // command leave each other in the list until their own edits run. Keeping the list true
+    // also means correct code never trips the repair in `children_inserted`.
+    list.retain(|&c| world.get::<ChildOf>(c).map(ChildOf::parent) == Some(parent));
     let unchanged = world.get::<Children>(parent).map(|c| &c.list) == Some(&list);
     if list.is_empty() {
         if world.has::<Children>(parent) {
@@ -388,6 +435,8 @@ fn children_inserted(world: &mut HookWorld<'_>, context: HookContext) {
     if consistent {
         return;
     }
+    #[cfg(test)]
+    REPAIRS.with(|repairs| repairs.set(repairs.get() + 1));
     warn!(
         ?parent,
         "a Children that doesn't match its ChildOf links was inserted; repairing it"
@@ -428,6 +477,12 @@ fn children_inserted(world: &mut HookWorld<'_>, context: HookContext) {
             );
         }
     });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many repairs ran on this thread, so tests can check correct code never needs one.
+    pub(crate) static REPAIRS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Resolves the children when `Children` goes: by each link's policy when the parent is

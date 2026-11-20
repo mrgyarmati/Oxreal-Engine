@@ -432,7 +432,13 @@ impl World {
         if queue.is_empty() {
             return;
         }
-        if !queue.promote_recorded() || self.applying {
+        // Inside a running loop, leave the commands recorded: the loop promotes everything the
+        // current command caused, in recording order, when that command returns. Promoting here
+        // would put each nested change's commands in front of the previous one's.
+        if self.applying {
+            return;
+        }
+        if !self.queue_mut().promote_recorded() {
             return;
         }
         let guard = ApplyingGuard(self);

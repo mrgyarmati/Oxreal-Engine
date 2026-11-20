@@ -90,4 +90,33 @@ fn main() {
         "propagate transforms, 111,100 entities, 4 levels",
         median(samples).as_secs_f64() * 1e3
     );
+
+    // Wide fan-out: one parent with many children. Each attach replaces the parent's immutable
+    // `Children`, so the cost grows with the number of siblings (ADR-0014 notes).
+    for wide in [1_000, 10_000] {
+        let mut world = World::new();
+        let parent = world.spawn(local(0));
+        let kids: Vec<_> = (0..wide).map(|i| world.spawn(local(i))).collect();
+        let start = Instant::now();
+        for &kid in &kids {
+            world
+                .insert(kid, ChildOf::new(parent))
+                .expect("the child is alive");
+        }
+        let attached = start.elapsed();
+        let start = Instant::now();
+        world.despawn(parent);
+        let detached = start.elapsed();
+        black_box(&world);
+        println!(
+            "{:<52} {:>10.3} ms",
+            format!("attach {wide} children to one parent, one by one"),
+            attached.as_secs_f64() * 1e3
+        );
+        println!(
+            "{:<52} {:>10.3} ms",
+            format!("despawn that parent (its {wide} children detach)"),
+            detached.as_secs_f64() * 1e3
+        );
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "oxreal-hierarchy"
-description = "Oxreal hierarchy: ordered parent/child relations kept consistent by ECS hooks, recursive despawn, and transform propagation (ADR-0005, ADR-0014)."
+description = "Oxreal hierarchy: ordered parent/child relations kept consistent by ECS hooks, a per-link despawn policy, and transform propagation (ADR-0005, ADR-0014)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

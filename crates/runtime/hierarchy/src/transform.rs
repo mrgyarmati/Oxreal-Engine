@@ -85,7 +85,9 @@ pub enum TransformRule {
     /// the new parent (or to the world, when detaching).
     ///
     /// It's computed from the local transforms up the chain, so it's exact at any point in the
-    /// frame. Non-uniform scale under rotation can't always be kept exactly: a `Transform` holds
+    /// frame. A placement with zero scale can't be expressed relative to a parent:
+    /// [`crate::set_parent`] then fails with [`crate::HierarchyError::CantKeepWorld`], and a
+    /// detach keeps the local transform instead, with a warning. Non-uniform scale under rotation can't always be kept exactly: a `Transform` holds
     /// no shear, which Unreal's `FTransform` can't either.
     KeepWorld,
 }
@@ -135,9 +137,32 @@ pub(crate) fn world_placement(world: &World, entity: Entity) -> Affine3A {
 }
 
 /// Sets `entity`'s local transform so it's placed at `placement` relative to `parent_placement`.
-fn place(world: &mut World, entity: Entity, parent_placement: Affine3A, placement: Affine3A) {
+/// A world placement can't be expressed relative to a parent, because one of the placements is
+/// singular (zero scale on some axis). Zero scale is a common way to hide something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Singular;
+
+/// Below this, a placement's 3 × 3 part counts as singular.
+const SINGULAR: f32 = 1e-12;
+
+/// Sets `entity`'s local transform so it's placed at `placement` relative to `parent_placement`.
+/// Changes nothing and returns [`Singular`] if that can't be computed.
+fn place(
+    world: &mut World,
+    entity: Entity,
+    parent_placement: Affine3A,
+    placement: Affine3A,
+) -> Result<(), Singular> {
+    if parent_placement.matrix3.determinant().abs() < SINGULAR
+        || placement.matrix3.determinant().abs() < SINGULAR
+    {
+        return Err(Singular);
+    }
     let local = parent_placement.inverse() * placement;
     let (scale, rotation, translation) = local.to_scale_rotation_translation();
+    if !(scale.is_finite() && rotation.is_finite() && translation.is_finite()) {
+        return Err(Singular);
+    }
     let transform = Transform {
         translation,
         rotation,
@@ -150,19 +175,30 @@ fn place(world: &mut World, entity: Entity, parent_placement: Affine3A, placemen
         // to stay where it is. Ignore a refusal: a despawning entity needs no transform.
         let _ = world.insert(entity, LocalTransform(transform));
     }
+    Ok(())
 }
 
 /// Before `child` is attached to `parent`: keep its place in the world.
-pub(crate) fn keep_world_on_attach(world: &mut World, child: Entity, parent: Entity) {
+pub(crate) fn keep_world_on_attach(
+    world: &mut World,
+    child: Entity,
+    parent: Entity,
+) -> Result<(), Singular> {
     let placement = world_placement(world, child);
     let parent_placement = world_placement(world, parent);
-    place(world, child, parent_placement, placement);
+    place(world, child, parent_placement, placement)
 }
 
-/// Before `child` is detached from its parent: keep its place in the world.
+/// Before `child` is detached from its parent: keep its place in the world. If its placement is
+/// singular, it keeps its local transform instead, with a warning: detaching can't fail.
 pub(crate) fn keep_world_on_detach(world: &mut World, child: Entity) {
     let placement = world_placement(world, child);
-    place(world, child, Affine3A::IDENTITY, placement);
+    if place(world, child, Affine3A::IDENTITY, placement).is_err() {
+        oxreal_diagnostics::warn!(
+            ?child,
+            "detaching without keeping the world placement: it has zero scale"
+        );
+    }
 }
 
 /// The system that computes every [`WorldTransform`] from the [`LocalTransform`]s down the
