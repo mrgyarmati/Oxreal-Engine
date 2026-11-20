@@ -345,7 +345,7 @@ separate slices.
   - Events (§8) come with the gameplay framework.
   - **The command queue lives in `Schedule` for now.** Hooks (§4) must queue commands even
     during a direct `World::spawn` outside any schedule, so the hooks slice moves the queue into
-    `World`. That's internal.
+    `World`. That's internal. *(Done in the third slice.)*
   - **Per-system profiling zones.** `Schedule::run` has a function zone and one zone per stage,
     but `profile_scope!` only takes a literal name. `oxreal-diagnostics` needs a zone with a
     run-time name before the parallel executor, so each system can show up by name.
@@ -370,3 +370,57 @@ separate slices.
   - a broken sort;
   - a read declaration that allows writes;
   - commands applied in reverse order.
+
+## Implementation notes (2026-11-20, third slice: lifecycle hooks)
+
+- **Hooks are declared on the component type**, as an associated constant with a no-hooks
+  default: `const HOOKS: ComponentHooks = ComponentHooks::NONE.on_add(..)`.
+  - A hook therefore applies in every world and can't be forgotten, which matters for
+    invariants such as relation inverses.
+  - Adding the constant to `Component` was non-breaking.
+  - A hook is a plain function pointer, `fn(&mut HookWorld, Entity)`, so the hooks of a type
+    are data the registry stores.
+- **When hooks fire** (§4). For one entity and component:
+
+  | Change | Hooks, in order |
+  |---|---|
+  | added (spawn or insert) | `on_add`, then `on_insert`, after the value is in place |
+  | replaced (insert over an existing value) | `on_replace` with the old value, then `on_insert` with the new one |
+  | removed (remove or despawn) | `on_replace`, then `on_remove`, while every component is present |
+
+  A despawn runs every component's `on_replace` before any `on_remove`.
+- **What a hook can reach:** a `HookWorld`, which reads and writes component values and
+  resources and queues commands. It can't change structure, because the hook runs in the middle
+  of a change. So the entity's location is still valid after its hooks return.
+- **Hook commands run depth-first:** right after the change that triggered them, before the
+  next command.
+  - The command queue now lives in `World`. Every structural operation ends by applying what
+    its hooks queued. A sync point applies the systems' commands one by one, and each one's
+    changes apply their own hook commands as they finish.
+  - Cascades work, for example a hook that despawns the next link of a chain.
+  - Hooks that keep queueing changes for each other would recurse without end. That's a caller
+    bug, and nothing limits it today.
+- **No cost without hooks:** each archetype and each bundle type records whether any of its
+  components has a hook, so changes that involve none skip hook handling. Measured on the same
+  machine against `main`, in the same session:
+  - spawn is unchanged (6.3 ms per 100k), after caching each bundle's spawn archetype;
+  - despawn is about 5% slower (1.30 against 1.25 ms per 100k), for the hook check and an extra
+    location lookup.
+- **`World` stays `Sync`:** the queue sits in a `Mutex` that is never locked. It's only
+  reached through `&mut World` with `Mutex::get_mut`, which costs nothing. Commands are `Send`
+  but not `Sync`, and the mutex avoids `unsafe`.
+- **Commands carry their source** (a system's name, or the component and hook), so warnings
+  name who recorded them.
+- **Tests:**
+  - hook order and the values each hook sees;
+  - despawn order;
+  - hook commands applied after direct changes and at sync points, depth-first;
+  - an invariant (a live-component count) kept through spawn, insert, replace, remove and
+    despawn;
+  - a 50-link despawn cascade.
+
+  These deliberately broken versions each fail the tests:
+  - despawn running `on_remove` before `on_replace`;
+  - replacements treated as additions;
+  - spawn not applying hook commands;
+  - a reserved spawn not applying them (breadth-first order).

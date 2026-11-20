@@ -1,12 +1,16 @@
 //! The world: every entity, component and resource of one simulation.
 
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Mutex, PoisonError};
 
 use crate::bundle::{self, Bundle};
 use crate::change::Mut;
-use crate::component::{Component, Components};
+use crate::command::{CommandQueue, Source};
+use crate::component::{Component, ComponentId, Components, HookKind};
 use crate::entity::{Entities, Entity, Location};
+use crate::hook::HookWorld;
 use crate::query::{self, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
 use crate::resource::{Resource, Resources};
 use crate::storage::{self, ArchetypeId, Archetypes};
@@ -30,6 +34,31 @@ pub struct World {
     components: Components,
     archetypes: Archetypes,
     resources: Resources,
+    /// Commands recorded by systems (applied at sync points) and by hooks (applied right after
+    /// the change that triggered them).
+    ///
+    /// The `Mutex` is never locked: the queue is only reached through `&mut self`, with
+    /// `Mutex::get_mut`, which costs nothing. It's there because commands are `Send` but not
+    /// `Sync`, and the mutex keeps `World` `Sync` without `unsafe`.
+    queue: Mutex<CommandQueue>,
+    bundles: Bundles,
+}
+
+/// What the world knows about a bundle type.
+#[derive(Debug)]
+struct BundleInfo {
+    /// Sorted component IDs.
+    ids: Box<[ComponentId]>,
+    /// Whether any of its components has a hook.
+    hooked: bool,
+    /// The archetype a new entity with exactly this bundle goes to, once known.
+    spawn_archetype: Option<ArchetypeId>,
+}
+
+#[derive(Debug, Default)]
+struct Bundles {
+    index: HashMap<TypeId, usize>,
+    list: Vec<BundleInfo>,
 }
 
 impl Default for World {
@@ -58,34 +87,54 @@ impl World {
             entities: Entities::default(),
             components,
             resources: Resources::default(),
+            queue: Mutex::new(CommandQueue::default()),
+            bundles: Bundles::default(),
         }
     }
 
-    /// Creates an entity with the components of `bundle`.
+    /// Creates an entity with the components of `bundle`. Hooks run, then the commands they
+    /// queued.
     ///
     /// # Panics
     ///
     /// If `bundle` contains a component type twice, or the world already holds 2³² entities.
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
-        let archetype = self.insert_target::<B>(ArchetypeId::EMPTY);
+        let info = self.bundle::<B>();
+        let archetype = self.insert_target::<B>(ArchetypeId::EMPTY, info);
         let table = self.archetypes.get_mut(archetype);
         let row = table.len();
         let entity = self.entities.allocate(Location { archetype, row });
         table.push_entity(entity);
         bundle.write(table, row, &self.components);
         table.debug_check_rows();
+        self.after_add(entity, info);
+        self.apply_commands();
         entity
     }
 
     /// Removes an entity and drops its components. Returns `false` if it wasn't alive.
+    ///
+    /// Every component's `on_replace` hook runs, then every `on_remove`, while the entity still
+    /// has all its components. Then it's removed, and the commands the hooks queued run.
     pub fn despawn(&mut self, entity: Entity) -> bool {
-        let Some(location) = self.entities.free(entity) else {
+        let Some(location) = self.entities.location(entity) else {
             return false;
+        };
+        let archetype = self.archetypes.get(location.archetype);
+        if archetype.hooked() {
+            let ids = archetype.components().to_vec();
+            self.run_hooks(HookKind::Replace, entity, &ids);
+            self.run_hooks(HookKind::Remove, entity, &ids);
+        }
+        // Hooks can't change structure, so the entity is still where it was.
+        let Some(location) = self.entities.free(entity) else {
+            unreachable!("{entity:?} died while its hooks ran: a bug in oxreal-ecs");
         };
         let table = self.archetypes.get_mut(location.archetype);
         if let Some(moved) = table.swap_remove(location.row) {
             self.entities.set_location(moved, location);
         }
+        self.apply_commands();
         true
     }
 
@@ -122,7 +171,20 @@ impl World {
             .entities
             .location(entity)
             .ok_or(EcsError::NoSuchEntity(entity))?;
-        let target = self.insert_target::<B>(location.archetype);
+        let info = self.bundle::<B>();
+        let target = self.insert_target::<B>(location.archetype, info);
+        // Components the entity already has are replaced: their `on_replace` hooks see the old
+        // values. Hooks can't change structure, so `location` stays valid.
+        let mut added = Vec::new();
+        if self.bundles.list[info].hooked {
+            let from = self.archetypes.get(location.archetype);
+            let (replaced, new): (Vec<ComponentId>, Vec<ComponentId>) = self.bundles.list[info]
+                .ids
+                .iter()
+                .partition(|&&id| from.contains(id));
+            added = new;
+            self.run_hooks(HookKind::Replace, entity, &replaced);
+        }
         let row = if target == location.archetype {
             location.row
         } else {
@@ -136,6 +198,12 @@ impl World {
         let table = self.archetypes.get_mut(target);
         bundle.write(table, row, &self.components);
         table.debug_check_rows();
+        if self.bundles.list[info].hooked {
+            let all = self.bundles.list[info].ids.to_vec();
+            self.run_hooks(HookKind::Add, entity, &added);
+            self.run_hooks(HookKind::Insert, entity, &all);
+        }
+        self.apply_commands();
         Ok(())
     }
 
@@ -146,6 +214,10 @@ impl World {
         let id = self.components.id::<T>()?;
         if !self.archetypes.get(location.archetype).contains(id) {
             return None;
+        }
+        if self.components.hooks(id).any() {
+            self.run_hooks(HookKind::Replace, entity, &[id]);
+            self.run_hooks(HookKind::Remove, entity, &[id]);
         }
         let target = self
             .archetypes
@@ -160,6 +232,7 @@ impl World {
             }
         });
         self.relocate(entity, location, target, row, moved);
+        self.apply_commands();
         taken
     }
 
@@ -283,7 +356,8 @@ impl World {
     /// Spawns `bundle` as `entity`, a handle reserved by [`crate::Commands::spawn`]. Returns
     /// `false`, dropping the bundle, if the handle isn't a reserved, unspawned one.
     pub(crate) fn spawn_reserved<B: Bundle>(&mut self, entity: Entity, bundle: B) -> bool {
-        let archetype = self.insert_target::<B>(ArchetypeId::EMPTY);
+        let info = self.bundle::<B>();
+        let archetype = self.insert_target::<B>(ArchetypeId::EMPTY, info);
         let row = self.archetypes.get(archetype).len();
         if !self
             .entities
@@ -295,38 +369,123 @@ impl World {
         table.push_entity(entity);
         bundle.write(table, row, &self.components);
         table.debug_check_rows();
+        self.after_add(entity, info);
+        self.apply_commands();
         true
     }
 
-    /// Turns handles reserved by commands into reserved slots, before the commands are applied.
-    pub(crate) fn flush_reservations(&mut self) {
+    /// Applies queued commands in order: those systems recorded (at a sync point), or those
+    /// hooks queued during the structural change that just finished.
+    ///
+    /// Each command's own structural changes apply the commands their hooks queue before the
+    /// next command runs, so hook commands follow the change that caused them.
+    pub(crate) fn apply_commands(&mut self) {
+        if self.queue_mut().is_empty() {
+            return;
+        }
         self.entities.flush();
+        for (source, command) in self.queue_mut().take() {
+            command(self, &source);
+        }
     }
 
-    /// The parts a system may touch while it runs: component storage (mutably, for queries),
-    /// the registry and entities (read-only: structure changes only at sync points), and
-    /// resources.
-    pub(crate) fn split(&mut self) -> (&mut Archetypes, &Components, &Entities, &mut Resources) {
+    /// Discards queued commands without applying them, after a panic interrupted a stage.
+    pub(crate) fn discard_commands(&mut self) -> bool {
+        let queue = self.queue_mut();
+        let had = !queue.is_empty();
+        queue.clear();
+        had
+    }
+
+    /// The parts a system or hook may touch while it runs: component storage (mutably, for
+    /// queries), the registry and entities (read-only: structure doesn't change while it runs),
+    /// resources, and the command queue.
+    pub(crate) fn split(
+        &mut self,
+    ) -> (
+        &mut Archetypes,
+        &Components,
+        &Entities,
+        &mut Resources,
+        &mut CommandQueue,
+    ) {
         (
             &mut self.archetypes,
             &self.components,
             &self.entities,
             &mut self.resources,
+            self.queue.get_mut().unwrap_or_else(PoisonError::into_inner),
         )
     }
 
-    /// Where an entity in `from` goes when bundle `B` is inserted, using the cached edge when
-    /// there is one.
-    fn insert_target<B: Bundle>(&mut self, from: ArchetypeId) -> ArchetypeId {
+    /// The command queue. Never poisoned, because it's never locked.
+    fn queue_mut(&mut self) -> &mut CommandQueue {
+        self.queue.get_mut().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The index of bundle type `B`'s information, registered on first use.
+    fn bundle<B: Bundle>(&mut self) -> usize {
+        if let Some(&index) = self.bundles.index.get(&TypeId::of::<B>()) {
+            return index;
+        }
+        let ids = bundle::component_ids::<B>(&mut self.components);
+        let hooked = ids.iter().any(|&id| self.components.hooks(id).any());
+        let index = self.bundles.list.len();
+        self.bundles.list.push(BundleInfo {
+            ids: ids.into(),
+            hooked,
+            spawn_archetype: None,
+        });
+        self.bundles.index.insert(TypeId::of::<B>(), index);
+        index
+    }
+
+    /// Where an entity in `from` goes when bundle `B` (registered as `info`) is inserted, using
+    /// the cached edge when there is one.
+    fn insert_target<B: Bundle>(&mut self, from: ArchetypeId, info: usize) -> ArchetypeId {
+        if from == ArchetypeId::EMPTY
+            && let Some(archetype) = self.bundles.list[info].spawn_archetype
+        {
+            return archetype;
+        }
         if let Some(to) = self
             .archetypes
             .cached_insert_target(from, TypeId::of::<B>())
         {
             return to;
         }
-        let ids = bundle::component_ids::<B>(&mut self.components);
-        self.archetypes
-            .insert_target(from, TypeId::of::<B>(), &ids, &self.components)
+        let to = self.archetypes.insert_target(
+            from,
+            TypeId::of::<B>(),
+            &self.bundles.list[info].ids,
+            &self.components,
+        );
+        if from == ArchetypeId::EMPTY {
+            self.bundles.list[info].spawn_archetype = Some(to);
+        }
+        to
+    }
+
+    /// Runs `on_add` and `on_insert` for every component of a newly spawned entity.
+    fn after_add(&mut self, entity: Entity, info: usize) {
+        if self.bundles.list[info].hooked {
+            let ids = self.bundles.list[info].ids.to_vec();
+            self.run_hooks(HookKind::Add, entity, &ids);
+            self.run_hooks(HookKind::Insert, entity, &ids);
+        }
+    }
+
+    /// Runs hook `kind` of each component in `ids` that has one, in order.
+    fn run_hooks(&mut self, kind: HookKind, entity: Entity, ids: &[ComponentId]) {
+        for &id in ids {
+            if let Some(hook) = self.components.hooks(id).get(kind) {
+                let source = Source::Hook {
+                    component: self.components.name(id),
+                    hook: kind.name(),
+                };
+                hook(&mut HookWorld::new(self.split(), source), entity);
+            }
+        }
     }
 
     /// Records the locations after `entity` moved from `old` to row `row` of `archetype`, with

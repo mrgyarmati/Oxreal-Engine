@@ -105,6 +105,8 @@ pub struct Archetype {
     entities: Vec<Entity>,
     /// Where inserting a bundle of a given type leads, filled in as it's used.
     insert_edges: HashMap<TypeId, ArchetypeId>,
+    /// Whether any of its components has a lifecycle hook, so changes without hooks skip them.
+    hooked: bool,
     /// Where removing a component leads, filled in as it's used.
     remove_edges: HashMap<ComponentId, ArchetypeId>,
 }
@@ -125,6 +127,7 @@ impl Archetype {
         for id in &components {
             membership[id.index() / 64] |= 1 << (id.index() % 64);
         }
+        let hooked = components.iter().any(|&id| registry.hooks(id).any());
         Self {
             columns: components
                 .iter()
@@ -134,8 +137,19 @@ impl Archetype {
             membership,
             entities: Vec::new(),
             insert_edges: HashMap::new(),
+            hooked,
             remove_edges: HashMap::new(),
         }
+    }
+
+    /// The component types, sorted.
+    pub(crate) fn components(&self) -> &[ComponentId] {
+        &self.components
+    }
+
+    /// Whether any component type here has a lifecycle hook.
+    pub(crate) fn hooked(&self) -> bool {
+        self.hooked
     }
 
     /// Whether this archetype's entities have component `id`. Constant time.

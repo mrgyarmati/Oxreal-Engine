@@ -1,6 +1,7 @@
 //! Deferred structural changes (ADR-0014 §5).
 
 use std::fmt;
+use std::sync::Arc;
 
 use oxreal_diagnostics::warn;
 
@@ -9,14 +10,35 @@ use crate::component::Component;
 use crate::entity::{Entities, Entity};
 use crate::world::World;
 
-/// A recorded change, applied at a sync point. The `&str` is the name of the system that
-/// recorded it, for diagnostics.
-type Command = Box<dyn FnOnce(&mut World, &str) + Send>;
+/// Who recorded a command, for diagnostics.
+#[derive(Debug, Clone)]
+pub(crate) enum Source {
+    /// A system, by name.
+    System(Arc<str>),
+    /// A component's lifecycle hook.
+    Hook {
+        component: &'static str,
+        hook: &'static str,
+    },
+}
 
-/// Commands recorded during a stage, in order, with the index of the system that recorded each.
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Source::System(name) => write!(f, "system `{name}`"),
+            Source::Hook { component, hook } => write!(f, "the {hook} hook of {component}"),
+        }
+    }
+}
+
+/// A recorded change, applied later with the source that recorded it.
+type Command = Box<dyn FnOnce(&mut World, &Source) + Send>;
+
+/// Recorded commands, in order. The world owns one: systems fill it during a stage, and hooks
+/// during a structural change.
 #[derive(Default)]
 pub(crate) struct CommandQueue {
-    commands: Vec<(usize, Command)>,
+    commands: Vec<(Source, Command)>,
 }
 
 impl fmt::Debug for CommandQueue {
@@ -28,17 +50,13 @@ impl fmt::Debug for CommandQueue {
 }
 
 impl CommandQueue {
-    /// Applies every command in recording order, then empties the queue. `name` gives the name
-    /// of the system with a given index.
-    pub(crate) fn apply<'n>(&mut self, world: &mut World, name: impl Fn(usize) -> &'n str) {
-        world.flush_reservations();
-        for (system, command) in self.commands.drain(..) {
-            command(world, name(system));
-        }
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.commands.is_empty()
+    }
+
+    /// Takes every queued command out, leaving the queue empty.
+    pub(crate) fn take(&mut self) -> Vec<(Source, Command)> {
+        std::mem::take(&mut self.commands)
     }
 
     /// Discards every command without applying it.
@@ -79,7 +97,7 @@ impl CommandQueue {
 pub struct Commands<'a> {
     entities: &'a Entities,
     queue: &'a mut CommandQueue,
-    system: usize,
+    source: Source,
 }
 
 impl fmt::Debug for Commands<'_> {
@@ -91,16 +109,18 @@ impl fmt::Debug for Commands<'_> {
 }
 
 impl<'a> Commands<'a> {
-    pub(crate) fn new(entities: &'a Entities, queue: &'a mut CommandQueue, system: usize) -> Self {
+    pub(crate) fn new(entities: &'a Entities, queue: &'a mut CommandQueue, source: Source) -> Self {
         Self {
             entities,
             queue,
-            system,
+            source,
         }
     }
 
-    fn push(&mut self, command: impl FnOnce(&mut World, &str) + Send + 'static) {
-        self.queue.commands.push((self.system, Box::new(command)));
+    fn push(&mut self, command: impl FnOnce(&mut World, &Source) + Send + 'static) {
+        self.queue
+            .commands
+            .push((self.source.clone(), Box::new(command)));
     }
 
     /// Spawns an entity with `bundle` at the sync point. The handle is valid **now**: it can be
@@ -113,11 +133,10 @@ impl<'a> Commands<'a> {
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         bundle::check_duplicates::<B>();
         let entity = self.entities.reserve();
-        self.push(move |world, system| {
+        self.push(move |world, source| {
             if !world.spawn_reserved(entity, bundle) {
                 unreachable!(
-                    "{entity:?}, reserved by system `{system}`, couldn't be spawned: a bug in \
-                     oxreal-ecs"
+                    "{entity:?}, reserved by {source}, couldn't be spawned: a bug in oxreal-ecs"
                 );
             }
         });
@@ -132,17 +151,18 @@ impl<'a> Commands<'a> {
     }
 
     /// Adds `bundle` to `entity` at the sync point, replacing components it already has. If the
-    /// entity is gone by then, the bundle is dropped and a warning names the system.
+    /// entity is gone by then, the bundle is dropped and a warning names the system or hook that
+    /// recorded it.
     ///
     /// # Panics
     ///
     /// If `bundle` contains a component type twice.
     pub fn insert<B: Bundle>(&mut self, entity: Entity, bundle: B) {
         bundle::check_duplicates::<B>();
-        self.push(move |world, system| {
+        self.push(move |world, source| {
             if let Err(error) = world.insert(entity, bundle) {
                 warn!(
-                    system,
+                    source = %source,
                     %error,
                     bundle = std::any::type_name::<B>(),
                     "a command's insert was dropped"

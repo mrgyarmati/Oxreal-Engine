@@ -4,11 +4,12 @@ use std::any::{TypeId, type_name};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 use oxreal_diagnostics::warn;
 
 use crate::change::Mut;
-use crate::command::{CommandQueue, Commands};
+use crate::command::{Commands, Source};
 use crate::component::{Component, Components};
 use crate::entity::{Entities, Entity};
 use crate::query::{self, AccessKind, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
@@ -153,7 +154,7 @@ type Run = Box<dyn FnMut(&mut SystemContext<'_>) + Send>;
 /// # let _ = movement;
 /// ```
 pub struct System {
-    name: String,
+    name: Arc<str>,
     run: Run,
     declared: Declared,
     after: Vec<String>,
@@ -179,7 +180,7 @@ impl System {
         run: impl FnMut(&mut SystemContext<'_>) + Send + 'static,
     ) -> Self {
         Self {
-            name: name.into(),
+            name: Arc::from(name.into()),
             run: Box::new(run),
             declared: Declared::default(),
             after: Vec::new(),
@@ -474,7 +475,6 @@ pub struct Schedule {
     stages: [Vec<System>; STAGE_COUNT],
     /// Per stage, indices into `stages` in run order. `None` until validated.
     order: Option<[Vec<usize>; STAGE_COUNT]>,
-    queue: CommandQueue,
 }
 
 impl Schedule {
@@ -514,7 +514,7 @@ impl Schedule {
         Ok(self.order.as_ref().map_or_else(Vec::new, |order| {
             order[stage.index()]
                 .iter()
-                .map(|&i| systems[i].name.as_str())
+                .map(|&i| &*systems[i].name)
                 .collect()
         }))
     }
@@ -544,11 +544,12 @@ impl Schedule {
         let Some(order) = &self.order else {
             return Ok(());
         };
-        debug_assert!(
-            self.queue.is_empty(),
-            "commands left over from a previous run"
-        );
-        let queue = DiscardOnPanic(&mut self.queue);
+        // Commands left in the world (only possible if a panic interrupted a direct world
+        // operation) would otherwise be applied at the first sync point, out of context.
+        if world.discard_commands() {
+            warn!("discarding commands left over from an interrupted world operation");
+        }
+        let world = DiscardOnPanic(world);
         for &stage in Stage::ALL {
             oxreal_diagnostics::profile_scope!("ecs stage");
             let systems = &mut self.stages[stage.index()];
@@ -559,7 +560,7 @@ impl Schedule {
                     declared,
                     ..
                 } = &mut systems[index];
-                let (archetypes, components, entities, resources) = world.split();
+                let (archetypes, components, entities, resources, queue) = world.0.split();
                 let mut ctx = SystemContext {
                     world: SystemWorld {
                         archetypes,
@@ -573,25 +574,25 @@ impl Schedule {
                         declared,
                         system: name,
                     },
-                    commands: Commands::new(entities, &mut *queue.0, index),
+                    commands: Commands::new(entities, queue, Source::System(name.clone())),
                 };
                 run(&mut ctx);
             }
-            queue.0.apply(world, |index| systems[index].name.as_str());
+            // The sync point.
+            world.0.apply_commands();
         }
         Ok(())
     }
 }
 
-/// Empties the command queue if a panic unwinds through [`Schedule::run`], so an abandoned
-/// stage's commands are never applied later.
-struct DiscardOnPanic<'a>(&'a mut CommandQueue);
+/// Empties the world's command queue if a panic unwinds through [`Schedule::run`], so an
+/// abandoned stage's commands are never applied later.
+struct DiscardOnPanic<'a>(&'a mut World);
 
 impl Drop for DiscardOnPanic<'_> {
     fn drop(&mut self) {
-        if std::thread::panicking() && !self.0.is_empty() {
+        if std::thread::panicking() && self.0.discard_commands() {
             warn!("a panic interrupted a stage; discarding its commands");
-            self.0.clear();
         }
     }
 }
@@ -603,12 +604,9 @@ fn compute_order(
     let mut where_is: HashMap<&str, (Stage, usize)> = HashMap::new();
     for &stage in Stage::ALL {
         for (index, system) in stages[stage.index()].iter().enumerate() {
-            if where_is
-                .insert(system.name.as_str(), (stage, index))
-                .is_some()
-            {
+            if where_is.insert(&*system.name, (stage, index)).is_some() {
                 return Err(ScheduleError::DuplicateName {
-                    name: system.name.clone(),
+                    name: system.name.to_string(),
                 });
             }
         }
@@ -629,13 +627,13 @@ fn order_stage(
     let resolve = |system: &System, other: &str| match where_is.get(other) {
         Some(&(other_stage, index)) if other_stage == stage => Ok(index),
         Some(&(other_stage, _)) => Err(ScheduleError::AcrossStages {
-            system: system.name.clone(),
+            system: system.name.to_string(),
             stage,
             other: other.to_owned(),
             other_stage,
         }),
         None => Err(ScheduleError::UnknownSystem {
-            system: system.name.clone(),
+            system: system.name.to_string(),
             other: other.to_owned(),
         }),
     };
@@ -687,7 +685,7 @@ fn order_stage(
             let mut cycle: Vec<String> = path[position..]
                 .iter()
                 .rev()
-                .map(|&i| systems[i].name.clone())
+                .map(|&i| systems[i].name.to_string())
                 .collect();
             cycle.push(cycle[0].clone());
             return Err(ScheduleError::Cycle { stage, cycle });

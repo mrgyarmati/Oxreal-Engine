@@ -56,7 +56,15 @@
 //! [`Commands`] (`ctx.commands`): structural changes recorded now and applied at the end of the
 //! stage, in order. See [`Commands`] for an example.
 //!
-//! Relations and hooks come next, then change detection and dynamic (reflection-driven) queries.
+//! # Lifecycle hooks
+//!
+//! A component type can declare [hooks](ComponentHooks) that run when a component is added,
+//! inserted, replaced or removed, to keep engine invariants such as relation inverses. Hooks
+//! read and write data through a [`HookWorld`] and queue commands, which run right after the
+//! change that triggered them.
+//!
+//! Relations (`ChildOf` and `Children`) come next, built on hooks. Change detection and dynamic
+//! (reflection-driven) queries follow.
 //!
 //! [ADR-0014]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0014-ecs-architecture-and-storage.md
 
@@ -67,6 +75,7 @@ mod change;
 mod command;
 mod component;
 mod entity;
+mod hook;
 mod query;
 mod resource;
 mod schedule;
@@ -76,8 +85,9 @@ mod world;
 pub use bundle::Bundle;
 pub use change::Mut;
 pub use command::Commands;
-pub use component::Component;
+pub use component::{Component, ComponentHooks, Hook};
 pub use entity::Entity;
+pub use hook::HookWorld;
 pub use query::{QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With, Without};
 pub use resource::Resource;
 pub use schedule::{
@@ -90,3 +100,6 @@ mod tests;
 
 #[cfg(test)]
 mod schedule_tests;
+
+#[cfg(test)]
+mod hook_tests;
