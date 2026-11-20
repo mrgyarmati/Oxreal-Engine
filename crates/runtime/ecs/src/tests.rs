@@ -271,7 +271,7 @@ fn resources_are_typed_singletons() {
     assert_eq!(world.resource::<Gravity>(), None);
     assert_eq!(world.insert_resource(Gravity(9.8)), None);
     assert_eq!(world.insert_resource(Gravity(1.6)), Some(Gravity(9.8)));
-    if let Some(gravity) = world.resource_mut::<Gravity>() {
+    if let Some(mut gravity) = world.resource_mut::<Gravity>() {
         gravity.0 *= 2.0;
     }
     assert_eq!(world.resource::<Gravity>(), Some(&Gravity(3.2)));

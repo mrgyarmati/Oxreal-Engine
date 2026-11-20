@@ -15,6 +15,10 @@
 //! 2. Read the state while running the frame.
 //! 3. Call [`InputState::end_frame`] once the frame has read its input.
 //!
+//! In an ECS application `InputState` is a resource. The application feeds it events between
+//! frames and calls `end_frame` after `Schedule::run`, as the `cube` example does. When input
+//! contexts arrive (ADR-0018 §3), routing and the frame-edge reset move into the `Input` stage.
+//!
 //! ```
 //! use oxreal_input::{ButtonState, InputState, KeyCode, KeyEvent};
 //! use oxreal_window::WindowEvent;
@@ -56,6 +60,9 @@ pub use oxreal_window::{ButtonState, KeyCode, KeyEvent, MouseButton, ScrollDelta
 
 /// The input of the current frame, built from events (ADR-0018 §2). See the
 /// [crate documentation](crate) for how to drive it.
+///
+/// It's an ECS [`Resource`](oxreal_ecs::Resource): systems declare
+/// `.reads_resource::<InputState>()` and read it from `ctx.resources` (ADR-0014 §8).
 #[derive(Debug, Clone, Default)]
 pub struct InputState {
     keys: Buttons<KeyCode>,
@@ -65,6 +72,8 @@ pub struct InputState {
     scroll_pixels: DVec2,
     cursor: Option<DVec2>,
 }
+
+impl oxreal_ecs::Resource for InputState {}
 
 impl InputState {
     /// No keys or buttons held, no motion, and no cursor position.

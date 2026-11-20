@@ -47,8 +47,16 @@
 //! - Programming errors panic with a message that names the type involved. Conditions that
 //!   depend on runtime state, such as a stale handle, return errors or `None` (ADR-0010).
 //!
-//! This is the first slice of ADR-0014. Deferred commands and schedule stages come next, then
-//! relations and hooks, then change detection and dynamic (reflection-driven) queries.
+//! # Systems and schedules
+//!
+//! Frame logic runs as [`System`]s in a [`Schedule`], stage by stage ([`Stage`]: input, then
+//! Unreal's tick groups, then extraction). A system **declares** the components and resources it
+//! reads and writes, and touching anything else panics, naming the missing declaration. Inside a
+//! system, [`SystemContext`] offers queries (`ctx.world`), resources (`ctx.resources`) and
+//! [`Commands`] (`ctx.commands`): structural changes recorded now and applied at the end of the
+//! stage, in order. See [`Commands`] for an example.
+//!
+//! Relations and hooks come next, then change detection and dynamic (reflection-driven) queries.
 //!
 //! [ADR-0014]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0014-ecs-architecture-and-storage.md
 
@@ -56,20 +64,29 @@
 
 mod bundle;
 mod change;
+mod command;
 mod component;
 mod entity;
 mod query;
 mod resource;
+mod schedule;
 mod storage;
 mod world;
 
 pub use bundle::Bundle;
 pub use change::Mut;
+pub use command::Commands;
 pub use component::Component;
 pub use entity::Entity;
 pub use query::{QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With, Without};
 pub use resource::Resource;
+pub use schedule::{
+    Schedule, ScheduleError, Stage, System, SystemContext, SystemResources, SystemWorld,
+};
 pub use world::{EcsError, World};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod schedule_tests;

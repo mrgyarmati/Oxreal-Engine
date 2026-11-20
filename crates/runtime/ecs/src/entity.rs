@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::storage::ArchetypeId;
 
@@ -75,45 +76,107 @@ struct Slot {
     generation: NonZeroU32,
     /// `Some` while the entity with this generation is alive.
     location: Option<Location>,
+    /// Handed out by [`Entities::reserve`] and not spawned yet.
+    reserved: bool,
 }
 
 /// Allocates entity handles and records where each live entity is stored.
+///
+/// Handles can also be **reserved** through a shared reference ([`Entities::reserve`]), which
+/// is how commands return a real handle for an entity they'll spawn later. Reservations take
+/// indices from the end of the free list, then fresh indices past the end, by moving an atomic
+/// cursor. The free list itself only changes through `&mut self`, after
+/// [`Entities::flush`] has turned the reservations into reserved slots.
 #[derive(Debug, Default)]
 pub(crate) struct Entities {
     slots: Vec<Slot>,
     /// Indices of dead slots ready for reuse, already at their next generation.
     free: Vec<u32>,
+    /// `free.len()` minus the reservations since the last flush. Below zero, reservations have
+    /// used the whole free list and continue with fresh indices.
+    cursor: AtomicI64,
     live: usize,
 }
 
 impl Entities {
-    /// A new handle. Its location must be set with [`Entities::set_location`] before it's used.
+    /// A new live handle, stored at `location`.
     ///
     /// # Panics
     ///
     /// When all 2³² indices are in use or retired: a world can't hold more entities.
     pub(crate) fn allocate(&mut self, location: Location) -> Entity {
+        self.flush();
         let index = match self.free.pop() {
             Some(index) => index,
-            None => {
-                let Ok(index) = u32::try_from(self.slots.len()) else {
-                    panic!("entity limit reached: a world holds at most 2^32 entities");
-                };
-                self.slots.push(Slot {
-                    generation: NonZeroU32::MIN,
-                    location: None,
-                });
-                index
-            }
+            None => self.push_slot(false),
         };
+        self.sync_cursor();
         let slot = &mut self.slots[index as usize];
         slot.location = Some(location);
         self.live += 1;
         Entity::new(index, slot.generation)
     }
 
+    /// Reserves a handle for an entity that [`Entities::place_reserved`] will make live later.
+    /// Until then, looking the handle up fails.
+    ///
+    /// # Panics
+    ///
+    /// When all 2³² indices are in use or retired.
+    pub(crate) fn reserve(&self) -> Entity {
+        let before = self.cursor.fetch_sub(1, Ordering::Relaxed);
+        if before > 0 {
+            // `before` is at most `free.len()`, which fits in usize.
+            let index = self.free[(before - 1) as usize];
+            return Entity::new(index, self.slots[index as usize].generation);
+        }
+        // `before` is 0, -1, -2, ...: the 1st, 2nd, 3rd fresh index past the end.
+        let fresh = self.slots.len() as u64 + before.unsigned_abs();
+        let Ok(index) = u32::try_from(fresh) else {
+            // Undo this reservation, so a later flush doesn't try to create the slot.
+            self.cursor.fetch_add(1, Ordering::Relaxed);
+            panic!("entity limit reached: a world holds at most 2^32 entities");
+        };
+        Entity::new(index, NonZeroU32::MIN)
+    }
+
+    /// Turns the reservations made since the last flush into reserved slots.
+    pub(crate) fn flush(&mut self) {
+        let cursor = *self.cursor.get_mut();
+        if cursor >= 0 {
+            // `cursor` is at most `free.len()`.
+            for index in self.free.drain(cursor as usize..) {
+                self.slots[index as usize].reserved = true;
+            }
+        } else {
+            for index in self.free.drain(..) {
+                self.slots[index as usize].reserved = true;
+            }
+            for _ in 0..cursor.unsigned_abs() {
+                self.push_slot(true);
+            }
+        }
+        self.sync_cursor();
+    }
+
+    /// Makes a reserved handle live at `location`. Returns `false` if `entity` isn't a reserved,
+    /// unspawned handle.
+    pub(crate) fn place_reserved(&mut self, entity: Entity, location: Location) -> bool {
+        self.flush();
+        match self.slot_mut(entity) {
+            Some(slot) if slot.reserved => {
+                slot.reserved = false;
+                slot.location = Some(location);
+                self.live += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Frees a live entity's slot and returns where it was stored. `None` if `entity` isn't alive.
     pub(crate) fn free(&mut self, entity: Entity) -> Option<Location> {
+        self.flush();
         let slot = self.slots.get_mut(entity.index() as usize)?;
         if slot.generation.get() != entity.generation() {
             return None;
@@ -125,12 +188,13 @@ impl Entities {
             slot.generation = next;
             self.free.push(entity.index());
         }
+        self.sync_cursor();
         self.live -= 1;
         Some(location)
     }
 
-    /// Where a live entity is stored. `None` for despawned handles. A handle from another world
-    /// isn't detected: it may name an unrelated entity here.
+    /// Where a live entity is stored. `None` for despawned and reserved-but-unspawned handles.
+    /// A handle from another world isn't detected: it may name an unrelated entity here.
     pub(crate) fn location(&self, entity: Entity) -> Option<Location> {
         let slot = self.slots.get(entity.index() as usize)?;
         if slot.generation.get() == entity.generation() {
@@ -154,6 +218,23 @@ impl Entities {
     /// How many entities are alive.
     pub(crate) fn len(&self) -> usize {
         self.live
+    }
+
+    fn push_slot(&mut self, reserved: bool) -> u32 {
+        let Ok(index) = u32::try_from(self.slots.len()) else {
+            panic!("entity limit reached: a world holds at most 2^32 entities");
+        };
+        self.slots.push(Slot {
+            generation: NonZeroU32::MIN,
+            location: None,
+            reserved,
+        });
+        index
+    }
+
+    fn sync_cursor(&mut self) {
+        // A Vec's length is at most isize::MAX, which fits in i64.
+        *self.cursor.get_mut() = self.free.len() as i64;
     }
 
     fn slot_mut(&mut self, entity: Entity) -> Option<&mut Slot> {
@@ -217,6 +298,54 @@ mod tests {
         );
         assert!(entities.location(b).is_some());
         assert_eq!(entities.len(), 1);
+    }
+
+    #[test]
+    fn reservations_take_free_slots_from_the_end_then_fresh_ones() {
+        let mut entities = Entities::default();
+        let all: Vec<Entity> = (0..4).map(|_| entities.allocate(here())).collect();
+        entities.free(all[1]);
+        entities.free(all[3]);
+        // The free list is [1, 3]: reservations take 3, then 1, then fresh 4 and 5.
+        let reserved: Vec<Entity> = (0..4).map(|_| entities.reserve()).collect();
+        let indices: Vec<u32> = reserved.iter().map(|e| e.index()).collect();
+        assert_eq!(indices, [3, 1, 4, 5]);
+        assert_eq!(
+            reserved[0].generation(),
+            2,
+            "a reused slot has its next generation"
+        );
+        assert_eq!(reserved[2].generation(), 1);
+        assert!(
+            reserved.iter().all(|&e| entities.location(e).is_none()),
+            "not alive yet"
+        );
+
+        for &entity in &reserved {
+            assert!(entities.place_reserved(entity, here()));
+        }
+        assert!(!entities.place_reserved(reserved[0], here()), "only once");
+        assert_eq!(entities.len(), 6);
+        // Nothing is left to reuse: the next allocation is fresh.
+        assert_eq!(entities.allocate(here()).index(), 6);
+    }
+
+    #[test]
+    fn a_reservation_within_the_free_list_leaves_the_rest_reusable() {
+        let mut entities = Entities::default();
+        let all: Vec<Entity> = (0..3).map(|_| entities.allocate(here())).collect();
+        for &entity in &all {
+            entities.free(entity);
+        }
+        let reserved = entities.reserve();
+        assert_eq!(reserved.index(), 2);
+        entities.flush();
+        // Indices 0 and 1 are still free; 2 is reserved and not handed out again.
+        let a = entities.allocate(here());
+        let b = entities.allocate(here());
+        assert_eq!([a.index(), b.index()], [1, 0]);
+        assert_eq!(entities.allocate(here()).index(), 3);
+        assert!(entities.place_reserved(reserved, here()));
     }
 
     #[test]

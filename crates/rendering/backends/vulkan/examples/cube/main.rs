@@ -29,9 +29,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oxreal_diagnostics::{info, warn};
+use oxreal_ecs::{Schedule, World};
 use oxreal_input::InputState;
 use oxreal_math::projection::{REVERSED_DEPTH_CLEAR, perspective_infinite_reversed, view_matrix};
-use oxreal_math::{LinearRgba, Mat4, Quat, Transform, Vec3};
+use oxreal_math::{LinearRgba, Mat4, Transform, Vec3};
 use oxreal_rhi::{
     AddressMode, BufferDesc, BufferHandle, BufferUsage, ColorAttachment, CullMode, DepthAttachment,
     DepthLoadOp, DepthState, Device as _, DeviceDesc, Filter, Frame, IndexFormat, LoadOp,
@@ -46,7 +47,9 @@ use oxreal_window::{
 };
 
 mod fly_camera;
+mod scene;
 use fly_camera::{FlyCamera, LOOK_BUTTON};
+use scene::{DrawList, FrameTime};
 
 /// Checkerboard size in texels, and squares per side.
 const BOARD_TEXELS: u32 = 64;
@@ -100,13 +103,13 @@ struct CubeApp {
     depth: Option<DepthBuffer>,
     window: Option<Arc<Window>>,
     surface: Option<SurfaceHandle>,
-    /// This frame's input, collected from window and device events.
-    input: InputState,
-    camera: FlyCamera,
+    /// The scene: entities, the frame's input and time, and the extracted draw list
+    /// (`scene.rs`).
+    world: World,
+    /// The scene's systems, run once per frame.
+    schedule: Schedule,
     /// Whether the cursor is captured for looking around.
     cursor_captured: bool,
-    /// Where the floor tiles and pillars stand. The spinning cube is drawn separately.
-    scenery: Vec<Transform>,
     frames: u64,
     started: Instant,
     /// When the camera last moved, to scale its movement by the frame's duration.
@@ -195,32 +198,45 @@ impl CubeApp {
         Ok(texture)
     }
 
-    /// Applies this frame's input: moves the camera, captures the cursor while the look button
-    /// is held, then ends the input frame.
-    fn update_input(&mut self) {
+    /// Runs one frame of the scene: records the frame time, runs the schedule (gameplay, then
+    /// extraction into the draw list), captures the cursor while the look button is held, and
+    /// ends the input frame.
+    fn update(&mut self) -> Result<(), String> {
         let now = Instant::now();
         let seconds = (now - self.last_update)
             .as_secs_f32()
             .min(MAX_FRAME_SECONDS);
         self.last_update = now;
-        self.camera.update(&self.input, seconds);
+        self.world.insert_resource(FrameTime(seconds));
+        self.schedule
+            .run(&mut self.world)
+            .map_err(|e| e.to_string())?;
 
+        let Some(input) = self.world.resource::<InputState>() else {
+            return Err("the InputState resource is missing".to_owned());
+        };
         // Only while the button is still down: a press and a release (or focus loss) in the same
         // frame must not leave a capture behind.
-        if self.input.mouse_just_pressed(LOOK_BUTTON) && self.input.mouse_held(LOOK_BUTTON) {
+        let capture = input.mouse_just_pressed(LOOK_BUTTON) && input.mouse_held(LOOK_BUTTON);
+        // Also true when focus was lost while the button was held (ADR-0018 §2).
+        let release = input.mouse_just_released(LOOK_BUTTON);
+        let speed_changed = input.scroll_lines().y != 0.0 && input.mouse_held(LOOK_BUTTON);
+        if capture {
             self.set_cursor_captured(true);
         }
-        // Also true when focus was lost while the button was held (ADR-0018 §2).
-        if self.input.mouse_just_released(LOOK_BUTTON) {
+        if release {
             self.set_cursor_captured(false);
         }
-        if self.input.scroll_lines().y != 0.0 && self.input.mouse_held(LOOK_BUTTON) {
+        if speed_changed && let Some(camera) = self.world.query::<&FlyCamera>().next() {
             info!(
-                metres_per_second = format_args!("{:.2}", self.camera.speed()),
+                metres_per_second = format_args!("{:.2}", camera.speed()),
                 "camera speed"
             );
         }
-        self.input.end_frame();
+        if let Some(mut input) = self.world.resource_mut::<InputState>() {
+            input.end_frame();
+        }
+        Ok(())
     }
 
     /// Captures or releases the cursor. Failing to capture isn't fatal: mouse-look uses raw
@@ -249,27 +265,19 @@ impl CubeApp {
         }
     }
 
-    /// World space to clip space, through the fly camera.
-    fn clip_from_world(&self, size: (u32, u32)) -> Result<Mat4, String> {
+    /// World space to clip space, through the camera in the draw list.
+    fn clip_from_world(camera: &Transform, size: (u32, u32)) -> Result<Mat4, String> {
         // Sizes are far below 2^24, where f32 would lose precision.
         let aspect = size.0 as f32 / size.1 as f32;
         let projection =
             perspective_infinite_reversed(FIELD_OF_VIEW_DEGREES.to_radians(), aspect, NEAR)
                 .map_err(|e| e.to_string())?;
-        Ok(projection * view_matrix(&self.camera.transform()))
+        Ok(projection * view_matrix(camera))
     }
 
-    /// The spinning cube at the origin, turning about two axes.
-    fn spinning_cube(&self) -> Transform {
-        let seconds = self.started.elapsed().as_secs_f32();
-        Transform::from_rotation(
-            Quat::from_rotation_y(seconds * 0.7) * Quat::from_rotation_x(seconds * 0.45),
-        )
-    }
-
-    /// Push constants for drawing the mesh with `model`.
-    fn constants(&self, clip_from_world: Mat4, model: &Transform) -> [u8; CONSTANT_BYTES] {
-        let clip_from_object = clip_from_world * model.to_matrix();
+    /// Push constants for drawing the mesh with object-to-world matrix `model`.
+    fn constants(&self, clip_from_world: Mat4, model: &Mat4) -> [u8; CONSTANT_BYTES] {
+        let clip_from_object = clip_from_world * *model;
         let mut bytes = [0; CONSTANT_BYTES];
         let (words, _) = bytes.as_chunks_mut::<4>();
         for (chunk, value) in words.iter_mut().zip(clip_from_object.to_cols_array()) {
@@ -285,8 +293,14 @@ impl CubeApp {
         let (Some(window), Some(surface)) = (self.window.clone(), self.surface) else {
             return;
         };
-        // Input is applied even when the frame is skipped below, so it never piles up.
-        self.update_input();
+        // The scene updates even when the frame is skipped below, so input never piles up.
+        if let Err(e) = self.update() {
+            return self.fail(ctx, e);
+        }
+        let camera = self
+            .world
+            .resource::<DrawList>()
+            .map_or(Transform::IDENTITY, |list| list.camera);
         let mut frame = match self.device.begin_frame(surface) {
             Ok(Some(frame)) => frame,
             Ok(None) => return, // Minimized or recreating: skip this frame.
@@ -297,7 +311,9 @@ impl CubeApp {
             .pipeline_for(frame.backbuffer_format())
             .and_then(|pipeline| Ok((pipeline, self.depth_for(size)?)))
             .map_err(|e| e.to_string())
-            .and_then(|(pipeline, depth)| Ok((pipeline, depth, self.clip_from_world(size)?)));
+            .and_then(|(pipeline, depth)| {
+                Ok((pipeline, depth, Self::clip_from_world(&camera, size)?))
+            });
         let (pipeline, depth, clip_from_world) = match prepared {
             Ok(prepared) => prepared,
             Err(e) => return self.abandon_frame(ctx, frame, e),
@@ -321,8 +337,12 @@ impl CubeApp {
             });
             pass.set_pipeline(pipeline);
             pass.set_index_buffer(self.mesh.indices, 0, IndexFormat::Uint16);
-            let spinning = self.spinning_cube();
-            for model in std::iter::once(&spinning).chain(&self.scenery) {
+            // The renderer reads only the extracted draw list, never the scene.
+            let objects = self
+                .world
+                .resource::<DrawList>()
+                .map_or(&[][..], |list| &list.objects);
+            for model in objects {
                 pass.set_push_constants(&self.constants(clip_from_world, model));
                 pass.draw_indexed(0..self.mesh.index_count, 0, 1);
             }
@@ -370,7 +390,9 @@ impl App for CubeApp {
     }
 
     fn window_event(&mut self, ctx: &Context<'_>, _window: WindowId, event: WindowEvent) {
-        self.input.handle_window_event(&event);
+        if let Some(mut input) = self.world.resource_mut::<InputState>() {
+            input.handle_window_event(&event);
+        }
         match event {
             // Give the cursor back at once: no frame may come while the window is in the
             // background.
@@ -389,7 +411,9 @@ impl App for CubeApp {
     }
 
     fn device_event(&mut self, _ctx: &Context<'_>, event: DeviceEvent) {
-        self.input.handle_device_event(&event);
+        if let Some(mut input) = self.world.resource_mut::<InputState>() {
+            input.handle_device_event(&event);
+        }
     }
 
     fn about_to_wait(&mut self, ctx: &Context<'_>) {
@@ -572,20 +596,6 @@ fn cube_mesh() -> (Vec<u8>, Vec<u16>) {
     (vertices, indices)
 }
 
-/// Floor tiles and pillars around the spinning cube, so there's something to fly between: a
-/// 9 × 9 floor of 1.8 m tiles with 0.2 m gaps, 1 m below the cube, and four 3 m pillars.
-fn scenery() -> Vec<Transform> {
-    let tiles = (-4_i8..=4).flat_map(|x| (-4_i8..=4).map(move |z| (x, z)));
-    let floor = tiles.map(|(x, z)| {
-        Transform::from_translation(Vec3::new(f32::from(x) * 2.0, -1.05, f32::from(z) * 2.0))
-            .with_scale(Vec3::new(1.8, 0.1, 1.8))
-    });
-    let pillars = [(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)].map(|(x, z)| {
-        Transform::from_translation(Vec3::new(x, 0.5, z)).with_scale(Vec3::new(0.4, 3.0, 0.4))
-    });
-    floor.chain(pillars).collect()
-}
-
 /// Uploads the cube mesh to GPU buffers.
 fn create_mesh(device: &VulkanDevice) -> Result<Mesh, RhiError> {
     let (vertex_bytes, indices) = cube_mesh();
@@ -625,6 +635,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let board = create_board(&device)?;
     let mesh = create_mesh(&device)?;
+    let mut schedule = scene::schedule();
+    // Check the systems' ordering now, so a mistake fails before a window opens.
+    schedule.validate()?;
     let app = CubeApp {
         device,
         options,
@@ -635,11 +648,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         depth: None,
         window: None,
         surface: None,
-        input: InputState::new(),
-        // Above and behind the cube, looking at it, walking pace.
-        camera: FlyCamera::looking_at(Vec3::new(0.0, 1.2, 4.0), Vec3::ZERO, 3.0),
+        world: scene::world(),
+        schedule,
         cursor_captured: false,
-        scenery: scenery(),
         frames: 0,
         started: Instant::now(),
         last_update: Instant::now(),
