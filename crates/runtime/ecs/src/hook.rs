@@ -3,12 +3,12 @@
 use std::fmt;
 
 use crate::change::Mut;
-use crate::command::{CommandQueue, Commands, Source};
+use crate::command::{Commands, Source};
 use crate::component::{Component, Components};
 use crate::entity::{Entities, Entity};
 use crate::resource::{Resource, Resources};
 use crate::storage::Archetypes;
-use crate::world;
+use crate::world::{self, WorldParts};
 
 /// A lifecycle [hook](crate::Hook)'s view of the world.
 ///
@@ -31,22 +31,13 @@ impl fmt::Debug for HookWorld<'_> {
 }
 
 impl<'w> HookWorld<'w> {
-    pub(crate) fn new(
-        (archetypes, components, entities, resources, queue): (
-            &'w mut Archetypes,
-            &'w Components,
-            &'w Entities,
-            &'w mut Resources,
-            &'w mut CommandQueue,
-        ),
-        source: Source,
-    ) -> Self {
+    pub(crate) fn new(parts: WorldParts<'w>, source: Source) -> Self {
         Self {
-            archetypes,
-            components,
-            entities,
-            resources,
-            commands: Commands::new(entities, queue, source),
+            archetypes: parts.archetypes,
+            components: parts.components,
+            entities: parts.entities,
+            resources: parts.resources,
+            commands: Commands::new(parts.entities, parts.queue, source),
         }
     }
 

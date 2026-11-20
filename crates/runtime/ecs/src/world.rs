@@ -1,14 +1,16 @@
 //! The world: every entity, component and resource of one simulation.
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
+
+use oxreal_diagnostics::warn;
 
 use crate::bundle::{self, Bundle};
 use crate::change::Mut;
 use crate::command::{CommandQueue, Source};
-use crate::component::{Component, ComponentId, Components, HookKind};
+use crate::component::{Component, ComponentId, Components, HookCause, HookContext, HookKind};
 use crate::entity::{Entities, Entity, Location};
 use crate::hook::HookWorld;
 use crate::query::{self, QueryData, QueryFilter, QueryIter, ReadOnlyQueryData};
@@ -22,13 +24,18 @@ pub enum EcsError {
     /// The entity isn't alive: it was despawned.
     #[error("{0:?} doesn't exist: it was despawned")]
     NoSuchEntity(Entity),
+    /// The entity is being despawned (its hooks' commands are running), so its components can't
+    /// change any more.
+    #[error("{0:?} is being despawned, so its components can't change")]
+    Despawning(Entity),
 }
 
 /// Every entity, component and resource of one simulation (ADR-0014).
 ///
 /// Structural changes ([`World::spawn`], [`World::insert`], [`World::remove`],
 /// [`World::despawn`]) take `&mut self`, as do mutable queries. Read-only queries and lookups
-/// take `&self`.
+/// take `&self`. A structural change returns after the hooks it triggered, and the commands
+/// they queued, have run.
 pub struct World {
     entities: Entities,
     components: Components,
@@ -39,8 +46,14 @@ pub struct World {
     ///
     /// The `Mutex` is never locked: the queue is only reached through `&mut self`, with
     /// `Mutex::get_mut`, which costs nothing. It's there because commands are `Send` but not
-    /// `Sync`, and the mutex keeps `World` `Sync` without `unsafe`.
+    /// `Sync`, and the mutex keeps `World` `Sync` without `unsafe`, so a future parallel
+    /// executor can share `&World` between read-only systems.
     queue: Mutex<CommandQueue>,
+    /// Whether [`World::apply_commands`] is running. Nested structural changes then hand their
+    /// hook commands to that loop instead of starting another one, so cascades don't recurse.
+    applying: bool,
+    /// Entities whose despawn has started but not finished: their hooks' commands are running.
+    despawning: HashSet<Entity>,
     bundles: Bundles,
 }
 
@@ -59,6 +72,18 @@ struct BundleInfo {
 struct Bundles {
     index: HashMap<TypeId, usize>,
     list: Vec<BundleInfo>,
+}
+
+/// The parts of a world a system or hook may touch while it runs.
+#[derive(Debug)]
+pub(crate) struct WorldParts<'a> {
+    /// Component storage, mutably, for queries and lookups.
+    pub(crate) archetypes: &'a mut Archetypes,
+    pub(crate) components: &'a Components,
+    /// Read-only: structure doesn't change while a system or hook runs.
+    pub(crate) entities: &'a Entities,
+    pub(crate) resources: &'a mut Resources,
+    pub(crate) queue: &'a mut CommandQueue,
 }
 
 impl Default for World {
@@ -88,12 +113,15 @@ impl World {
             components,
             resources: Resources::default(),
             queue: Mutex::new(CommandQueue::default()),
+            applying: false,
+            despawning: HashSet::new(),
             bundles: Bundles::default(),
         }
     }
 
-    /// Creates an entity with the components of `bundle`. Hooks run, then the commands they
-    /// queued.
+    /// Creates an entity with the components of `bundle`. Its hooks run, then the commands they
+    /// queued. A hook may despawn the new entity, in which case the returned handle is already
+    /// dead.
     ///
     /// # Panics
     ///
@@ -107,33 +135,44 @@ impl World {
         table.push_entity(entity);
         bundle.write(table, row, &self.components);
         table.debug_check_rows();
-        self.after_add(entity, info);
+        self.after_spawn(entity, info);
         self.apply_commands();
         entity
     }
 
-    /// Removes an entity and drops its components. Returns `false` if it wasn't alive.
+    /// Removes an entity and drops its components. Returns `false` if it isn't alive, or its
+    /// despawn has already started.
     ///
     /// Every component's `on_replace` hook runs, then every `on_remove`, while the entity still
-    /// has all its components. Then it's removed, and the commands the hooks queued run.
+    /// has all its components. The commands those hooks queued run next, **before** the entity
+    /// is removed: a relation that despawns its dependents removes them first, depth-first
+    /// (children before parents). Meanwhile the entity's components can't change
+    /// ([`EcsError::Despawning`]).
     pub fn despawn(&mut self, entity: Entity) -> bool {
         let Some(location) = self.entities.location(entity) else {
             return false;
         };
+        if self.is_despawning(entity) {
+            return false;
+        }
         let archetype = self.archetypes.get(location.archetype);
-        if archetype.hooked() {
-            let ids = archetype.components().to_vec();
-            self.run_hooks(HookKind::Replace, entity, &ids);
-            self.run_hooks(HookKind::Remove, entity, &ids);
+        if !archetype.hooked() {
+            self.remove_entity(entity);
+            self.apply_commands();
+            return true;
         }
-        // Hooks can't change structure, so the entity is still where it was.
-        let Some(location) = self.entities.free(entity) else {
-            unreachable!("{entity:?} died while its hooks ran: a bug in oxreal-ecs");
-        };
-        let table = self.archetypes.get_mut(location.archetype);
-        if let Some(moved) = table.swap_remove(location.row) {
-            self.entities.set_location(moved, location);
-        }
+        let ids = archetype.components().to_vec();
+        self.despawning.insert(entity);
+        self.run_hooks(HookKind::Replace, entity, &ids, HookCause::Despawn);
+        self.run_hooks(HookKind::Remove, entity, &ids, HookCause::Despawn);
+        // Finish after everything the hooks queued, and everything that queues in turn.
+        self.queue_mut().record(
+            Source::Despawn,
+            Box::new(move |world: &mut World, _: &Source| {
+                world.despawning.remove(&entity);
+                world.remove_entity(entity);
+            }),
+        );
         self.apply_commands();
         true
     }
@@ -161,7 +200,8 @@ impl World {
     ///
     /// # Errors
     ///
-    /// [`EcsError::NoSuchEntity`] if `entity` isn't alive.
+    /// - [`EcsError::NoSuchEntity`] if `entity` isn't alive.
+    /// - [`EcsError::Despawning`] if its despawn has started.
     ///
     /// # Panics
     ///
@@ -171,6 +211,9 @@ impl World {
             .entities
             .location(entity)
             .ok_or(EcsError::NoSuchEntity(entity))?;
+        if self.is_despawning(entity) {
+            return Err(EcsError::Despawning(entity));
+        }
         let info = self.bundle::<B>();
         let target = self.insert_target::<B>(location.archetype, info);
         // Components the entity already has are replaced: their `on_replace` hooks see the old
@@ -183,7 +226,7 @@ impl World {
                 .iter()
                 .partition(|&&id| from.contains(id));
             added = new;
-            self.run_hooks(HookKind::Replace, entity, &replaced);
+            self.run_hooks(HookKind::Replace, entity, &replaced, HookCause::Insert);
         }
         let row = if target == location.archetype {
             location.row
@@ -200,24 +243,24 @@ impl World {
         table.debug_check_rows();
         if self.bundles.list[info].hooked {
             let all = self.bundles.list[info].ids.to_vec();
-            self.run_hooks(HookKind::Add, entity, &added);
-            self.run_hooks(HookKind::Insert, entity, &all);
+            self.run_hooks(HookKind::Add, entity, &added, HookCause::Insert);
+            self.run_hooks(HookKind::Insert, entity, &all, HookCause::Insert);
         }
         self.apply_commands();
         Ok(())
     }
 
-    /// Takes component `T` off `entity` and returns it. `None` if `entity` isn't alive or
-    /// doesn't have a `T`.
+    /// Takes component `T` off `entity` and returns it. `None` if `entity` isn't alive, doesn't
+    /// have a `T`, or is being despawned.
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
         let location = self.entities.location(entity)?;
         let id = self.components.id::<T>()?;
-        if !self.archetypes.get(location.archetype).contains(id) {
+        if !self.archetypes.get(location.archetype).contains(id) || self.is_despawning(entity) {
             return None;
         }
         if self.components.hooks(id).any() {
-            self.run_hooks(HookKind::Replace, entity, &[id]);
-            self.run_hooks(HookKind::Remove, entity, &[id]);
+            self.run_hooks(HookKind::Replace, entity, &[id], HookCause::Remove);
+            self.run_hooks(HookKind::Remove, entity, &[id], HookCause::Remove);
         }
         let target = self
             .archetypes
@@ -369,58 +412,81 @@ impl World {
         table.push_entity(entity);
         bundle.write(table, row, &self.components);
         table.debug_check_rows();
-        self.after_add(entity, info);
+        self.after_spawn(entity, info);
         self.apply_commands();
         true
     }
 
-    /// Applies queued commands in order: those systems recorded (at a sync point), or those
-    /// hooks queued during the structural change that just finished.
+    /// Applies recorded commands, depth-first, without recursion.
     ///
-    /// Each command's own structural changes apply the commands their hooks queue before the
-    /// next command runs, so hook commands follow the change that caused them.
+    /// Newly recorded commands (a system's at a sync point, or the hooks' of the change that
+    /// just finished) go to the **front** of the pending list, in recording order. If a loop is
+    /// already running further up the stack, it takes them from there next. Otherwise this call
+    /// runs the loop until nothing is pending. So hook commands always run right after the change
+    /// that caused them, and cascades of any depth use constant stack.
     pub(crate) fn apply_commands(&mut self) {
-        if self.queue_mut().is_empty() {
+        let queue = self.queue_mut();
+        if queue.is_empty() {
             return;
         }
-        self.entities.flush();
-        for (source, command) in self.queue_mut().take() {
-            command(self, &source);
+        if !queue.promote_recorded() || self.applying {
+            return;
         }
+        let guard = ApplyingGuard(self);
+        guard.0.applying = true;
+        loop {
+            guard.0.entities.flush();
+            let Some((source, command)) = guard.0.queue_mut().next_pending() else {
+                break;
+            };
+            command(guard.0, &source);
+            // Commands that didn't change structure (an exclusive closure, say) leave what they
+            // recorded unpromoted.
+            guard.0.queue_mut().promote_recorded();
+        }
+        guard.0.applying = false;
     }
 
     /// Discards queued commands without applying them, after a panic interrupted a stage.
+    /// Returns whether there were any.
     pub(crate) fn discard_commands(&mut self) -> bool {
-        let queue = self.queue_mut();
-        let had = !queue.is_empty();
-        queue.clear();
+        let had = !self.queue_mut().is_empty() || !self.despawning.is_empty();
+        self.queue_mut().clear();
+        self.despawning.clear();
+        self.applying = false;
         had
     }
 
-    /// The parts a system or hook may touch while it runs: component storage (mutably, for
-    /// queries), the registry and entities (read-only: structure doesn't change while it runs),
-    /// resources, and the command queue.
-    pub(crate) fn split(
-        &mut self,
-    ) -> (
-        &mut Archetypes,
-        &Components,
-        &Entities,
-        &mut Resources,
-        &mut CommandQueue,
-    ) {
-        (
-            &mut self.archetypes,
-            &self.components,
-            &self.entities,
-            &mut self.resources,
-            self.queue.get_mut().unwrap_or_else(PoisonError::into_inner),
-        )
+    /// The parts a system or hook may touch while it runs.
+    pub(crate) fn split(&mut self) -> WorldParts<'_> {
+        WorldParts {
+            archetypes: &mut self.archetypes,
+            components: &self.components,
+            entities: &self.entities,
+            resources: &mut self.resources,
+            queue: self.queue.get_mut().unwrap_or_else(PoisonError::into_inner),
+        }
     }
 
     /// The command queue. Never poisoned, because it's never locked.
     fn queue_mut(&mut self) -> &mut CommandQueue {
         self.queue.get_mut().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `entity`'s despawn has started. Free when nothing is despawning, the usual case.
+    fn is_despawning(&self, entity: Entity) -> bool {
+        !self.despawning.is_empty() && self.despawning.contains(&entity)
+    }
+
+    /// Frees `entity` and drops its components, without hooks.
+    fn remove_entity(&mut self, entity: Entity) {
+        let Some(location) = self.entities.free(entity) else {
+            unreachable!("{entity:?} died before its despawn finished: a bug in oxreal-ecs");
+        };
+        let table = self.archetypes.get_mut(location.archetype);
+        if let Some(moved) = table.swap_remove(location.row) {
+            self.entities.set_location(moved, location);
+        }
     }
 
     /// The index of bundle type `B`'s information, registered on first use.
@@ -467,23 +533,31 @@ impl World {
     }
 
     /// Runs `on_add` and `on_insert` for every component of a newly spawned entity.
-    fn after_add(&mut self, entity: Entity, info: usize) {
+    fn after_spawn(&mut self, entity: Entity, info: usize) {
         if self.bundles.list[info].hooked {
             let ids = self.bundles.list[info].ids.to_vec();
-            self.run_hooks(HookKind::Add, entity, &ids);
-            self.run_hooks(HookKind::Insert, entity, &ids);
+            self.run_hooks(HookKind::Add, entity, &ids, HookCause::Spawn);
+            self.run_hooks(HookKind::Insert, entity, &ids, HookCause::Spawn);
         }
     }
 
     /// Runs hook `kind` of each component in `ids` that has one, in order.
-    fn run_hooks(&mut self, kind: HookKind, entity: Entity, ids: &[ComponentId]) {
+    ///
+    /// If a hook panics, the guard discards every queued command and despawn mark, so nothing is
+    /// applied out of context later. The world's structure is consistent: hooks run before or
+    /// after a change, never in the middle of one.
+    fn run_hooks(&mut self, kind: HookKind, entity: Entity, ids: &[ComponentId], cause: HookCause) {
+        let guard = HookGuard(self);
         for &id in ids {
-            if let Some(hook) = self.components.hooks(id).get(kind) {
+            if let Some(hook) = guard.0.components.hooks(id).get(kind) {
                 let source = Source::Hook {
-                    component: self.components.name(id),
+                    component: guard.0.components.name(id),
                     hook: kind.name(),
                 };
-                hook(&mut HookWorld::new(self.split(), source), entity);
+                hook(
+                    &mut HookWorld::new(guard.0.split(), source),
+                    HookContext { entity, cause },
+                );
             }
         }
     }
@@ -503,6 +577,31 @@ impl World {
         }
         self.entities
             .set_location(entity, Location { archetype, row });
+    }
+}
+
+/// Discards queued commands and despawn marks if a hook panics.
+struct HookGuard<'a>(&'a mut World);
+
+impl Drop for HookGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() && self.0.discard_commands() {
+            warn!(
+                "a panic interrupted a hook; discarding the commands it and earlier hooks queued"
+            );
+        }
+    }
+}
+
+/// Resets the command loop if a command panics, discarding what's pending so it's never applied
+/// out of context.
+struct ApplyingGuard<'a>(&'a mut World);
+
+impl Drop for ApplyingGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() && self.0.discard_commands() {
+            warn!("a panic interrupted the command loop; discarding the pending commands");
+        }
     }
 }
 

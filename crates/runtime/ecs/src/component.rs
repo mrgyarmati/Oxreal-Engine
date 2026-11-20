@@ -25,26 +25,51 @@ pub trait Component: Send + Sync + 'static {
     const HOOKS: ComponentHooks = ComponentHooks::NONE;
 }
 
-/// A lifecycle hook: called with the entity whose component changed (ADR-0014 §4).
+/// A lifecycle hook: called with the change that triggered it (ADR-0014 §4).
 ///
 /// A hook may read and write component data and resources, and queue [`crate::Commands`]. It
-/// can't change structure directly. The commands it queues are applied right after the change
-/// that triggered it.
-pub type Hook = for<'a, 'w> fn(&'a mut HookWorld<'w>, Entity);
+/// can't change structure directly. The commands it queues run right after the change that
+/// triggered it, before anything else.
+pub type Hook = for<'a, 'w> fn(&'a mut HookWorld<'w>, HookContext);
+
+/// What triggered a hook. Plain data, so more can be added without breaking hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HookContext {
+    /// The entity whose component changed.
+    pub entity: Entity,
+    /// Why the component changed.
+    pub cause: HookCause,
+}
+
+/// Why a component was added, replaced or removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HookCause {
+    /// The entity was spawned with it.
+    Spawn,
+    /// It was inserted into a live entity, as a new component or a replacement.
+    Insert,
+    /// It was removed from an entity that stays alive.
+    Remove,
+    /// The entity is being despawned. Lets a relation tell "my owner is going away" from "the
+    /// relation was removed".
+    Despawn,
+}
 
 /// The lifecycle hooks of a component type. Build it from [`ComponentHooks::NONE`]:
 ///
 /// ```
-/// use oxreal_ecs::{Component, ComponentHooks, Entity, HookWorld};
+/// use oxreal_ecs::{Component, ComponentHooks, HookContext, HookWorld};
 ///
 /// struct Light;
 /// impl Component for Light {
 ///     const HOOKS: ComponentHooks = ComponentHooks::NONE.on_add(light_added);
 /// }
 ///
-/// fn light_added(world: &mut HookWorld<'_>, entity: Entity) {
-///     // For example, register the light with a lighting system's resource.
-///     let _ = (world, entity);
+/// fn light_added(world: &mut HookWorld<'_>, context: HookContext) {
+///     // For example, register `context.entity` with a lighting system's resource.
+///     let _ = (world, context);
 /// }
 /// ```
 ///
@@ -56,7 +81,9 @@ pub type Hook = for<'a, 'w> fn(&'a mut HookWorld<'w>, Entity);
 /// | replaced (insert over an existing value) | `on_replace` with the old value, then `on_insert` with the new one |
 /// | removed (remove or despawn) | `on_replace`, `on_remove`, while the entity still has every component |
 ///
-/// On despawn, every component's `on_replace` runs before any `on_remove`.
+/// On despawn, every component's `on_replace` runs before any `on_remove`, and the commands they
+/// queue (despawning children, for example) finish **before** the entity is removed. The order
+/// of hooks across the components of one entity is unspecified.
 #[derive(Clone, Copy)]
 pub struct ComponentHooks {
     on_add: Option<Hook>,

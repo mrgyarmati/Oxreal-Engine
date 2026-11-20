@@ -1,5 +1,6 @@
 //! Deferred structural changes (ADR-0014 §5).
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
@@ -20,6 +21,8 @@ pub(crate) enum Source {
         component: &'static str,
         hook: &'static str,
     },
+    /// The world itself: the step that finishes a despawn after its hooks' commands.
+    Despawn,
 }
 
 impl fmt::Display for Source {
@@ -27,41 +30,64 @@ impl fmt::Display for Source {
         match self {
             Source::System(name) => write!(f, "system `{name}`"),
             Source::Hook { component, hook } => write!(f, "the {hook} hook of {component}"),
+            Source::Despawn => f.write_str("a despawn"),
         }
     }
 }
 
 /// A recorded change, applied later with the source that recorded it.
-type Command = Box<dyn FnOnce(&mut World, &Source) + Send>;
+pub(crate) type Command = Box<dyn FnOnce(&mut World, &Source) + Send>;
 
-/// Recorded commands, in order. The world owns one: systems fill it during a stage, and hooks
-/// during a structural change.
+/// The world's commands.
+///
+/// - **Recorded** commands come from systems during a stage, and from hooks during a structural
+///   change.
+/// - **Pending** commands are waiting in the command loop. Recorded commands are promoted to the
+///   *front* of the pending list, in recording order, so the commands a change caused run before
+///   anything that was already waiting (depth-first) without recursion.
 #[derive(Default)]
 pub(crate) struct CommandQueue {
-    commands: Vec<(Source, Command)>,
+    recorded: Vec<(Source, Command)>,
+    pending: VecDeque<(Source, Command)>,
 }
 
 impl fmt::Debug for CommandQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommandQueue")
-            .field("commands", &self.commands.len())
+            .field("recorded", &self.recorded.len())
+            .field("pending", &self.pending.len())
             .finish()
     }
 }
 
 impl CommandQueue {
     pub(crate) fn is_empty(&self) -> bool {
-        self.commands.is_empty()
+        self.recorded.is_empty() && self.pending.is_empty()
     }
 
-    /// Takes every queued command out, leaving the queue empty.
-    pub(crate) fn take(&mut self) -> Vec<(Source, Command)> {
-        std::mem::take(&mut self.commands)
+    /// Records a command.
+    pub(crate) fn record(&mut self, source: Source, command: Command) {
+        self.recorded.push((source, command));
+    }
+
+    /// Moves the recorded commands to the front of the pending list, keeping their order.
+    /// Returns whether anything is pending.
+    pub(crate) fn promote_recorded(&mut self) -> bool {
+        for command in self.recorded.drain(..).rev() {
+            self.pending.push_front(command);
+        }
+        !self.pending.is_empty()
+    }
+
+    /// The next pending command.
+    pub(crate) fn next_pending(&mut self) -> Option<(Source, Command)> {
+        self.pending.pop_front()
     }
 
     /// Discards every command without applying it.
     pub(crate) fn clear(&mut self) {
-        self.commands.clear();
+        self.recorded.clear();
+        self.pending.clear();
     }
 }
 
@@ -103,7 +129,7 @@ pub struct Commands<'a> {
 impl fmt::Debug for Commands<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Commands")
-            .field("queued", &self.queue.commands.len())
+            .field("queue", &self.queue)
             .finish_non_exhaustive()
     }
 }
@@ -118,9 +144,7 @@ impl<'a> Commands<'a> {
     }
 
     fn push(&mut self, command: impl FnOnce(&mut World, &Source) + Send + 'static) {
-        self.queue
-            .commands
-            .push((self.source.clone(), Box::new(command)));
+        self.queue.record(self.source.clone(), Box::new(command));
     }
 
     /// Spawns an entity with `bundle` at the sync point. The handle is valid **now**: it can be

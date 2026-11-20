@@ -104,6 +104,44 @@ exposed registry.
 - Gameplay-level events (`begin_play`, `end_play`, overlap and so on, ADR-0008) are built on
   hooks plus an engine event system. They aren't hooks themselves.
 
+#### Amendment (2026-11-20, with the third implementation slice)
+
+These choices bind every hook, the relations built on them, ADR-0008's `begin_play` and
+`end_play`, and the future C ABI:
+
+1. **Hooks are declared per component type**, as `Component::HOOKS`. They apply in every world.
+   A hook receives a view of the world and a plain-data context: the entity and the **cause**
+   (spawn, insert, remove or despawn). The context can grow, for example with the component's
+   ID for a C-ABI trampoline, without breaking hooks.
+2. **When hooks fire**, for one entity and component:
+   - added: `on_add`, then `on_insert`;
+   - replaced: `on_replace` with the old value, then `on_insert` with the new one;
+   - removed or despawned: `on_replace`, then `on_remove`, with the entity whole.
+
+   A despawn runs every component's `on_replace` before any `on_remove`. The order of hooks
+   across one entity's components is unspecified.
+3. **Hooks can't change structure.** They read and write component data and resources, and
+   queue commands.
+4. **The commands a hook queues run right after the change that triggered it,** before any
+   other pending command, and before a direct `World` call returns. Cascades of any depth run
+   in constant stack.
+5. **Despawn is post-order.** A despawned entity's hooks run first, while it's whole. The
+   commands they queue run next, with everything those cause in turn. Only then is the entity
+   removed. A relation whose hook despawns its dependents therefore removes **children before
+   parents**, and every child's hooks see its parent whole. Notification is pre-order: the
+   parent's hooks run before its children's. While an entity is being despawned, its
+   components can't change: insert is refused, remove and a second despawn do nothing.
+6. **Reacting to changes from another layer.** Hooks belong to the component's type, so a
+   runtime-layer component can't call into rendering or physics (TAD §4), and a plugin can't
+   hook an engine component. The pattern instead: the component's hook records the change into
+   a runtime-layer resource, and the other layer drains that resource in its own stage, for
+   example `Extract` for render proxies. Observers across crates come with the events design
+   (ADR-0008).
+7. **A panicking hook or command** propagates its panic. The world's structure stays
+   consistent, because hooks run before or after a change, never in the middle of one. The
+   invariants that hooks maintain may be left torn. Every queued command and despawn mark is
+   discarded at once, so nothing runs later out of context.
+
 ### 5. Commands, stages and scheduling
 - **Commands** are deferred structural changes (spawn, despawn, insert, remove, run a closure
   with exclusive world access), recorded by systems and behaviours and **applied in order at
@@ -140,6 +178,8 @@ part of the decision, not only implementation notes:
 3. **Commands apply in a defined order:** system by system in the stage's run order, and each
    system's commands in the order it recorded them. This order doesn't depend on how systems
    are executed, so a parallel executor keeps it by buffering commands per system.
+   *Refined with the third slice:* the commands a hook queues while a command is applied run
+   right after that command, before the next one (§4 amendment, item 4).
 
 ### 6. Change detection
 - Each component value records **added** and **changed** ticks (32-bit, with wraparound handled
@@ -373,54 +413,64 @@ separate slices.
 
 ## Implementation notes (2026-11-20, third slice: lifecycle hooks)
 
-- **Hooks are declared on the component type**, as an associated constant with a no-hooks
-  default: `const HOOKS: ComponentHooks = ComponentHooks::NONE.on_add(..)`.
-  - A hook therefore applies in every world and can't be forgotten, which matters for
-    invariants such as relation inverses.
-  - Adding the constant to `Component` was non-breaking.
-  - A hook is a plain function pointer, `fn(&mut HookWorld, Entity)`, so the hooks of a type
-    are data the registry stores.
-- **When hooks fire** (§4). For one entity and component:
+The decisions are in §4's amendment. These notes cover how they're implemented.
 
-  | Change | Hooks, in order |
-  |---|---|
-  | added (spawn or insert) | `on_add`, then `on_insert`, after the value is in place |
-  | replaced (insert over an existing value) | `on_replace` with the old value, then `on_insert` with the new one |
-  | removed (remove or despawn) | `on_replace`, then `on_remove`, while every component is present |
+- **Declaring hooks.** `const HOOKS: ComponentHooks = ComponentHooks::NONE.on_add(..)`.
+  - Adding a defaulted constant to `Component` was non-breaking.
+  - A hook is a plain function pointer, `fn(&mut HookWorld, HookContext)`, so a type's hooks
+    are data that the registry stores.
+  - `HookContext` and `HookCause` are `#[non_exhaustive]` plain data.
+- **The command loop has no recursion.** The world's queue keeps two lists:
+  - **recorded** commands, from systems during a stage, or from hooks during a change;
+  - **pending** commands, which the loop applies.
 
-  A despawn runs every component's `on_replace` before any `on_remove`.
-- **What a hook can reach:** a `HookWorld`, which reads and writes component values and
-  resources and queues commands. It can't change structure, because the hook runs in the middle
-  of a change. So the entity's location is still valid after its hooks return.
-- **Hook commands run depth-first:** right after the change that triggered them, before the
-  next command.
-  - The command queue now lives in `World`. Every structural operation ends by applying what
-    its hooks queued. A sync point applies the systems' commands one by one, and each one's
-    changes apply their own hook commands as they finish.
-  - Cascades work, for example a hook that despawns the next link of a chain.
-  - Hooks that keep queueing changes for each other would recurse without end. That's a caller
-    bug, and nothing limits it today.
-- **No cost without hooks:** each archetype and each bundle type records whether any of its
-  components has a hook, so changes that involve none skip hook handling. Measured on the same
-  machine against `main`, in the same session:
-  - spawn is unchanged (6.3 ms per 100k), after caching each bundle's spawn archetype;
-  - despawn is about 5% slower (1.30 against 1.25 ms per 100k), for the hook check and an extra
-    location lookup.
-- **`World` stays `Sync`:** the queue sits in a `Mutex` that is never locked. It's only
-  reached through `&mut World` with `Mutex::get_mut`, which costs nothing. Commands are `Send`
-  but not `Sync`, and the mutex avoids `unsafe`.
-- **Commands carry their source** (a system's name, or the component and hook), so warnings
-  name who recorded them.
+  After each structural change, its recorded commands move to the **front** of the pending
+  list, in recording order. Only the outermost call runs the loop. A nested change just hands
+  over its commands. That gives depth-first order in constant stack. A 100,000-link despawn
+  cascade runs in a test on the default 2 MiB test stack.
+- **Despawn's finishing step** is queued as an internal command after the hooks' commands, so
+  it runs after them and everything they cause (post-order). Despawn marks the entity, which
+  makes insert return `EcsError::Despawning`, and makes remove and a nested despawn do nothing.
+- **Panics:**
+  - A drop guard around hook calls, and another around the command loop, discard every queued
+    command and despawn mark when a panic unwinds through them. So no ordinary operation pays
+    for checking.
+  - An earlier draft checked for leftovers at the start of every structural change instead.
+    That cost about 8% on insert and remove, and 12% on despawn.
+- **`World` stays `Sync`:** the queue sits in a `Mutex` that's never locked. It's reached only
+  through `&mut World` with `Mutex::get_mut`, which costs nothing. Commands are `Send` but not
+  `Sync`, and the mutex avoids `unsafe`. `Sync` lets a future parallel executor share `&World`
+  between read-only systems.
+- **Commands carry their source** (a system's name, a component's hook, or a despawn), so
+  warnings name who recorded them.
+- **No cost without hooks:** archetypes and bundle types record whether any component has a
+  hook, and despawn marks are checked only when some exist. Measured on the same machine against
+  the previous commit, back to back (100k entities):
+  - spawn and insert/remove churn are unchanged (6.5 ms and 1.53 ms);
+  - despawn is about 1 ns per entity slower (1.49 against 1.38 ms).
+- **Deferred:**
+  - Changes that involve hooks allocate small ID lists (on despawn, and on spawn or insert of a
+    hooked bundle). Reusable scratch buffers can replace them if profiling points there.
+  - Each recorded command clones its source (an `Arc` for systems).
+  - Hooks that keep queueing changes for each other now loop forever instead of overflowing the
+    stack. That's still a caller bug, and nothing limits it.
 - **Tests:**
   - hook order and the values each hook sees;
   - despawn order;
-  - hook commands applied after direct changes and at sync points, depth-first;
-  - an invariant (a live-component count) kept through spawn, insert, replace, remove and
-    despawn;
-  - a 50-link despawn cascade.
+  - each `HookCause`;
+  - children removed before parents, with each parent whole while its children's hooks run,
+    and the actual removal order recorded through `Drop`;
+  - a despawning entity refusing changes;
+  - hook commands after direct changes and at sync points;
+  - the 100,000-link cascade;
+  - recovery after a panicking hook;
+  - a randomized check that hooks fire exactly once per change (§10): a hook-maintained count
+    against a query, over 10,000 random operations.
 
   These deliberately broken versions each fail the tests:
-  - despawn running `on_remove` before `on_replace`;
+  - remove-before-replace on despawn;
   - replacements treated as additions;
-  - spawn not applying hook commands;
-  - a reserved spawn not applying them (breadth-first order).
+  - breadth-first instead of depth-first order;
+  - despawn finishing before its hooks' commands;
+  - inserting into a despawning entity;
+  - the hook panic guard disabled.

@@ -560,21 +560,25 @@ impl Schedule {
                     declared,
                     ..
                 } = &mut systems[index];
-                let (archetypes, components, entities, resources, queue) = world.0.split();
+                let parts = world.0.split();
                 let mut ctx = SystemContext {
                     world: SystemWorld {
-                        archetypes,
-                        components,
-                        entities,
+                        archetypes: parts.archetypes,
+                        components: parts.components,
+                        entities: parts.entities,
                         declared,
                         system: name,
                     },
                     resources: SystemResources {
-                        resources,
+                        resources: parts.resources,
                         declared,
                         system: name,
                     },
-                    commands: Commands::new(entities, queue, Source::System(name.clone())),
+                    commands: Commands::new(
+                        parts.entities,
+                        parts.queue,
+                        Source::System(name.clone()),
+                    ),
                 };
                 run(&mut ctx);
             }

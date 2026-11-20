@@ -85,7 +85,7 @@ mod world;
 pub use bundle::Bundle;
 pub use change::Mut;
 pub use command::Commands;
-pub use component::{Component, ComponentHooks, Hook};
+pub use component::{Component, ComponentHooks, Hook, HookCause, HookContext};
 pub use entity::Entity;
 pub use hook::HookWorld;
 pub use query::{QueryData, QueryFilter, QueryIter, ReadOnlyQueryData, With, Without};
