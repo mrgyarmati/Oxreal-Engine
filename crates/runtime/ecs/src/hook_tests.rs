@@ -556,3 +556,36 @@ fn despawning_is_visible_to_hooks_and_their_commands() {
     );
     assert!(!world.is_despawning(e), "not after the despawn finished");
 }
+
+/// Logs its own value when added.
+#[derive(Debug, Clone, Copy)]
+struct Named(&'static str);
+impl Component for Named {
+    const HOOKS: ComponentHooks = ComponentHooks::NONE.on_add(|w, ctx| {
+        if let Some(name) = w.get::<Named>(ctx.entity).map(|n| n.0) {
+            w.commands().run(move |world| {
+                if let Some(mut log) = world.resource_mut::<Log>() {
+                    log.0.push(format!("after {name}"));
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn hook_commands_of_several_changes_in_one_command_keep_their_order() {
+    let mut world = world();
+    let mut schedule = Schedule::new();
+    schedule.add(
+        Stage::PrePhysics,
+        System::new("batch", |ctx| {
+            ctx.commands.run(|world| {
+                world.spawn(Named("a"));
+                world.spawn(Named("b"));
+                world.spawn(Named("c"));
+            });
+        }),
+    );
+    schedule.run(&mut world).expect("valid");
+    assert_eq!(lines(&mut world), ["after a", "after b", "after c"]);
+}

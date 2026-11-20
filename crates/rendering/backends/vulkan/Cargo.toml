@@ -21,6 +21,7 @@ raw-window-handle.workspace = true
 
 [dev-dependencies]
 oxreal-ecs.workspace = true
+oxreal-hierarchy.workspace = true
 oxreal-input.workspace = true
 oxreal-math.workspace = true
 oxreal-shader-compiler.workspace = true
