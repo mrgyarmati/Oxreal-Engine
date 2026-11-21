@@ -12,7 +12,7 @@ use std::fmt;
 use crate::attributes::Attributes;
 use crate::id::{ConstArg, StableTypeId};
 use crate::kind::{IntRepr, Primitive};
-use crate::ops::Operations;
+use crate::ops::{OperationError, Operations};
 use crate::registry::GroupId;
 
 /// A type's in-process identity: its index in one [`TypeRegistry`](crate::TypeRegistry)
@@ -152,10 +152,91 @@ impl TypeDescription {
         &self.attributes
     }
 
-    /// Drop, clone and default through erased pointers.
+    /// Which of drop, clone and default the type supports. Run them with
+    /// [`TypeDescription::drop_value`], [`TypeDescription::clone_value`] and
+    /// [`TypeDescription::default_value`].
     #[must_use]
     pub fn operations(&self) -> &Operations {
         &self.operations
+    }
+
+    /// Drops the value at `value`, through the type's own `Drop`. Afterwards the memory is
+    /// uninitialized.
+    ///
+    /// If the drop panics, the value still counts as dropped and must not be used or dropped
+    /// again.
+    ///
+    /// # Safety
+    ///
+    /// - `value` is non-null, aligned for this type, valid for reads and writes of its size
+    ///   (with provenance that allows writing: not derived from a shared reference), and points
+    ///   to a valid value of **this** type that the caller owns.
+    /// - Nothing else accesses the value during the call, and the caller doesn't use it again,
+    ///   other than to write a new value into the memory.
+    /// - The value may be dropped on this thread (every `Reflect` type is `Send`).
+    pub unsafe fn drop_value(&self, value: *mut u8) {
+        // SAFETY: the operations belong to this description's type, and the caller's contract
+        // is `Operations::drop_in_place`'s.
+        unsafe { self.operations.drop_in_place(value) }
+    }
+
+    /// Writes a clone of the value at `source` into `target`, through the type's own `Clone`
+    /// (for containers, their elements').
+    ///
+    /// If the clone panics, `target` stays uninitialized and nothing created by the clone leaks.
+    ///
+    /// # Errors
+    ///
+    /// [`OperationError::NotCloneable`], naming the type, if the type can't be cloned. Nothing
+    /// is written then.
+    ///
+    /// # Safety
+    ///
+    /// - `source` is non-null, aligned for this type, and points to a valid value of **this**
+    ///   type whose own invariants hold. Nothing writes to it during the call (it's read
+    ///   through a shared reference).
+    /// - `target` is non-null, aligned for this type, valid for writes of its size, and doesn't
+    ///   overlap `source`. It's overwritten without being dropped, so anything it held leaks
+    ///   (which is safe, but usually a bug).
+    pub unsafe fn clone_value(
+        &self,
+        source: *const u8,
+        target: *mut u8,
+    ) -> Result<(), OperationError> {
+        // SAFETY: the operations belong to this description's type, and the caller's contract
+        // is `Operations::clone_into`'s.
+        if unsafe { self.operations.clone_into(source, target) } {
+            Ok(())
+        } else {
+            Err(OperationError::NotCloneable {
+                ty: self.name.clone().into_owned(),
+            })
+        }
+    }
+
+    /// Writes the type's default value into `target`, through its own `Default` (for
+    /// containers: empty, or their elements' default).
+    ///
+    /// # Errors
+    ///
+    /// [`OperationError::NoDefault`], naming the type, if the type has no default. Nothing is
+    /// written then.
+    ///
+    /// # Safety
+    ///
+    /// `target` is non-null, aligned for this type and valid for writes of its size. It's
+    /// overwritten without being dropped, so anything it held leaks (which is safe, but usually
+    /// a bug).
+    pub unsafe fn default_value(&self, target: *mut u8) -> Result<(), OperationError> {
+        // SAFETY: the operations belong to this description's type, and the caller's contract
+        // is `Operations::default_into`'s.
+        if unsafe { self.operations.default_into(target) } {
+            Ok(())
+        } else {
+            Err(OperationError::NoDefault {
+                ty: self.name.clone().into_owned(),
+            })
+        }
     }
 
     /// Whether the type is ABI-safe: plain data with a C layout (ADR-0021 §3).
@@ -300,9 +381,8 @@ impl Field {
     }
 
     /// Former names, which field paths and files may still use.
-    #[must_use]
-    pub fn aliases(&self) -> &[Cow<'static, str>] {
-        &self.aliases
+    pub fn aliases(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.aliases.iter().map(|alias| &**alias)
     }
 
     /// Whether the field is never saved. It gets its type's default on load.
@@ -378,9 +458,8 @@ impl Variant {
     }
 
     /// Former names, which files may still use.
-    #[must_use]
-    pub fn aliases(&self) -> &[Cow<'static, str>] {
-        &self.aliases
+    pub fn aliases(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.aliases.iter().map(|alias| &**alias)
     }
 }
 

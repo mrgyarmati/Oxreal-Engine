@@ -5,6 +5,7 @@
 /// `usize`, `isize`, `char` and 128-bit integers aren't primitives: their size depends on the
 /// platform, or no file format and C-ABI caller needs them yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Primitive {
     /// `bool`. Its only valid bytes are 0 and 1, so it's never ABI-safe.
     Bool,

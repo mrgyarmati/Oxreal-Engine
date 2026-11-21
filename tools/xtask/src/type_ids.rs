@@ -4,15 +4,21 @@
 //! written in it:
 //!
 //! - `#[reflect(id = "...")]` on a struct or enum;
-//! - `StableTypeId::from_uuid("...")` in hand-written `Reflect` impls.
+//! - `StableTypeId::from_uuid("...")` anywhere, including inside macro invocations such as the
+//!   built-in types' ID list. Hand-written IDs must use `from_uuid` with a string literal: the
+//!   scan can't see IDs built any other way.
 //!
 //! It fails if two places declare the same ID (a copy-pasted attribute, caught even if the two
 //! types are never registered together), or if a retired ID from
 //! `docs/development/retired-type-ids.txt` appears again.
 //!
-//! It also keeps each crate's `stable-type-ids.txt` up to date: the IDs its non-generic derived
-//! types declare, which a test in that crate checks its `register_types` registers.
-//! `--write` regenerates the files; without it, a stale or missing file is an error.
+//! It also keeps each crate's `stable-type-ids.txt` up to date: the IDs of the types its
+//! `register_types` must register, which a test in that crate checks
+//! (`TypeRegistry::unregistered_ids`). Those are non-generic types declared outside function
+//! bodies that derive `Reflect` with an ID, or implement it by hand with
+//! `Persistence::Persisted(StableTypeId::from_uuid("..."))`. `--write` regenerates the files;
+//! without it, a stale or missing file is an error. A type behind a `#[cfg(feature = ...)]` is
+//! listed too, so its crate's test must run with that feature.
 //!
 //! **Test code is skipped:** `tests/`, `benches/` and `examples/` directories, items marked
 //! exactly `#[cfg(test)]` or `#[test]`, and out-of-line modules declared `#[cfg(test)] mod x;`.
@@ -123,6 +129,9 @@ fn scan_workspace(root: &Path) -> Result<Scan, String> {
             out: &mut scan.declarations,
             errors: Vec::new(),
             constant: None,
+            reflect_impl: None,
+            in_persisted: false,
+            fn_depth: 0,
         };
         collector.visit_file(file);
         if let Some(error) = collector.errors.into_iter().next() {
@@ -135,21 +144,16 @@ fn scan_workspace(root: &Path) -> Result<Scan, String> {
 
 /// Every `.rs` file under `dir`, skipping build output and test directories.
 fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-            .path();
+    for (path, kind) in entries(dir)? {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if path.is_dir() {
+        if kind.is_dir() {
             if name != "target" && !name.starts_with('.') && !TEST_DIRS.contains(&name) {
                 collect_sources(&path, out)?;
             }
-        } else if path.extension().is_some_and(|e| e == "rs") {
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
     }
@@ -216,6 +220,14 @@ struct Collector<'a> {
     errors: Vec<String>,
     /// The constant being visited, naming hand-written IDs.
     constant: Option<String>,
+    /// The type of the non-generic `impl Reflect for X` being visited, if any.
+    reflect_impl: Option<String>,
+    /// Whether the arguments of a `Persistence::Persisted(...)` call are being visited: the ID
+    /// there is the impl's own type ID (not, say, a handle's domain).
+    in_persisted: bool,
+    /// How many functions deep the visit is. A type declared in a function body can't be named
+    /// by the crate's `register_types`.
+    fn_depth: usize,
 }
 
 impl Collector<'_> {
@@ -256,7 +268,43 @@ impl Collector<'_> {
                 ));
             }
             if let Some(id) = id {
-                self.declare(&id, name.clone(), !generic);
+                self.declare(&id, name.clone(), !generic && self.fn_depth == 0);
+            }
+        }
+    }
+
+    /// Finds `StableTypeId::from_uuid("...")` in macro input, which isn't parsed as code: a
+    /// `macro_rules!` list of IDs (like the built-in types') is still scanned. Such IDs are named
+    /// after the identifier before them and are never registrable.
+    fn macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        use proc_macro2::TokenTree;
+        let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+        let mut name = None;
+        for (i, token) in tokens.iter().enumerate() {
+            match token {
+                TokenTree::Group(group) => self.macro_tokens(group.stream()),
+                TokenTree::Ident(ident) if ident == "from_uuid" => {
+                    let qualified = i >= 3
+                        && matches!(&tokens[i - 3], TokenTree::Ident(t) if t == "StableTypeId")
+                        && matches!(&tokens[i - 2], TokenTree::Punct(p) if p.as_char() == ':')
+                        && matches!(&tokens[i - 1], TokenTree::Punct(p) if p.as_char() == ':');
+                    let argument = match tokens.get(i + 1) {
+                        Some(TokenTree::Group(group)) => {
+                            syn::parse2::<syn::LitStr>(group.stream()).ok()
+                        }
+                        _ => None,
+                    };
+                    if let (true, Some(text)) = (qualified, argument) {
+                        let name = name
+                            .clone()
+                            .unwrap_or_else(|| "an ID in a macro invocation".to_owned());
+                        self.declare(&text.value(), name, false);
+                    }
+                }
+                TokenTree::Ident(ident) if ident != "StableTypeId" => {
+                    name = Some(ident.to_string());
+                }
+                _ => {}
             }
         }
     }
@@ -293,30 +341,77 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.constant = outer;
     }
 
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.fn_depth += 1;
+        visit::visit_item_fn(self, item);
+        self.fn_depth -= 1;
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        self.fn_depth += 1;
+        visit::visit_impl_item_fn(self, item);
+        self.fn_depth -= 1;
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let reflect = item
+            .trait_
+            .as_ref()
+            .and_then(|(path, _)| path.segments.last())
+            .is_some_and(|segment| segment.ident == "Reflect");
+        // Only a non-generic `impl Reflect for X` names one type that `register_types` can list.
+        let ty = match &*item.self_ty {
+            syn::Type::Path(path) if reflect && item.generics.params.is_empty() => path
+                .path
+                .segments
+                .last()
+                .filter(|segment| segment.arguments.is_empty())
+                .map(|segment| segment.ident.to_string()),
+            _ => None,
+        };
+        let outer = std::mem::replace(&mut self.reflect_impl, ty);
+        visit::visit_item_impl(self, item);
+        self.reflect_impl = outer;
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.macro_tokens(mac.tokens.clone());
+        visit::visit_macro(self, mac);
+    }
+
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
-        if let Expr::Path(func) = &*call.func {
-            let segments: Vec<String> = func
+        let segments: Vec<String> = match &*call.func {
+            Expr::Path(func) => func
                 .path
                 .segments
                 .iter()
                 .map(|s| s.ident.to_string())
-                .collect();
-            if segments.ends_with(&["StableTypeId".to_owned(), "from_uuid".to_owned()])
-                && let [
-                    Expr::Lit(ExprLit {
-                        lit: Lit::Str(text),
-                        ..
-                    }),
-                ] = call.args.iter().collect::<Vec<_>>()[..]
-            {
-                let name = self
-                    .constant
-                    .clone()
-                    .unwrap_or_else(|| "a StableTypeId::from_uuid call".to_owned());
-                self.declare(&text.value(), name, false);
-            }
+                .collect(),
+            _ => Vec::new(),
+        };
+        if segments.ends_with(&["StableTypeId".to_owned(), "from_uuid".to_owned()])
+            && let [
+                Expr::Lit(ExprLit {
+                    lit: Lit::Str(text),
+                    ..
+                }),
+            ] = call.args.iter().collect::<Vec<_>>()[..]
+        {
+            // The type ID of a non-generic hand-written impl: registrable, named after the type.
+            let own_type = self
+                .reflect_impl
+                .clone()
+                .filter(|_| self.in_persisted && self.fn_depth == 0);
+            let registrable = own_type.is_some();
+            let name = own_type
+                .or_else(|| self.constant.clone())
+                .unwrap_or_else(|| "a StableTypeId::from_uuid call".to_owned());
+            self.declare(&text.value(), name, registrable);
         }
+        let persisted = segments.last().is_some_and(|s| s == "Persisted");
+        let outer = std::mem::replace(&mut self.in_persisted, persisted);
         visit::visit_expr_call(self, call);
+        self.in_persisted = outer;
     }
 }
 
@@ -398,7 +493,7 @@ fn read_retired(path: &Path) -> Result<HashSet<String>, String> {
 
 fn parse_retired(text: &str) -> Result<HashSet<String>, String> {
     let mut out = HashSet::new();
-    for (number, line) in text.lines().enumerate() {
+    for (number, line) in without_bom(text).lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -414,6 +509,11 @@ fn parse_retired(text: &str) -> Result<HashSet<String>, String> {
         out.insert(id);
     }
     Ok(out)
+}
+
+/// `text` without the byte-order mark some Windows editors save.
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 /// The expected `stable-type-ids.txt` of every crate that has derived IDs.
@@ -451,7 +551,11 @@ fn sync_listings(root: &Path, scan: &Scan, write: bool) -> Result<(), String> {
     }
     for krate in crate_roots {
         let path = krate.join(LISTING);
-        let current = fs::read_to_string(&path).ok();
+        // Compared as git checks text out (LF, no byte-order mark), so a file an editor saved with
+        // CRLF isn't reported as stale.
+        let current = fs::read_to_string(&path)
+            .ok()
+            .map(|text| without_bom(&text).replace("\r\n", "\n"));
         let wanted = expected.get(&krate);
         if current.as_deref() == wanted.map(String::as_str) {
             continue;
@@ -477,22 +581,31 @@ fn sync_listings(root: &Path, scan: &Scan, write: bool) -> Result<(), String> {
     }
 }
 
+/// The entries of `dir` with their types. Symbolic links are neither directories nor files here
+/// (`DirEntry::file_type` doesn't follow them), so the walks skip them: git checks them out as
+/// links on Linux but usually as plain files on Windows, and a link to a parent would loop.
+fn entries(dir: &Path) -> Result<Vec<(PathBuf, fs::FileType)>, String> {
+    let error = |e: std::io::Error| format!("failed to read {}: {e}", dir.display());
+    fs::read_dir(dir)
+        .map_err(error)?
+        .map(|entry| {
+            let entry = entry.map_err(error)?;
+            Ok((entry.path(), entry.file_type().map_err(error)?))
+        })
+        .collect()
+}
+
 /// Every directory with a `Cargo.toml` under `dir`.
 fn find_crate_roots(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     if dir.join("Cargo.toml").is_file() {
         out.push(dir.to_path_buf());
     }
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-            .path();
+    for (path, kind) in entries(dir)? {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if path.is_dir() && name != "target" && name != "src" && !name.starts_with('.') {
+        if kind.is_dir() && name != "target" && name != "src" && !name.starts_with('.') {
             find_crate_roots(&path, out)?;
         }
     }
@@ -544,6 +657,9 @@ mod tests {
             out: &mut out,
             errors: Vec::new(),
             constant: None,
+            reflect_impl: None,
+            in_persisted: false,
+            fn_depth: 0,
         };
         collector.visit_file(&file);
         assert!(collector.errors.is_empty(), "{:?}", collector.errors);
@@ -606,6 +722,50 @@ mod tests {
     }
 
     #[test]
+    fn hand_written_impls_macros_and_local_types() {
+        const C: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+        const D: &str = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e";
+        const E: &str = "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f";
+        let found = collect(&format!(
+            r#"
+            unsafe impl Reflect for Entity {{
+                const DEFINITION: TypeDefinition = TypeDefinition::builder::<Self>(
+                    "Entity",
+                    Persistence::Persisted(StableTypeId::from_uuid("{A}")),
+                    KindDefinition::handle(StableTypeId::from_uuid("{B}")),
+                ).build();
+            }}
+            unsafe impl<T: Reflect> Reflect for Handle<T> {{
+                const DEFINITION: TypeDefinition = def(
+                    Persistence::Persisted(StableTypeId::from_uuid("{C}")));
+            }}
+            ids! {{
+                FIRST = StableTypeId::from_uuid("{D}");
+            }}
+            fn local() {{
+                #[derive(Reflect)]
+                #[reflect(id = "{E}")]
+                struct Local;
+            }}
+            "#
+        ));
+        let summary: Vec<_> = found
+            .iter()
+            .map(|d| (d.id.as_str(), d.name.as_str(), d.registrable))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (A, "Entity", true),
+                (B, "a StableTypeId::from_uuid call", false),
+                (C, "a StableTypeId::from_uuid call", false),
+                (D, "FIRST", false),
+                (E, "Local", false),
+            ]
+        );
+    }
+
+    #[test]
     fn duplicates_and_retired_ids_are_errors_naming_every_place() {
         let mut scan = Scan {
             declarations: collect(&format!(
@@ -632,6 +792,11 @@ mod tests {
             "{error}"
         );
         assert!(parse_retired("not-a-uuid").is_err());
+        let with_bom_and_crlf = format!("\u{feff}# retired\r\n{A} Old\r\n");
+        assert_eq!(
+            parse_retired(&with_bom_and_crlf),
+            Ok(HashSet::from([A.to_owned()]))
+        );
     }
 
     #[test]
@@ -657,7 +822,16 @@ mod tests {
 
     #[test]
     fn test_modules_resolve_to_their_files() {
-        let dir = std::env::temp_dir().join(format!("xtask-type-ids-{}", std::process::id()));
+        /// Removes the directory even when an assertion fails.
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp =
+            TempDir(std::env::temp_dir().join(format!("xtask-type-ids-{}", std::process::id())));
+        let dir = &temp.0;
         fs::create_dir_all(dir.join("src/storage")).expect("temp dir");
         fs::write(dir.join("src/tests.rs"), "").expect("write");
         fs::write(dir.join("src/storage/tests.rs"), "").expect("write");
@@ -676,7 +850,6 @@ mod tests {
             test_module_files(&lib, &items, false),
             [dir.join("src/tests.rs")]
         );
-        fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]

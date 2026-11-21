@@ -157,6 +157,10 @@ pub(crate) fn reflect(input: &DeriveInput) -> syn::Result<TokenStream> {
         TokenStream::new()
     };
 
+    // The `unsafe impl` header keeps `quote!`'s call-site spans, and the output never carries a
+    // lint attribute: crates that `forbid(unsafe_code)` accept it only because rustc doesn't
+    // report that lint inside derive output, and `#[allow(unsafe_code)]` under `forbid` is a hard
+    // error (E0453). `tests/forbid_unsafe.rs` in `oxreal-reflection` guards this.
     Ok(quote! {
         unsafe impl #impl_generics ::oxreal_reflection::Reflect for #ident #ty_generics
         #where_clause
@@ -192,17 +196,19 @@ impl Generics {
                 }
                 GenericParam::Type(ty) => {
                     let ident = &ty.ident;
-                    out.args.push(quote!(::oxreal_reflection::GenericArg::Type(
-                        ::oxreal_reflection::TypeRef::of::<#ident>()
-                    )));
+                    out.args
+                        .push(quote!(::oxreal_reflection::GenericArgDefinition::Type(
+                            ::oxreal_reflection::TypeRef::of::<#ident>()
+                        )));
                     out.types.push(ident.clone());
                 }
                 GenericParam::Const(constant) => {
                     let ident = &constant.ident;
                     let constructor = const_constructor(&constant.ty)?;
-                    out.args.push(quote!(::oxreal_reflection::GenericArg::Const(
-                        ::oxreal_reflection::ConstArg::#constructor(#ident)
-                    )));
+                    out.args
+                        .push(quote!(::oxreal_reflection::GenericArgDefinition::Const(
+                            ::oxreal_reflection::ConstArg::#constructor(#ident)
+                        )));
                 }
             }
         }

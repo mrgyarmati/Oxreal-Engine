@@ -14,8 +14,8 @@ use crate::id::{ConstArg, builtin};
 use crate::kind::Primitive;
 use crate::ops::Operations;
 use crate::{
-    FieldDefinition, GenericArg, KindDefinition, Persistence, Reflect, TypeDefinition, TypeRef,
-    TypeRegistry,
+    FieldDefinition, GenericArgDefinition, KindDefinition, Persistence, Reflect, TypeDefinition,
+    TypeRef, TypeRegistry,
 };
 
 macro_rules! primitives {
@@ -80,7 +80,7 @@ unsafe impl<T: Reflect> Reflect for Vec<T> {
         Persistence::Persisted(builtin::VEC),
         KindDefinition::list::<T>(),
     )
-    .generic_args(&[GenericArg::Type(TypeRef::of::<T>())])
+    .generic_args(&[GenericArgDefinition::Type(TypeRef::of::<T>())])
     .operations(Operations::of_vec::<T>())
     .build();
 }
@@ -96,7 +96,7 @@ unsafe impl<T: Reflect> Reflect for Option<T> {
         Persistence::Persisted(builtin::OPTION),
         KindDefinition::option::<T>(),
     )
-    .generic_args(&[GenericArg::Type(TypeRef::of::<T>())])
+    .generic_args(&[GenericArgDefinition::Type(TypeRef::of::<T>())])
     .operations(Operations::of_option::<T>())
     .build();
 }
@@ -114,8 +114,8 @@ unsafe impl<T: Reflect, const N: usize> Reflect for [T; N] {
             KindDefinition::array::<T, N>(),
         )
         .generic_args(&[
-            GenericArg::Type(TypeRef::of::<T>()),
-            GenericArg::Const(ConstArg::usize(N)),
+            GenericArgDefinition::Type(TypeRef::of::<T>()),
+            GenericArgDefinition::Const(ConstArg::usize(N)),
         ])
         .operations(Operations::of_array::<T, N>());
         if T::ABI {

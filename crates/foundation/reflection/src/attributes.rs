@@ -8,8 +8,10 @@ use std::borrow::Cow;
 
 /// A numeric range for editing a value: the limits and step of a slider or spin box.
 ///
-/// It guides the UI only. The value itself isn't clamped: data from files or code may lie
-/// outside it.
+/// The limits are in the value's **stored** units (SI, radians for angles; ADR-0011). Where the
+/// editor shows a value in other units, such as an angle in degrees, it converts the range the
+/// same way. It guides the UI only: the value itself isn't clamped, and data from files or code
+/// may lie outside it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Range {
     min: f64,
@@ -80,7 +82,7 @@ impl Range {
 #[non_exhaustive]
 pub enum Unit {
     /// Length, `m`.
-    Metres,
+    Meters,
     /// Mass, `kg`.
     Kilograms,
     /// Time, `s`.
@@ -88,7 +90,7 @@ pub enum Unit {
     /// Angle, stored in radians and shown in degrees.
     Radians,
     /// Speed, `m/s`.
-    MetresPerSecond,
+    MetersPerSecond,
     /// Angular speed, stored in radians per second and shown in degrees per second.
     RadiansPerSecond,
 }
@@ -102,7 +104,7 @@ pub enum Unit {
 ///     .display_name("Max speed")
 ///     .category("Movement")
 ///     .range(Range::new(0.0, 20.0).with_step(0.5))
-///     .units(Unit::MetresPerSecond);
+///     .units(Unit::MetersPerSecond);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AttributesDefinition {
@@ -276,7 +278,7 @@ mod tests {
             .category("Movement")
             .tooltip("How fast")
             .range(Range::new(0.0, 5.0))
-            .units(Unit::MetresPerSecond)
+            .units(Unit::MetersPerSecond)
             .hidden()
             .read_only();
         let attributes = definition.to_attributes();
@@ -284,7 +286,7 @@ mod tests {
         assert_eq!(attributes.category(), Some("Movement"));
         assert_eq!(attributes.tooltip(), Some("How fast"));
         assert_eq!(attributes.range(), Some(Range::new(0.0, 5.0)));
-        assert_eq!(attributes.units(), Some(Unit::MetresPerSecond));
+        assert_eq!(attributes.units(), Some(Unit::MetersPerSecond));
         assert!(attributes.is_hidden() && attributes.is_read_only());
     }
 }

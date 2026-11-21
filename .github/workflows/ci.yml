@@ -276,10 +276,12 @@ jobs:
   miri:
     name: miri
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       MIRI_TOOLCHAIN: nightly-2026-11-14
-      # Pointer-to-integer casts must not create pointers (the strictest provenance model).
-      MIRIFLAGS: -Zmiri-strict-provenance
+      # The strictest provenance model (integers never become pointers), and alignment checked
+      # symbolically, so alignment that only holds by chance at run time is still an error.
+      MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -287,7 +289,11 @@ jobs:
       - run: rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri,rust-src
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: miri
+          # The key must name the nightly: rust-cache keys on `rustc -vV`, which reads the stable
+          # pin from rust-toolchain.toml, so a bumped nightly would keep restoring stale builds.
+          key: miri-${{ env.MIRI_TOOLCHAIN }}
+          # The Miri sysroot that `cargo miri setup` builds.
+          cache-directories: ~/.cache/miri
       - run: cargo "+$MIRI_TOOLCHAIN" miri setup
       # Every crate with `unsafe` code that Miri can run (not the Vulkan backend, which calls
       # into drivers through FFI).

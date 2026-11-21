@@ -12,14 +12,14 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::Reflect;
 use crate::attributes::AttributesDefinition;
 use crate::definition::{
-    FieldDefinition, GenericArg, KindData, MathComponentDefinition, Persistence, TypeDefinition,
-    TypeRef, VariantDefinition,
+    FieldDefinition, GenericArgDefinition, KindData, MathComponentDefinition, Persistence,
+    TypeDefinition, TypeRef, VariantDefinition,
 };
 use crate::description::{
     ArrayInfo, Field, GenericArgument, HandleInfo, Identity, ListInfo, MathComponent, MathInfo,
     OptionInfo, StructInfo, TypeDescription, TypeKey, TypeKind, UnitEnumInfo, Variant,
 };
-use crate::id::{GenericIdInput, StableTypeId};
+use crate::id::{GenericIdInput, ParseStableTypeIdError, StableTypeId};
 use crate::kind::{IntRepr, Primitive};
 use crate::ops::Operations;
 
@@ -68,16 +68,26 @@ impl RegistryId {
 
 /// A registration group: types that become visible together and are removed together
 /// (ADR-0021 §5).
+///
+/// A group ID belongs to the registry that issued it; another registry refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GroupId(u32);
+pub struct GroupId {
+    registry: RegistryId,
+    index: u32,
+}
 
 impl GroupId {
-    /// The root group: the built-in types and everything registered with
-    /// [`TypeRegistry::register`]. It can't be removed.
-    pub const ROOT: Self = Self(0);
+    fn root(registry: RegistryId) -> Self {
+        Self { registry, index: 0 }
+    }
+
+    fn is_root(self) -> bool {
+        self.index == 0
+    }
 }
 
 struct Inner {
+    id: RegistryId,
     entries: Vec<Entry>,
     by_type_id: HashMap<TypeId, TypeKey>,
     by_stable_id: HashMap<StableTypeId, TypeKey>,
@@ -101,6 +111,7 @@ struct Summary {
     layout: Layout,
     operations: Operations,
     abi: bool,
+    group: GroupId,
 }
 
 struct Group {
@@ -113,9 +124,11 @@ impl TypeRegistry {
     /// `oxreal-math` types.
     #[must_use]
     pub fn new() -> Self {
+        let id = RegistryId::unique();
         let registry = Self {
-            id: RegistryId::unique(),
+            id,
             inner: RwLock::new(Inner {
+                id,
                 entries: Vec::new(),
                 by_type_id: HashMap::new(),
                 by_stable_id: HashMap::new(),
@@ -135,6 +148,13 @@ impl TypeRegistry {
         self.id
     }
 
+    /// The root group: the built-in types and everything registered with
+    /// [`TypeRegistry::register`]. It can't be removed.
+    #[must_use]
+    pub fn root_group(&self) -> GroupId {
+        GroupId::root(self.id)
+    }
+
     /// Registers `T`, and the types it refers to, in the root group. Registering a type that is
     /// already registered returns its key.
     ///
@@ -148,7 +168,44 @@ impl TypeRegistry {
             return Ok(key);
         }
         let mut inner = self.write();
-        inner.transaction(|inner| inner.register(TypeRef::of::<T>(), GroupId::ROOT))
+        let root = self.root_group();
+        inner.transaction(|inner| inner.register(TypeRef::of::<T>(), root))
+    }
+
+    /// The IDs in a crate's `stable-type-ids.txt` listing that aren't registered: what a crate's
+    /// completeness test checks after calling its `register_types` (ADR-0021 §2).
+    ///
+    /// The listing is what `cargo xtask type-ids --write` generates: a UUID at the start of each
+    /// line, then the type's name. Blank lines and lines starting with `#` are skipped.
+    ///
+    /// ```
+    /// use oxreal_reflection::TypeRegistry;
+    ///
+    /// let registry = TypeRegistry::new();
+    /// let listing = "# generated\nd760993b-9c97-4114-8a54-b191698217ad bool\n";
+    /// assert_eq!(registry.unregistered_ids(listing), Ok(Vec::new()));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// If a line doesn't start with a well-formed UUID.
+    pub fn unregistered_ids(
+        &self,
+        listing: &str,
+    ) -> Result<Vec<StableTypeId>, ParseStableTypeIdError> {
+        let inner = self.read();
+        let mut missing = Vec::new();
+        for line in listing.lines().map(str::trim) {
+            let line = line.strip_prefix('\u{feff}').unwrap_or(line);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let id: StableTypeId = line.split_whitespace().next().unwrap_or(line).parse()?;
+            if !inner.by_stable_id.contains_key(&id) {
+                missing.push(id);
+            }
+        }
+        Ok(missing)
     }
 
     /// Starts a registration group: types added to it become visible together when it's
@@ -169,8 +226,9 @@ impl TypeRegistry {
     ///
     /// # Errors
     ///
-    /// - [`RegistrationError::RootGroup`] for [`GroupId::ROOT`].
-    /// - [`RegistrationError::UnknownGroup`] if the group doesn't exist or was removed.
+    /// - [`RegistrationError::RootGroup`] for [`TypeRegistry::root_group`].
+    /// - [`RegistrationError::UnknownGroup`] if the group doesn't exist, was removed, or belongs
+    ///   to another registry.
     /// - [`RegistrationError::GroupInUse`] if a type outside the group refers to one of its
     ///   types, for example a root type with a field whose type was first registered by the
     ///   group. Nothing is removed then.
@@ -285,7 +343,9 @@ pub struct GroupBuilder<'a> {
 }
 
 impl GroupBuilder<'_> {
-    /// Adds `T` to the group.
+    /// Adds `T` to the group. Committing fails if `T` is already registered in another group
+    /// (for example in the root group, because something used it first): removing this group
+    /// couldn't remove it then.
     pub fn add<T: Reflect>(&mut self) -> &mut Self {
         self.types.push(TypeRef::of::<T>());
         self
@@ -303,11 +363,22 @@ impl GroupBuilder<'_> {
     /// After `u32::MAX` groups, which no process registers.
     pub fn commit(self) -> Result<GroupId, RegistrationError> {
         let mut inner = self.registry.write();
-        let group = GroupId(
-            u32::try_from(inner.groups.len()).expect("fewer than u32::MAX registration groups"),
-        );
+        let group = GroupId {
+            registry: self.registry.id,
+            index: u32::try_from(inner.groups.len())
+                .expect("fewer than u32::MAX registration groups"),
+        };
         inner.transaction(|inner| {
             for ty in &self.types {
+                if let Some(key) = inner.by_type_id.get(&ty.type_id())
+                    && let existing = inner.summary(*key)
+                    && existing.group != group
+                {
+                    return Err(RegistrationError::AlreadyInGroup {
+                        ty: existing.name.into_owned(),
+                        group: inner.groups[existing.group.index as usize].name.clone(),
+                    });
+                }
                 inner.register(*ty, group)?;
             }
             Ok(())
@@ -346,6 +417,7 @@ impl Inner {
                 layout: d.layout,
                 operations: d.operations,
                 abi: d.abi,
+                group: d.group,
             },
             Entry::Removed => unreachable!("lookups never return removed keys"),
         }
@@ -391,7 +463,7 @@ impl Inner {
         let mut transient_arg = false;
         for arg in definition.generic_args() {
             match arg {
-                GenericArg::Type(arg) => {
+                GenericArgDefinition::Type(arg) => {
                     let key = self.register(*arg, group)?;
                     let summary = self.summary(key);
                     match summary.identity.stable_id() {
@@ -401,7 +473,7 @@ impl Inner {
                     arg_names.push(summary.name.into_owned());
                     generic_args.push(GenericArgument::Type(key));
                 }
-                GenericArg::Const(constant) => {
+                GenericArgDefinition::Const(constant) => {
                     id_inputs.push(GenericIdInput::Const(*constant));
                     arg_names.push(constant.to_string());
                     generic_args.push(GenericArgument::Const(*constant));
@@ -426,6 +498,16 @@ impl Inner {
             return Err(invalid(DefinitionProblem::FlagMismatch));
         }
         let name = display_name(&definition, &arg_names);
+        // A built-in container belongs with its element type: `Vec<f32>` is shared infrastructure
+        // in the root group even if a plugin needed it first, and `Vec<PluginType>` leaves with the
+        // plugin. Any other type joins the group that registers it.
+        let group = match (definition.kind().0, generic_args.first()) {
+            (
+                KindData::Array { .. } | KindData::List { .. } | KindData::Option { .. },
+                Some(GenericArgument::Type(element)),
+            ) => self.summary(*element).group,
+            _ => group,
+        };
 
         if let Some(id) = identity.stable_id()
             && let Some(existing) = self.by_stable_id.get(&id)
@@ -446,6 +528,7 @@ impl Inner {
             layout: definition.layout(),
             operations: definition.operations(),
             abi: definition.is_abi(),
+            group,
         };
         self.entries.push(Entry::Pending(summary.clone()));
         self.by_type_id.insert(ty.type_id(), key);
@@ -456,6 +539,12 @@ impl Inner {
         let kind = self.resolve_kind(&definition, &summary, group)?;
         let attributes = attributes(definition.attributes(), &summary.name, None)?;
         if definition.is_abi() {
+            if definition.operations().needs_drop() {
+                return Err(RegistrationError::InvalidDefinition {
+                    ty: summary.name.into_owned(),
+                    problem: DefinitionProblem::AbiWithDrop,
+                });
+            }
             self.check_abi(&summary.name, &kind, !generic_args.is_empty())?;
         }
         self.entries[key.0 as usize] = Entry::Live(Arc::new(TypeDescription {
@@ -492,7 +581,12 @@ impl Inner {
                 TypeKind::Primitive(primitive)
             }
             KindData::String => TypeKind::String,
-            KindData::Handle { domain } => TypeKind::Handle(HandleInfo { domain }),
+            KindData::Handle { domain } => {
+                if definition.operations().needs_drop() {
+                    return Err(invalid(DefinitionProblem::HandleWithDrop));
+                }
+                TypeKind::Handle(HandleInfo { domain })
+            }
             KindData::Opaque => TypeKind::Opaque,
             KindData::Struct { fields, tuple } => {
                 TypeKind::Struct(self.resolve_struct(fields, tuple, this, group)?)
@@ -548,8 +642,17 @@ impl Inner {
                         .offset
                         .checked_add(field_summary.layout.size())
                         .is_some_and(|end| end <= this.layout.size());
-                    if !fits || field.offset % field_summary.layout.align() != 0 {
+                    if !fits {
                         return Err(invalid(DefinitionProblem::FieldOutOfBounds(
+                            field.name.to_owned(),
+                        )));
+                    }
+                    // Aligned within any aligned value of the type: its offset is a multiple of
+                    // its alignment, which the type's own alignment is a multiple of. A packed
+                    // type fails the second test.
+                    let align = field_summary.layout.align();
+                    if field.offset % align != 0 || align > this.layout.align() {
+                        return Err(invalid(DefinitionProblem::MisalignedField(
                             field.name.to_owned(),
                         )));
                     }
@@ -564,7 +667,10 @@ impl Inner {
                             field_ty: field_summary.name.into_owned(),
                         });
                     }
-                    if field.transient && !field_summary.operations.is_defaultable() {
+                    if field.transient
+                        && !this.identity.is_transient()
+                        && !field_summary.operations.is_defaultable()
+                    {
                         return Err(RegistrationError::TransientFieldWithoutDefault {
                             ty: ty(),
                             field: field.name.to_owned(),
@@ -682,12 +788,15 @@ impl Inner {
     }
 
     fn remove_group(&mut self, group: GroupId) -> Result<(), RegistrationError> {
-        if group == GroupId::ROOT {
+        if group.registry != self.id {
+            return Err(RegistrationError::UnknownGroup { group });
+        }
+        if group.is_root() {
             return Err(RegistrationError::RootGroup);
         }
         let state = self
             .groups
-            .get(group.0 as usize)
+            .get(group.index as usize)
             .filter(|g| g.live)
             .ok_or(RegistrationError::UnknownGroup { group })?;
         let members: HashSet<TypeKey> = self
@@ -716,7 +825,7 @@ impl Inner {
         }
         self.by_type_id.retain(|_, key| !members.contains(key));
         self.by_stable_id.retain(|_, key| !members.contains(key));
-        self.groups[group.0 as usize].live = false;
+        self.groups[group.index as usize].live = false;
         Ok(())
     }
 }
@@ -792,6 +901,9 @@ fn resolve_enum(
         ty: this.name.clone().into_owned(),
         problem,
     };
+    if variants.is_empty() {
+        return Err(invalid(DefinitionProblem::NoVariants));
+    }
     check_unique_names(variants.iter().map(|v| (v.name, v.aliases)))
         .map_err(|name| invalid(DefinitionProblem::DuplicateVariant(name)))?;
     if let Some(repr) = repr {
@@ -888,6 +1000,17 @@ pub enum RegistrationError {
         /// What's wrong.
         problem: DefinitionProblem,
     },
+    /// A type added to a group is already registered in another group, so removing this group
+    /// couldn't remove it.
+    #[error(
+        "'{ty}' is already registered in group '{group}'; add it to its group before anything else \n         registers it"
+    )]
+    AlreadyInGroup {
+        /// The type.
+        ty: String,
+        /// The group it's already in.
+        group: String,
+    },
     /// A type outside the group refers to one of the group's types.
     #[error("group '{group}' can't be removed: its type '{ty}' is still used by '{used_by}'")]
     GroupInUse {
@@ -899,7 +1022,7 @@ pub enum RegistrationError {
         used_by: String,
     },
     /// The group doesn't exist in this registry, or was already removed.
-    #[error("registration group {group:?} doesn't exist or was already removed")]
+    #[error("registration group {group:?} doesn't exist in this registry, or was already removed")]
     UnknownGroup {
         /// The group.
         group: GroupId,
@@ -932,6 +1055,19 @@ pub enum DefinitionProblem {
     /// A field doesn't fit in the type, or is misaligned.
     #[error("field '{0}' lies outside the type or is misaligned")]
     FieldOutOfBounds(String),
+    /// A field's offset isn't a multiple of its alignment, or its type is more aligned than the
+    /// containing type (a packed type).
+    #[error("field '{0}' isn't aligned within the type (#[repr(packed)] types can't be reflected)")]
+    MisalignedField(String),
+    /// An enum has no variants, so no value of it exists.
+    #[error("an enum without variants has no values to reflect")]
+    NoVariants,
+    /// A handle type needs dropping, but handles are plain values that are copied and remapped.
+    #[error("handles are plain values: a handle type can't need dropping")]
+    HandleWithDrop,
+    /// An ABI-safe type needs dropping, which other languages copying it can't honor.
+    #[error("ABI-safe types are plain data: an abi type can't need dropping")]
+    AbiWithDrop,
     /// A field overlaps the one before it.
     #[error("field '{0}' overlaps another field")]
     OverlappingFields(String),

@@ -14,7 +14,7 @@
 //! struct Door {
 //!     #[reflect(category = "State")]
 //!     locked: bool,
-//!     #[reflect(range(min = 0.0, max = 180.0), units = Radians)]
+//!     #[reflect(range(min = 0.0, max = 3.1416), units = Radians)] // stored units: 0 to 180 degrees
 //!     open_angle: f32,
 //! }
 //!
@@ -25,7 +25,8 @@
 //! let TypeKind::Struct(info) = door.kind() else { unreachable!() };
 //! let (_, locked) = info.field("locked").expect("declared above");
 //! assert_eq!(locked.attributes().category(), Some("State"));
-//! assert_eq!(registry.description(locked.ty().expect("not opaque")).unwrap().name(), "bool");
+//! let bool_type = registry.description(locked.ty().expect("not opaque")).expect("registered");
+//! assert_eq!(bool_type.name(), "bool");
 //! # Ok::<(), oxreal_reflection::RegistrationError>(())
 //! ```
 //!
@@ -118,26 +119,49 @@
 //! struct NotClone { value: f32 }
 //! ```
 //!
+//! ```compile_fail,E0277
+//! # use oxreal_reflection::Reflect;
+//! #[derive(Reflect)]
+//! #[reflect(id = "1b3c6f8a-5e7d-4f9b-9c2a-6d8e0f2a4b5c", default)] // error: no Default impl
+//! struct NoDefault { value: f32 }
+//! ```
+//!
 //! [ADR-0021]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0021-reflection-and-type-registry.md
+
+// `unsafe` is confined to the modules that opt in below (ADR-0021 §7).
+#![deny(unsafe_code)]
 
 // The derive emits `::oxreal_reflection::...` paths; this lets the unit tests use it.
 #[cfg(test)]
 extern crate self as oxreal_reflection;
 
 mod attributes;
+#[expect(
+    unsafe_code,
+    reason = "hand-written `unsafe impl Reflect` for std and math types"
+)]
 mod builtin;
 mod definition;
+#[expect(
+    unsafe_code,
+    reason = "the `unsafe fn`s that run erased operations on raw pointers"
+)]
 mod description;
 mod id;
 mod kind;
+#[expect(
+    unsafe_code,
+    reason = "erased drop, clone and default through raw pointers"
+)]
 mod ops;
+#[expect(unsafe_code, reason = "declares the `unsafe trait Reflect`")]
 mod reflect;
 mod registry;
 
 pub use attributes::{Attributes, AttributesDefinition, Range, Unit};
 pub use definition::{
-    DefinitionBuilder, FieldDefinition, GenericArg, KindDefinition, Persistence, TypeDefinition,
-    TypeRef, VariantDefinition,
+    DefinitionBuilder, FieldDefinition, GenericArgDefinition, KindDefinition, Persistence,
+    TypeDefinition, TypeRef, VariantDefinition,
 };
 pub use description::{
     ArrayInfo, Field, GenericArgument, HandleInfo, Identity, ListInfo, MathComponent, MathInfo,
@@ -145,7 +169,7 @@ pub use description::{
 };
 pub use id::{ConstArg, GenericIdInput, ParseStableTypeIdError, StableTypeId};
 pub use kind::{IntRepr, Primitive};
-pub use ops::{Operations, UnsupportedOperation};
+pub use ops::{OperationError, Operations};
 pub use oxreal_reflection_derive::Reflect;
 pub use reflect::Reflect;
 pub use registry::{
@@ -153,4 +177,8 @@ pub use registry::{
 };
 
 #[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "hand-written impls and erased operations under test"
+)]
 mod tests;

@@ -13,7 +13,7 @@ use crate::TypeDefinition;
 /// #[derive(Reflect, Clone, Default)]
 /// #[reflect(id = "0b9e8d4c-7a61-4f3e-9c2d-5e8f1a7b6c30", clone, default)]
 /// struct Speed {
-///     #[reflect(range(min = 0.0, max = 20.0), units = MetresPerSecond)]
+///     #[reflect(range(min = 0.0, max = 20.0), units = MetersPerSecond)]
 ///     max: f32,
 ///     /// Recomputed every frame, never saved.
 ///     #[reflect(transient)]
@@ -31,20 +31,37 @@ use crate::TypeDefinition;
 /// # Safety
 ///
 /// Implementing `Reflect` promises that [`Reflect::DEFINITION`] describes `Self` exactly, because
-/// code that reads and writes values through descriptions trusts it:
+/// code that reads and writes values through descriptions trusts it. Registration checks what it
+/// can (marked *checked*); the rest is the implementer's proof:
 ///
-/// - it's built with [`TypeDefinition::builder::<Self>`](TypeDefinition::builder), so its
-///   layout and operations are `Self`'s;
-/// - every field definition names the field's real type and its real offset (`offset_of!`), and
-///   the fields don't overlap;
-/// - a primitive kind is used only by that primitive, `String` only by `String`, and so on;
-/// - a unit enum's discriminants are its real ones;
-/// - [`Reflect::TRANSIENT`] and [`Reflect::ABI`] agree with the definition. Registration checks
-///   this and refuses a mismatch.
+/// - It's built with [`TypeDefinition::builder::<Self>`](TypeDefinition::builder), so its layout
+///   and operations are `Self`'s (*checked*: the definition's `TypeId`).
+/// - **Every** field is listed, in a struct, with its real type and real offset (`offset_of!`). A
+///   field whose type isn't reflected is listed as opaque. Fields don't overlap (*checked*).
+/// - `Self` isn't `#[repr(packed)]`: every field is aligned within any aligned `Self` (*checked*:
+///   no field type is more aligned than `Self`, and each offset is a multiple of its alignment).
+/// - **Every** variant of a unit enum is listed, with its real discriminant when the enum has an
+///   explicit `repr` (*checked*: unique and within the `repr`).
+/// - A primitive kind is used only by that primitive (*checked*: its layout), `String` only by
+///   `String`, and so on.
+/// - A handle kind is used only by plain data without `Drop` for which every bit pattern is a
+///   valid value (*checked*: no `Drop`).
+/// - [`Reflect::ABI`] (and `.abi()`) only for a `#[repr(C)]` or `#[repr(transparent)]` type
+///   without `Drop` (*checked*) whose layout is exactly its field definitions, every field
+///   ABI-safe (*checked*). Other languages read it as that C struct. Padding bytes may exist and
+///   have no defined value: readers copy them but never interpret them.
+/// - [`Reflect::TRANSIENT`] and [`Reflect::ABI`] agree with the definition (*checked*).
 ///
-/// A hand-written impl takes on this proof obligation. The derive discharges it by
-/// construction.
-pub unsafe trait Reflect: 'static {
+/// A hand-written impl takes on this proof obligation. The derive discharges it by construction.
+///
+/// **Deriving exposes the fields.** Reflection can read and, through later APIs, write every
+/// field that isn't opaque, private ones included. A type whose own `unsafe` code relies on an
+/// invariant between its fields (such as `len <= capacity`) must mark those fields
+/// `#[reflect(opaque)]` (and `transient` if they're not saved) or implement `Reflect` by hand.
+///
+/// `Reflect` types are `Send + Sync`, like components: descriptions and their erased operations
+/// are shared between threads, so values may be cloned and dropped on any thread.
+pub unsafe trait Reflect: Send + Sync + 'static {
     /// Whether values of this type are never saved: the type is transient or rebuilt, or it's a
     /// generic instantiation with a transient type argument.
     ///

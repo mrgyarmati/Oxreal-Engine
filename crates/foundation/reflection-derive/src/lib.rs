@@ -21,6 +21,8 @@
 //!
 //! [ADR-0021]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0021-reflection-and-type-registry.md
 
+#![forbid(unsafe_code)]
+
 mod attrs;
 mod expand;
 

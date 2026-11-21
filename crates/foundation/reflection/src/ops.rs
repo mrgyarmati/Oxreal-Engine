@@ -2,11 +2,13 @@
 //! (ADR-0021 §3).
 //!
 //! This is the `unsafe` core of the crate's first slice (ADR-0021 §7). Each operation is a plain
-//! function pointer, monomorphized for one type, that works on untyped pointers. Safe code can't
-//! call them: [`Operations`]' methods are `unsafe fn`s whose callers promise the pointer
-//! contract, and the borrowed and owned views built on them later keep that promise for safe
-//! callers.
+//! function pointer, monomorphized for one type by the `pub(crate)` constructors below, that
+//! works on untyped pointers. Code outside the crate calls them only through
+//! [`TypeDescription`](crate::TypeDescription)'s `unsafe fn`s, whose callers promise the
+//! pointer contract there; the borrowed and owned views built on them later keep that promise
+//! for safe callers.
 
+use std::any::TypeId;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr;
 
@@ -27,8 +29,12 @@ type DefaultFn = unsafe fn(*mut u8);
 /// - **Default** only when the type declares it: `#[reflect(default)]` with a real [`Default`]
 ///   impl, or a container that has an empty value.
 ///
-/// Every pointer passed to these methods must be aligned for the described type and must not
-/// overlap another argument.
+/// Run them through [`TypeDescription::drop_value`](crate::TypeDescription::drop_value),
+/// [`clone_value`](crate::TypeDescription::clone_value) and
+/// [`default_value`](crate::TypeDescription::default_value).
+///
+/// Invariant: every function pointer was monomorphized for the type whose definition holds
+/// these operations. Only this crate's constructors set them, through `builder::<T>`.
 #[derive(Clone, Copy)]
 pub struct Operations {
     drop: Option<DropFn>,
@@ -96,7 +102,7 @@ impl Operations {
     }
 
     /// Whether dropping a value does anything. When it doesn't, storage may skip
-    /// [`Operations::drop_in_place`] entirely.
+    /// [`TypeDescription::drop_value`](crate::TypeDescription::drop_value) entirely.
     #[must_use]
     pub const fn needs_drop(&self) -> bool {
         self.drop.is_some()
@@ -114,59 +120,52 @@ impl Operations {
         self.default.is_some()
     }
 
-    /// Drops the value at `value`, which is uninitialized afterwards.
+    /// Drops the value at `value`.
     ///
     /// # Safety
     ///
-    /// `value` must point to a valid, aligned value of the type these operations describe,
-    /// which the caller owns and doesn't use again (other than to overwrite it).
-    pub unsafe fn drop_in_place(&self, value: *mut u8) {
+    /// The contract of [`TypeDescription::drop_value`](crate::TypeDescription::drop_value),
+    /// for the type these operations belong to.
+    pub(crate) unsafe fn drop_in_place(&self, value: *mut u8) {
         if let Some(drop) = self.drop {
-            // SAFETY: the caller's contract is `drop`'s contract.
+            // SAFETY: `drop` was monomorphized for the described type (the struct's invariant),
+            // and the caller's contract is its contract.
             unsafe { drop(value) }
         }
     }
 
-    /// Writes a clone of the value at `source` into `target`.
-    ///
-    /// If the clone panics, `target` stays uninitialized and nothing leaks.
-    ///
-    /// # Errors
-    ///
-    /// [`UnsupportedOperation::Clone`] if the type can't be cloned. `target` is untouched.
+    /// Writes a clone of the value at `source` into `target`. Returns `false`, writing nothing,
+    /// if the type isn't cloneable.
     ///
     /// # Safety
     ///
-    /// - `source` must point to a valid, aligned value of the described type, readable for the
-    ///   duration of the call.
-    /// - `target` must be aligned, writable for the type's size, not overlap `source`, and hold
-    ///   no value that needs dropping (it is overwritten without being dropped).
-    pub unsafe fn clone_into(
-        &self,
-        source: *const u8,
-        target: *mut u8,
-    ) -> Result<(), UnsupportedOperation> {
-        let clone = self.clone.ok_or(UnsupportedOperation::Clone)?;
-        // SAFETY: the caller's contract is `clone`'s contract.
+    /// The contract of [`TypeDescription::clone_value`](crate::TypeDescription::clone_value), for
+    /// the type these operations belong to.
+    pub(crate) unsafe fn clone_into(&self, source: *const u8, target: *mut u8) -> bool {
+        let Some(clone) = self.clone else {
+            return false;
+        };
+        // SAFETY: `clone` was monomorphized for the described type (the struct's invariant), and
+        // the caller's contract is its contract.
         unsafe { clone(source, target) };
-        Ok(())
+        true
     }
 
-    /// Writes the default value into `target`.
-    ///
-    /// # Errors
-    ///
-    /// [`UnsupportedOperation::Default`] if the type has no default. `target` is untouched.
+    /// Writes the default value into `target`. Returns `false`, writing nothing, if the type has
+    /// no default.
     ///
     /// # Safety
     ///
-    /// `target` must be aligned, writable for the type's size, and hold no value that needs
-    /// dropping (it is overwritten without being dropped).
-    pub unsafe fn default_into(&self, target: *mut u8) -> Result<(), UnsupportedOperation> {
-        let default = self.default.ok_or(UnsupportedOperation::Default)?;
-        // SAFETY: the caller's contract is `default`'s contract.
+    /// The contract of [`TypeDescription::default_value`](crate::TypeDescription::default_value),
+    /// for the type these operations belong to.
+    pub(crate) unsafe fn default_into(&self, target: *mut u8) -> bool {
+        let Some(default) = self.default else {
+            return false;
+        };
+        // SAFETY: `default` was monomorphized for the described type (the struct's invariant),
+        // and the caller's contract is its contract.
         unsafe { default(target) };
-        Ok(())
+        true
     }
 }
 
@@ -181,17 +180,23 @@ impl std::fmt::Debug for Operations {
 }
 
 /// An operation the type doesn't support was requested.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum UnsupportedOperation {
+pub enum OperationError {
     /// The type isn't cloneable: it doesn't declare `#[reflect(clone)]`, or it's a container of
-    /// a type that doesn't.
-    #[error("the type can't be cloned: it doesn't declare #[reflect(clone)]")]
-    Clone,
+    /// a type that doesn't. Copies of it go through its saved form instead (ADR-0021 §3).
+    #[error("'{ty}' can't be cloned: it doesn't declare #[reflect(clone)]")]
+    NotCloneable {
+        /// The type.
+        ty: String,
+    },
     /// The type has no default value: it doesn't declare `#[reflect(default)]`, or it's an
     /// array of a type that doesn't.
-    #[error("the type has no default value: it doesn't declare #[reflect(default)]")]
-    Default,
+    #[error("'{ty}' has no default value: it doesn't declare #[reflect(default)]")]
+    NoDefault {
+        /// The type.
+        ty: String,
+    },
 }
 
 /// # Safety
@@ -224,6 +229,11 @@ unsafe fn default_value<T: Default>(target: *mut u8) {
 
 /// The erased clone of `T`, which the container operations only install when it exists.
 fn element_clone<T: Reflect>() -> CloneFn {
+    debug_assert_eq!(
+        T::DEFINITION.type_id(),
+        TypeId::of::<T>(),
+        "a Reflect impl's definition was built for another type"
+    );
     T::DEFINITION
         .operations()
         .clone
@@ -330,6 +340,11 @@ unsafe fn clone_array<T: Reflect, const N: usize>(source: *const u8, target: *mu
 ///
 /// As [`default_value`], for `[T; N]`. Only installed when `T` is defaultable.
 unsafe fn default_array<T: Reflect, const N: usize>(target: *mut u8) {
+    debug_assert_eq!(
+        T::DEFINITION.type_id(),
+        TypeId::of::<T>(),
+        "a Reflect impl's definition was built for another type"
+    );
     let default = T::DEFINITION
         .operations()
         .default

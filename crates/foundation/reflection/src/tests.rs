@@ -5,14 +5,13 @@ use std::cell::Cell;
 use std::mem::{MaybeUninit, offset_of, size_of};
 use std::sync::Arc;
 
-use oxreal_math::{Quat, Transform, Vec3};
+use oxreal_math::{Affine3A, Mat4, Quat, Transform, Vec3, Vec3A};
 
 use crate::id::builtin;
 use crate::{
-    AttributesDefinition, DefinitionProblem, FieldDefinition, GenericIdInput, GroupId, Identity,
-    IntRepr, KindDefinition, Persistence, Primitive, Range, Reflect, RegistrationError,
+    AttributesDefinition, DefinitionProblem, FieldDefinition, GenericIdInput, Identity, IntRepr,
+    KindDefinition, OperationError, Persistence, Primitive, Range, Reflect, RegistrationError,
     StableTypeId, TypeDefinition, TypeDescription, TypeKind, TypeRegistry, Unit,
-    UnsupportedOperation,
 };
 
 fn described<T: Reflect>(registry: &TypeRegistry) -> Arc<TypeDescription> {
@@ -40,7 +39,7 @@ fn name_of(registry: &TypeRegistry, key: crate::TypeKey) -> String {
 )]
 struct Movement {
     /// Top speed.
-    #[reflect(range(min = 0, max = 20.5, step = 0.5), units = MetresPerSecond)]
+    #[reflect(range(min = 0, max = 20.5, step = 0.5), units = MetersPerSecond)]
     max_speed: f32,
     #[reflect(
         display_name = "Turn rate",
@@ -159,7 +158,7 @@ fn derived_names_attributes_and_aliases() {
         speed.attributes().range(),
         Some(Range::new(0.0, 20.5).with_step(0.5))
     );
-    assert_eq!(speed.attributes().units(), Some(Unit::MetresPerSecond));
+    assert_eq!(speed.attributes().units(), Some(Unit::MetersPerSecond));
     assert_eq!(name_of(&registry, speed.ty().expect("not opaque")), "f32");
 
     let (index, turn) = info.field("yaw_rate").expect("found by alias");
@@ -317,7 +316,7 @@ fn opaque_fields_have_no_type() {
 #[test]
 fn every_builtin_type_is_registered_with_its_id() {
     let registry = TypeRegistry::new();
-    for id in crate::id::tests::builtin_ids() {
+    for &id in builtin::ALL {
         let generic_definition = [builtin::VEC, builtin::OPTION, builtin::ARRAY].contains(&id);
         assert_eq!(
             registry.key_by_stable_id(id).is_some(),
@@ -575,7 +574,7 @@ fn groups_become_visible_on_commit_and_leave_tombstones() {
     let i32_key = registry.key_of::<i32>().expect("built in");
     assert_eq!(
         registry.description(i32_key).expect("live").group(),
-        GroupId::ROOT,
+        registry.root_group(),
         "already-registered field types stay where they are"
     );
 
@@ -601,28 +600,35 @@ fn groups_become_visible_on_commit_and_leave_tombstones() {
     assert!(reloaded > node, "removed keys are never reused");
 }
 
+/// A root type that refers to a plugin's type.
+#[derive(Reflect)]
+#[reflect(id = "c4b8e5f3-0a6d-4c1e-9f2b-3d5e7a9c1b4f")]
+struct UsesWeather {
+    weather: Weather,
+}
+
 #[test]
 fn a_group_in_use_outside_it_isnt_removed() {
     let registry = TypeRegistry::new();
     let mut group = registry.group("plugin");
-    group.add::<Vec<u16>>();
+    group.add::<Weather>();
     let id = group.commit().expect("valid");
     registry
-        .register::<Option<Vec<u16>>>()
+        .register::<UsesWeather>()
         .expect("uses the group's type");
 
     let error = registry.remove_group(id).expect_err("in use");
     assert!(
         matches!(&error, RegistrationError::GroupInUse { ty, used_by, .. }
-            if ty == "Vec<u16>" && used_by == "Option<Vec<u16>>"),
+            if ty.ends_with("Weather") && used_by.ends_with("UsesWeather")),
         "{error}"
     );
     assert!(
-        registry.key_of::<Vec<u16>>().is_some(),
+        registry.key_of::<Weather>().is_some(),
         "nothing was removed"
     );
     assert_eq!(
-        registry.remove_group(GroupId::ROOT),
+        registry.remove_group(registry.root_group()),
         Err(RegistrationError::RootGroup)
     );
 }
@@ -671,6 +677,41 @@ fn concurrent_registration_agrees_on_keys() {
 
 // --- Erased operations (run under Miri) ---
 
+/// Clones `source` through its description, which must be cloneable.
+fn erased_clone<T: Reflect>(description: &TypeDescription, source: &T) -> T {
+    let mut copy = MaybeUninit::<T>::uninit();
+    // SAFETY: `description` is `T`'s; `source` is a valid `T` that nothing writes during the
+    // call; `copy` is aligned, writable and doesn't overlap it.
+    unsafe {
+        description
+            .clone_value(std::ptr::from_ref(source).cast(), copy.as_mut_ptr().cast())
+            .expect("cloneable");
+    }
+    // SAFETY: `clone_value` succeeded, so it initialized `copy`.
+    unsafe { copy.assume_init() }
+}
+
+/// Builds a default `T` through its description, which must be defaultable.
+fn erased_default<T: Reflect>(description: &TypeDescription) -> T {
+    let mut value = MaybeUninit::<T>::uninit();
+    // SAFETY: `description` is `T`'s; `value` is aligned and writable.
+    unsafe {
+        description
+            .default_value(value.as_mut_ptr().cast())
+            .expect("defaultable");
+    }
+    // SAFETY: `default_value` succeeded, so it initialized `value`.
+    unsafe { value.assume_init() }
+}
+
+/// Drops `value` through its description.
+fn erased_drop<T: Reflect>(description: &TypeDescription, value: T) {
+    let mut value = std::mem::ManuallyDrop::new(value);
+    // SAFETY: `description` is `T`'s; `value` is a valid, owned `T` that is never used again
+    // (`ManuallyDrop` keeps it from being dropped twice).
+    unsafe { description.drop_value(std::ptr::from_mut(&mut *value).cast()) };
+}
+
 #[test]
 fn erased_clone_default_and_drop_of_a_derived_type() {
     let registry = TypeRegistry::new();
@@ -684,29 +725,14 @@ fn erased_clone_default_and_drop_of_a_derived_type() {
         waypoints: vec![Vec3::X, Vec3::Y],
         ..Movement::default()
     };
-    let mut copy = MaybeUninit::<Movement>::uninit();
-    // SAFETY: `source` is a valid `Movement`; `copy` is aligned, writable and uninitialized.
-    unsafe {
-        ops.clone_into(std::ptr::from_ref(&source).cast(), copy.as_mut_ptr().cast())
-            .expect("cloneable");
-    }
-    // SAFETY: `clone_into` initialized `copy`.
-    let copy = unsafe { copy.assume_init() };
-    assert_eq!(copy, source);
-
-    let mut default = MaybeUninit::<Movement>::uninit();
-    // SAFETY: `default` is aligned, writable and uninitialized.
-    unsafe {
-        ops.default_into(default.as_mut_ptr().cast())
-            .expect("defaultable")
-    };
-    // SAFETY: `default_into` initialized `default`; it's dropped through the erased drop and
-    // never used again.
-    unsafe { ops.drop_in_place(default.as_mut_ptr().cast()) };
+    assert_eq!(erased_clone(&movement, &source), source);
+    let default: Movement = erased_default(&movement);
+    assert_eq!(default, Movement::default());
+    erased_drop(&movement, default);
 }
 
 #[test]
-fn unsupported_operations_are_errors() {
+fn unsupported_operations_are_errors_naming_the_type() {
     let registry = TypeRegistry::new();
     let node = described::<Node>(&registry);
     let mut target = MaybeUninit::<Node>::uninit();
@@ -714,75 +740,46 @@ fn unsupported_operations_are_errors() {
         value: 1,
         children: Vec::new(),
     };
-    // SAFETY: valid source, aligned uninitialized target; nothing is written on error.
+    // SAFETY: valid source; aligned, writable target; nothing is written on error.
     let result = unsafe {
-        node.operations().clone_into(
+        node.clone_value(
             std::ptr::from_ref(&source).cast(),
             target.as_mut_ptr().cast(),
         )
     };
-    assert_eq!(result, Err(UnsupportedOperation::Clone));
+    let error = result.expect_err("Node doesn't declare clone");
+    assert!(
+        matches!(&error, OperationError::NotCloneable { ty } if ty.ends_with("Node")),
+        "{error}"
+    );
     // SAFETY: as above.
-    let result = unsafe { node.operations().default_into(target.as_mut_ptr().cast()) };
-    assert_eq!(result, Err(UnsupportedOperation::Default));
+    let result = unsafe { node.default_value(target.as_mut_ptr().cast()) };
+    assert!(matches!(result, Err(OperationError::NoDefault { .. })));
     assert_eq!(source.value, 1);
 }
 
 #[test]
 fn erased_container_clones_copy_every_element() {
     let registry = TypeRegistry::new();
-
-    let list = described::<Vec<String>>(&registry);
     let source = vec!["a".to_owned(), "bc".to_owned(), String::new()];
-    let mut copy = MaybeUninit::<Vec<String>>::uninit();
-    // SAFETY: valid source; aligned, uninitialized target.
-    unsafe {
-        list.operations()
-            .clone_into(std::ptr::from_ref(&source).cast(), copy.as_mut_ptr().cast())
-            .expect("String is cloneable");
-    }
-    // SAFETY: initialized by `clone_into`.
-    assert_eq!(unsafe { copy.assume_init() }, source);
+    assert_eq!(
+        erased_clone(&described::<Vec<String>>(&registry), &source),
+        source
+    );
 
     let option = described::<Option<Vec<String>>>(&registry);
     for source in [None, Some(vec!["x".to_owned()])] {
-        let mut copy = MaybeUninit::<Option<Vec<String>>>::uninit();
-        // SAFETY: valid source; aligned, uninitialized target.
-        unsafe {
-            option
-                .operations()
-                .clone_into(std::ptr::from_ref(&source).cast(), copy.as_mut_ptr().cast())
-                .expect("cloneable");
-        }
-        // SAFETY: initialized by `clone_into`.
-        assert_eq!(unsafe { copy.assume_init() }, source);
+        assert_eq!(erased_clone(&option, &source), source);
     }
 
-    let array = described::<[String; 3]>(&registry);
     let source = ["1".to_owned(), "2".to_owned(), "3".to_owned()];
-    let mut copy = MaybeUninit::<[String; 3]>::uninit();
-    // SAFETY: valid source; aligned, uninitialized target.
-    unsafe {
-        array
-            .operations()
-            .clone_into(std::ptr::from_ref(&source).cast(), copy.as_mut_ptr().cast())
-            .expect("cloneable");
-    }
-    // SAFETY: initialized by `clone_into`.
-    assert_eq!(unsafe { copy.assume_init() }, source);
+    assert_eq!(
+        erased_clone(&described::<[String; 3]>(&registry), &source),
+        source
+    );
 
-    let mut default = MaybeUninit::<[Vec<u8>; 2]>::uninit();
-    let defaults = described::<[Vec<u8>; 2]>(&registry);
-    // SAFETY: aligned, uninitialized target.
-    unsafe {
-        defaults
-            .operations()
-            .default_into(default.as_mut_ptr().cast())
-            .expect("defaultable")
-    };
-    // SAFETY: initialized by `default_into`.
-    let default = unsafe { default.assume_init() };
-    assert_eq!(default, [Vec::<u8>::new(), Vec::new()]);
+    let defaults: [Vec<u8>; 2] = erased_default(&described::<[Vec<u8>; 2]>(&registry));
+    assert_eq!(defaults, [Vec::<u8>::new(), Vec::new()]);
 
     assert!(
         !described::<Vec<Node>>(&registry)
@@ -802,12 +799,51 @@ fn erased_container_clones_copy_every_element() {
     );
 }
 
+#[test]
+fn zero_length_arrays_clone_and_default() {
+    let registry = TypeRegistry::new();
+    let empty = described::<[String; 0]>(&registry);
+    let source: [String; 0] = [];
+    assert_eq!(erased_clone(&empty, &source), source);
+    let _: [String; 0] = erased_default(&empty);
+}
+
+#[test]
+fn over_aligned_values_in_containers() {
+    // Vec3A and the matrices are 16-byte aligned.
+    let registry = TypeRegistry::new();
+    let list = vec![Vec3A::X, Vec3A::Y, Vec3A::Z];
+    assert_eq!(
+        erased_clone(&described::<Vec<Vec3A>>(&registry), &list),
+        list
+    );
+    let array = [
+        Mat4::IDENTITY,
+        Mat4::from_scale(Vec3::splat(2.0)),
+        Mat4::ZERO,
+    ];
+    assert_eq!(
+        erased_clone(&described::<[Mat4; 3]>(&registry), &array),
+        array
+    );
+    let option = Some(Affine3A::from_translation(Vec3::ONE));
+    assert_eq!(
+        erased_clone(&described::<Option<Affine3A>>(&registry), &option),
+        option
+    );
+    let defaults: [Mat4; 2] = erased_default(&described::<[Mat4; 2]>(&registry));
+    assert_eq!(defaults, [Mat4::IDENTITY; 2]);
+}
+
 thread_local! {
     static LIVE: Cell<isize> = const { Cell::new(0) };
     static CLONES_LEFT: Cell<usize> = const { Cell::new(usize::MAX) };
+    static DEFAULTS_LEFT: Cell<usize> = const { Cell::new(usize::MAX) };
+    static PANIC_ON_DROP: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
-/// Counts live values, and panics on clone once `CLONES_LEFT` runs out.
+/// Counts live values. Panics on clone or default once its budget runs out, and on drop when
+/// its value is `PANIC_ON_DROP`.
 #[derive(Reflect, Debug)]
 #[reflect(transient, clone, default)]
 struct Tracked(u32);
@@ -830,6 +866,9 @@ impl Clone for Tracked {
 
 impl Default for Tracked {
     fn default() -> Self {
+        let left = DEFAULTS_LEFT.get();
+        assert!(left > 0, "default budget exhausted");
+        DEFAULTS_LEFT.set(left - 1);
         Self::new(0)
     }
 }
@@ -837,38 +876,54 @@ impl Default for Tracked {
 impl Drop for Tracked {
     fn drop(&mut self) {
         LIVE.set(LIVE.get() - 1);
+        if PANIC_ON_DROP.get() == Some(self.0) {
+            PANIC_ON_DROP.set(None);
+            panic!("drop of Tracked({}) panics", self.0);
+        }
     }
 }
 
-/// Clones `source` through its erased clone with a budget of `budget` element clones, and
-/// returns whether it panicked. A clone that succeeds is dropped again.
-fn erased_clone_with_budget<T: Reflect>(
-    registry: &TypeRegistry,
-    source: &T,
-    budget: usize,
-) -> bool {
-    let description = described::<T>(registry);
-    CLONES_LEFT.set(budget);
-    let mut copy = MaybeUninit::<T>::uninit();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: valid source; aligned, uninitialized target.
-        unsafe {
-            description
-                .operations()
-                .clone_into(std::ptr::from_ref(source).cast(), copy.as_mut_ptr().cast())
-                .expect("cloneable");
-        }
-    }));
-    CLONES_LEFT.set(usize::MAX);
-    if result.is_ok() {
-        // SAFETY: the clone finished, so `copy` is initialized; it's dropped once.
-        unsafe {
-            description
-                .operations()
-                .drop_in_place(copy.as_mut_ptr().cast())
-        };
+/// A zero-sized type that counts live values.
+#[derive(Reflect, Debug)]
+#[reflect(transient, clone, default)]
+struct Zst;
+
+impl Zst {
+    fn new() -> Self {
+        LIVE.set(LIVE.get() + 1);
+        Self
     }
-    result.is_err()
+}
+
+impl Clone for Zst {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl Default for Zst {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for Zst {
+    fn drop(&mut self) {
+        LIVE.set(LIVE.get() - 1);
+    }
+}
+
+/// Runs `operation` with a budget of `budget` clones or defaults (`cell`), returning whether it
+/// panicked.
+fn panics_with_budget(
+    cell: &'static std::thread::LocalKey<Cell<usize>>,
+    budget: usize,
+    operation: impl FnOnce(),
+) -> bool {
+    cell.set(budget);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).is_err();
+    cell.set(usize::MAX);
+    panicked
 }
 
 #[test]
@@ -879,44 +934,105 @@ fn a_panicking_element_clone_leaks_and_double_drops_nothing() {
         let list = vec![Tracked::new(1), Tracked::new(2), Tracked::new(3)];
         let array = [Tracked::new(4), Tracked::new(5), Tracked::new(6)];
         let option = Some(Tracked::new(7));
+        let list_type = described::<Vec<Tracked>>(&registry);
+        let array_type = described::<[Tracked; 3]>(&registry);
+        let option_type = described::<Option<Tracked>>(&registry);
         for budget in 0..=3 {
-            assert_eq!(
-                erased_clone_with_budget(&registry, &list, budget),
-                budget < 3
-            );
-            assert_eq!(
-                erased_clone_with_budget(&registry, &array, budget),
-                budget < 3
-            );
+            let panicked = panics_with_budget(&CLONES_LEFT, budget, || {
+                drop(erased_clone(&list_type, &list));
+            });
+            assert_eq!(panicked, budget < 3);
+            let panicked = panics_with_budget(&CLONES_LEFT, budget, || {
+                drop(erased_clone(&array_type, &array));
+            });
+            assert_eq!(panicked, budget < 3);
             assert_eq!(
                 LIVE.get() - before,
                 7,
                 "budget {budget}: partial clones were dropped"
             );
         }
-        assert!(erased_clone_with_budget(&registry, &option, 0));
-        assert!(!erased_clone_with_budget(&registry, &option, 1));
+        assert!(panics_with_budget(&CLONES_LEFT, 0, || {
+            drop(erased_clone(&option_type, &option));
+        }));
+        assert!(!panics_with_budget(&CLONES_LEFT, 1, || {
+            drop(erased_clone(&option_type, &option));
+        }));
         assert_eq!(LIVE.get() - before, 7);
     }
     assert_eq!(LIVE.get(), before, "every value was dropped exactly once");
 }
 
 #[test]
-fn erased_defaults_and_drops_balance() {
+fn a_panicking_element_default_drops_the_finished_prefix() {
     let registry = TypeRegistry::new();
     let before = LIVE.get();
     let array = described::<[Tracked; 4]>(&registry);
-    let mut value = MaybeUninit::<[Tracked; 4]>::uninit();
-    // SAFETY: aligned, uninitialized target.
-    unsafe {
-        array
-            .operations()
-            .default_into(value.as_mut_ptr().cast())
-            .expect("defaultable")
-    };
-    assert_eq!(LIVE.get() - before, 4);
-    // SAFETY: initialized above; dropped once and not used again.
-    unsafe { array.operations().drop_in_place(value.as_mut_ptr().cast()) };
+    for budget in 0..=4 {
+        let panicked = panics_with_budget(&DEFAULTS_LEFT, budget, || {
+            let value: [Tracked; 4] = erased_default(&array);
+            erased_drop(&array, value);
+        });
+        assert_eq!(panicked, budget < 4);
+        assert_eq!(LIVE.get(), before, "budget {budget}");
+    }
+}
+
+#[test]
+fn erased_drops_of_containers_drop_every_element() {
+    let registry = TypeRegistry::new();
+    let before = LIVE.get();
+    erased_drop(
+        &described::<Vec<Tracked>>(&registry),
+        vec![Tracked::new(1), Tracked::new(2)],
+    );
+    erased_drop(
+        &described::<Option<Tracked>>(&registry),
+        Some(Tracked::new(3)),
+    );
+    erased_drop(
+        &described::<[Tracked; 2]>(&registry),
+        [Tracked::new(4), Tracked::new(5)],
+    );
+    assert_eq!(LIVE.get(), before);
+}
+
+#[test]
+fn a_panicking_drop_inside_a_list_drops_the_other_elements() {
+    let registry = TypeRegistry::new();
+    let before = LIVE.get();
+    let list = described::<Vec<Tracked>>(&registry);
+    PANIC_ON_DROP.set(Some(2));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        erased_drop(
+            &list,
+            vec![Tracked::new(1), Tracked::new(2), Tracked::new(3)],
+        );
+    }))
+    .is_err();
+    assert!(panicked);
+    assert_eq!(
+        LIVE.get(),
+        before,
+        "the elements after the panicking one were dropped too"
+    );
+}
+
+#[test]
+fn zero_sized_elements_balance() {
+    let registry = TypeRegistry::new();
+    let before = LIVE.get();
+    {
+        let list = vec![Zst::new(), Zst::new(), Zst::new()];
+        let copy = erased_clone(&described::<Vec<Zst>>(&registry), &list);
+        assert_eq!(copy.len(), 3);
+        let array = [Zst::new(), Zst::new()];
+        let copy_array = erased_clone(&described::<[Zst; 2]>(&registry), &array);
+        let option = erased_clone(&described::<Option<Zst>>(&registry), &Some(Zst::new()));
+        let defaults: [Zst; 3] = erased_default(&described::<[Zst; 3]>(&registry));
+        erased_drop(&described::<Vec<Zst>>(&registry), copy);
+        drop((list, array, copy_array, option, defaults));
+    }
     assert_eq!(LIVE.get(), before);
 }
 
@@ -925,27 +1041,235 @@ fn math_types_clone_and_default_through_their_impls() {
     let registry = TypeRegistry::new();
     let transform = described::<Transform>(&registry);
     let source = Transform::from_rotation(Quat::from_rotation_y(1.0));
-    let mut copy = MaybeUninit::<Transform>::uninit();
-    // SAFETY: valid source; aligned, uninitialized target.
-    unsafe {
-        transform
-            .operations()
-            .clone_into(std::ptr::from_ref(&source).cast(), copy.as_mut_ptr().cast())
-            .expect("cloneable");
-    }
-    // SAFETY: initialized by `clone_into`.
-    assert_eq!(unsafe { copy.assume_init() }, source);
+    assert_eq!(erased_clone(&transform, &source), source);
+    assert_eq!(erased_default::<Transform>(&transform), Transform::IDENTITY);
     assert!(!transform.operations().needs_drop());
 }
 
 #[test]
-fn erased_operations_are_used_for_mode_values() {
+fn mode_doesnt_declare_clone() {
     let registry = TypeRegistry::new();
     let mode = described::<Mode>(&registry);
-    assert!(
-        !mode.operations().is_cloneable(),
-        "Mode doesn't declare clone"
-    );
+    assert!(!mode.operations().is_cloneable());
     assert_eq!(Mode::Walk as u8, 3);
     let _ = (Mode::Run, Mode::Fly, Weather::Clear, Weather::Rain, Marker);
+}
+
+// --- Registry rules added after review ---
+
+#[test]
+fn built_in_containers_belong_to_their_element_types_group() {
+    let registry = TypeRegistry::new();
+    let mut group = registry.group("plugin");
+    group.add::<Vec<u16>>().add::<Option<Weather>>();
+    let id = group.commit().expect("valid");
+    let shared = registry.description_of::<Vec<u16>>().expect("registered");
+    assert_eq!(
+        shared.group(),
+        registry.root_group(),
+        "Vec<u16> is shared, so it's root's"
+    );
+    let own = registry
+        .description_of::<Option<Weather>>()
+        .expect("registered");
+    assert_eq!(own.group(), id, "Option<Weather> leaves with Weather");
+
+    // A root type using Vec<u16> doesn't pin the plugin.
+    registry.register::<Option<Vec<u16>>>().expect("valid");
+    registry
+        .remove_group(id)
+        .expect("nothing outside uses the plugin's types");
+    assert!(registry.key_of::<Option<Weather>>().is_none());
+    assert!(registry.key_of::<Vec<u16>>().is_some());
+}
+
+#[test]
+fn a_type_already_in_another_group_cant_join_a_group() {
+    let registry = TypeRegistry::new();
+    registry.register::<Weather>().expect("valid");
+    let mut group = registry.group("plugin");
+    group.add::<Weather>();
+    let error = group.commit().expect_err("Weather is root's");
+    assert!(
+        matches!(&error, RegistrationError::AlreadyInGroup { ty, group }
+            if ty.ends_with("Weather") && group == "root"),
+        "{error}"
+    );
+
+    // Adding a type twice, or one the group itself pulled in, is fine.
+    let mut group = registry.group("plugin");
+    group.add::<Node>().add::<Vec<Node>>().add::<Node>();
+    group.commit().expect("all in this group");
+}
+
+#[test]
+fn group_ids_belong_to_their_registry() {
+    let first = TypeRegistry::new();
+    let second = TypeRegistry::new();
+    let mut group = first.group("plugin");
+    group.add::<Weather>();
+    let id = group.commit().expect("valid");
+    assert_eq!(
+        second.remove_group(id),
+        Err(RegistrationError::UnknownGroup { group: id })
+    );
+    assert_eq!(
+        second.remove_group(first.root_group()),
+        Err(RegistrationError::UnknownGroup {
+            group: first.root_group()
+        })
+    );
+}
+
+#[test]
+fn unregistered_ids_lists_whats_missing_from_a_listing() {
+    let registry = TypeRegistry::new();
+    registry.register::<Weather>().expect("valid");
+    let listing = "\u{feff}# generated\r\n\
+                   f4d8b5c3-0a6e-4b1d-8f9c-3e5a7b9c1d4f Weather\r\n\
+                   \r\n\
+                   e3c7a4b2-9f5d-4a0c-9e8b-2d4f6a8b0c3e Mode\r\n";
+    assert_eq!(
+        registry.unregistered_ids(listing),
+        Ok(vec![StableTypeId::from_uuid(
+            "e3c7a4b2-9f5d-4a0c-9e8b-2d4f6a8b0c3e"
+        )])
+    );
+    assert!(registry.unregistered_ids("not-a-uuid Thing").is_err());
+}
+
+/// An honest hand-written impl of a packed type: real field types, real offsets. Registration
+/// must still refuse it, because its fields aren't aligned.
+#[repr(C, packed(1))]
+struct Packed {
+    wide: u32,
+    narrow: u8,
+}
+
+// SAFETY: deliberately breaks the "not packed" clause; registration must refuse it.
+unsafe impl Reflect for Packed {
+    const TRANSIENT: bool = true;
+    const ABI: bool = false;
+    const DEFINITION: TypeDefinition = TypeDefinition::builder::<Self>(
+        "Packed",
+        Persistence::Transient,
+        KindDefinition::named_struct(&[
+            FieldDefinition::new::<u32>("wide", offset_of!(Packed, wide)),
+            FieldDefinition::new::<u8>("narrow", offset_of!(Packed, narrow)),
+        ]),
+    )
+    .build();
+}
+
+/// A hand-written handle that needs dropping.
+struct DroppingHandle(String);
+
+// SAFETY: deliberately breaks the handle clause; registration must refuse it.
+unsafe impl Reflect for DroppingHandle {
+    const TRANSIENT: bool = true;
+    const ABI: bool = false;
+    const DEFINITION: TypeDefinition = TypeDefinition::builder::<Self>(
+        "DroppingHandle",
+        Persistence::Transient,
+        KindDefinition::handle(StableTypeId::from_uuid(
+            "a7c1e8f6-3d9b-4e4a-9c2f-6b8d0e2f4a7d",
+        )),
+    )
+    .build();
+}
+
+/// A hand-written `abi` struct that needs dropping.
+#[repr(C)]
+struct DroppingAbi(u32);
+
+impl Drop for DroppingAbi {
+    fn drop(&mut self) {}
+}
+
+// SAFETY: deliberately breaks the ABI clause; registration must refuse it.
+unsafe impl Reflect for DroppingAbi {
+    const TRANSIENT: bool = true;
+    const ABI: bool = true;
+    const DEFINITION: TypeDefinition = TypeDefinition::builder::<Self>(
+        "DroppingAbi",
+        Persistence::Transient,
+        KindDefinition::tuple_struct(&[FieldDefinition::new::<u32>(
+            "0",
+            offset_of!(DroppingAbi, 0),
+        )]),
+    )
+    .abi()
+    .build();
+}
+
+/// A hand-written enum without variants.
+enum Never {}
+
+// SAFETY: deliberately describes an empty enum; registration must refuse it.
+unsafe impl Reflect for Never {
+    const TRANSIENT: bool = true;
+    const ABI: bool = false;
+    const DEFINITION: TypeDefinition = TypeDefinition::builder::<Self>(
+        "Never",
+        Persistence::Transient,
+        KindDefinition::unit_enum(None, &[]),
+    )
+    .build();
+}
+
+#[test]
+fn unsound_hand_written_layouts_are_refused() {
+    let registry = TypeRegistry::new();
+    let problem = |error| match error {
+        RegistrationError::InvalidDefinition { problem, .. } => problem,
+        other => panic!("{other}"),
+    };
+    assert_eq!(
+        problem(registry.register::<Packed>().expect_err("packed")),
+        DefinitionProblem::MisalignedField("wide".to_owned())
+    );
+    assert_eq!(
+        problem(
+            registry
+                .register::<DroppingHandle>()
+                .expect_err("handle with Drop")
+        ),
+        DefinitionProblem::HandleWithDrop
+    );
+    assert_eq!(
+        problem(
+            registry
+                .register::<DroppingAbi>()
+                .expect_err("abi with Drop")
+        ),
+        DefinitionProblem::AbiWithDrop
+    );
+    assert_eq!(
+        problem(registry.register::<Never>().expect_err("no variants")),
+        DefinitionProblem::NoVariants
+    );
+    let packed = Packed { wide: 1, narrow: 2 };
+    let _ = (
+        DroppingHandle(String::new()).0,
+        DroppingAbi(0).0,
+        packed.narrow,
+    );
+}
+
+#[derive(Reflect)]
+#[reflect(transient)]
+struct TransientCache {
+    #[reflect(transient)]
+    cached: NoDefault,
+}
+
+#[test]
+fn a_transient_type_may_have_a_transient_field_without_default() {
+    // It's never loaded, so nothing ever needs the field's default.
+    let registry = TypeRegistry::new();
+    registry.register::<TransientCache>().expect("valid");
+    let cache = TransientCache {
+        cached: NoDefault { value: 0 },
+    };
+    assert_eq!(cache.cached.value, 0);
 }

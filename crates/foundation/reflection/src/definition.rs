@@ -6,9 +6,10 @@
 //! [`TypeRegistry`](crate::TypeRegistry) resolves those references to [`TypeKey`]s and turns
 //! the definition into a [`TypeDescription`](crate::TypeDescription), the form tools read.
 //!
-//! The definition types are `Copy` and have no destructors, so derive-generated constants can
-//! inspect each other at compile time (a persisted type checks that none of its fields is
-//! transient, for example).
+//! The definition types are `Copy` and have no destructors, so they can be built and inspected
+//! in constants. The derive's compile-time checks read the field types' [`Reflect::TRANSIENT`]
+//! and [`Reflect::ABI`] rather than their definitions, because evaluating definitions eagerly
+//! would make recursive types a const-evaluation cycle.
 //!
 //! [`TypeKey`]: crate::TypeKey
 
@@ -46,25 +47,25 @@ impl TypeRef {
 
     /// The referenced type's `TypeId`.
     #[must_use]
-    pub const fn type_id(&self) -> TypeId {
+    pub(crate) const fn type_id(&self) -> TypeId {
         self.type_id
     }
 
     /// Whether the referenced type is never saved ([`Reflect::TRANSIENT`]).
     #[must_use]
-    pub const fn is_transient(&self) -> bool {
+    pub(crate) const fn is_transient(&self) -> bool {
         self.transient
     }
 
     /// Whether the referenced type is ABI-safe ([`Reflect::ABI`]).
     #[must_use]
-    pub const fn is_abi(&self) -> bool {
+    pub(crate) const fn is_abi(&self) -> bool {
         self.abi
     }
 
     /// The referenced type's definition.
     #[must_use]
-    pub fn definition(&self) -> TypeDefinition {
+    pub(crate) fn definition(&self) -> TypeDefinition {
         (self.definition)()
     }
 }
@@ -105,7 +106,7 @@ impl Persistence {
 
 /// A generic argument of a generic type's instantiation.
 #[derive(Debug, Clone, Copy)]
-pub enum GenericArg {
+pub enum GenericArgDefinition {
     /// A type argument.
     Type(TypeRef),
     /// A const argument.
@@ -121,7 +122,7 @@ pub struct TypeDefinition {
     type_id: TypeId,
     name: &'static str,
     persistence: Persistence,
-    generic_args: &'static [GenericArg],
+    generic_args: &'static [GenericArgDefinition],
     layout: Layout,
     kind: KindDefinition,
     attributes: AttributesDefinition,
@@ -159,77 +160,57 @@ impl TypeDefinition {
 
     /// The defined type's `TypeId`.
     #[must_use]
-    pub const fn type_id(&self) -> TypeId {
+    pub(crate) const fn type_id(&self) -> TypeId {
         self.type_id
     }
 
     /// The display name, without generic arguments.
     #[must_use]
-    pub const fn name(&self) -> &'static str {
+    pub(crate) const fn name(&self) -> &'static str {
         self.name
     }
 
     /// Whether and how the type is saved. For a generic type this is the generic definition's
     /// persistence: an instantiation with a transient type argument is transient too.
     #[must_use]
-    pub const fn persistence(&self) -> Persistence {
+    pub(crate) const fn persistence(&self) -> Persistence {
         self.persistence
-    }
-
-    /// Whether values of this type are never saved, taking generic arguments into account: an
-    /// instantiation is transient when any type argument is. Registration checks that this
-    /// equals [`Reflect::TRANSIENT`].
-    #[must_use]
-    pub const fn is_transient(&self) -> bool {
-        if self.persistence.is_transient() {
-            return true;
-        }
-        let mut i = 0;
-        while i < self.generic_args.len() {
-            if let GenericArg::Type(arg) = self.generic_args[i]
-                && arg.is_transient()
-            {
-                return true;
-            }
-            i += 1;
-        }
-        false
     }
 
     /// The generic arguments, empty for a non-generic type.
     #[must_use]
-    pub const fn generic_args(&self) -> &'static [GenericArg] {
+    pub(crate) const fn generic_args(&self) -> &'static [GenericArgDefinition] {
         self.generic_args
     }
 
     /// Size and alignment.
     #[must_use]
-    pub const fn layout(&self) -> Layout {
+    pub(crate) const fn layout(&self) -> Layout {
         self.layout
     }
 
     /// The kind and its data.
     #[must_use]
-    pub const fn kind(&self) -> &KindDefinition {
+    pub(crate) const fn kind(&self) -> &KindDefinition {
         &self.kind
     }
 
     /// The editor attributes.
     #[must_use]
-    pub const fn attributes(&self) -> &AttributesDefinition {
+    pub(crate) const fn attributes(&self) -> &AttributesDefinition {
         &self.attributes
     }
 
     /// Drop, clone and default.
     #[must_use]
-    pub const fn operations(&self) -> Operations {
+    pub(crate) const fn operations(&self) -> Operations {
         self.operations
     }
 
     /// Whether the type is ABI-safe: plain data with a C layout that other languages may read
     /// directly (ADR-0021 §3, the C-ABI contract).
     #[must_use]
-    pub const fn is_abi(&self) -> bool {
+    pub(crate) const fn is_abi(&self) -> bool {
         self.abi
     }
 }
@@ -280,7 +261,7 @@ impl<T: 'static> DefinitionBuilder<T> {
     }
 
     /// The generic arguments of this instantiation, in declaration order.
-    pub const fn generic_args(mut self, args: &'static [GenericArg]) -> Self {
+    pub const fn generic_args(mut self, args: &'static [GenericArgDefinition]) -> Self {
         self.definition.generic_args = args;
         self
     }
@@ -292,8 +273,10 @@ impl<T: 'static> DefinitionBuilder<T> {
     }
 
     /// Marks the type ABI-safe (`#[reflect(abi)]`). Registration checks that its fields are
-    /// ABI-safe and that it isn't generic. The derive also checks `#[repr(C)]`, which
-    /// registration can't see.
+    /// ABI-safe and that it isn't generic. Only a `#[repr(C)]` or `#[repr(transparent)]` type may
+    /// be marked: generated C headers declare its layout from the field definitions, which
+    /// registration can't compare with the Rust layout. The derive checks the `repr`; a
+    /// hand-written impl takes it on as part of [`Reflect`]'s safety contract.
     pub const fn abi(mut self) -> Self {
         self.definition.abi = true;
         self
@@ -301,8 +284,8 @@ impl<T: 'static> DefinitionBuilder<T> {
 
     /// Fails with `message` unless `condition` holds. In a constant, that fails the build.
     ///
-    /// The derive checks what only the field types' own definitions know this way, such as a
-    /// saved type having a field of a transient type. It's an expression, not a statement, so
+    /// The derive checks what only the field types know this way (their [`Reflect::TRANSIENT`]
+    /// and [`Reflect::ABI`]), such as a saved type having a field of a transient type. It's an expression, not a statement, so
     /// the definition stays a constant expression whose `&[...]` lists are `'static`.
     ///
     /// # Panics
@@ -525,24 +508,6 @@ impl FieldDefinition {
     pub const fn transient(mut self) -> Self {
         self.transient = true;
         self
-    }
-
-    /// The field's name.
-    #[must_use]
-    pub const fn name(&self) -> &'static str {
-        self.name
-    }
-
-    /// The field's type, or `None` for an opaque field.
-    #[must_use]
-    pub const fn ty(&self) -> Option<TypeRef> {
-        self.ty
-    }
-
-    /// Whether the field is never saved.
-    #[must_use]
-    pub const fn is_transient(&self) -> bool {
-        self.transient
     }
 }
 
