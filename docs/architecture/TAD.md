@@ -130,8 +130,17 @@ same extraction path.
 ### 5.4 Reflection (foundation, early)
 
 Reflection underpins the Details panel, serialization, undo/redo, visual scripting and runtime
-debugging. It lives in `foundation/reflection` with a derive macro (`foundation/reflection-derive`).
-The design is open (D-02) but must be decided before M2.
+debugging. It lives in `foundation/reflection` with a derive macro (`foundation/reflection-derive`)
+(ADR-0021):
+- Types are described as **plain data** that tools and the future C ABI can export, and identified
+  by an explicit **128-bit stable type ID** that survives renames. In process, types are
+  identified by a registry `TypeKey`; Rust `TypeId` is never persisted.
+- Registries are **owned values** the application creates and passes, filled by explicit
+  `register_types` calls. There is no global registration.
+- `oxreal-reflection` depends on `oxreal-math`; the ECS depends on reflection, never the reverse.
+  Every component is reflected (`Component: Reflect`, with `#[derive(Component)]` in the
+  runtime-layer `oxreal-ecs-derive`), and worlds share one component registry.
+- Writes by type ID go through the ECS, so hooks, immutability and change detection apply.
 
 ### 5.5 Assets (ADR-0006)
 
@@ -231,9 +240,12 @@ Create these only when M1 work starts, one at a time, each with real code:
 |---|---|---|
 | `foundation/math` | foundation | **Created** (`oxreal-math`): re-exported glam types plus owned `Transform`, projections and color. Bounds and frustum come with culling. (ADR-0011) |
 | `foundation/diagnostics` | foundation | **Created** (`oxreal-diagnostics`): re-exported log macros, `profile_*` macros, `init_application_logging` (ADR-0010) |
+| `foundation/reflection` | foundation | `oxreal-reflection` (planned, ADR-0021): stable type IDs, plain-data type descriptions, the type registry, erased views, field paths and patches. Depends on `oxreal-math` |
+| `foundation/reflection-derive` | foundation | `oxreal-reflection-derive` (planned, ADR-0021): `#[derive(Reflect)]` |
 | `platform/window` | platform | **Created** (`oxreal-window`): windows and the event loop, winit 0.30 behind an engine-owned `App` trait and event enum. Raw handles via `raw-window-handle` 0.6 (ADR-0015). Keyboard and mouse events with physical key codes, raw mouse motion and cursor capture (ADR-0018). |
-| `runtime/ecs` | runtime | **Created** (`oxreal-ecs`): generational entities, archetype tables with private storage and no `unsafe`, bundles, typed queries with `With`/`Without` filters and an aliasing check, resources, systems with declared access, ordered stages, deferred commands with reserved handles, lifecycle hooks, immutable components and in-place `modify` with hooks, change detection (`Added`/`Changed` filters against each system's previous run, resource change checks). Dynamic queries follow (ADR-0014). |
+| `runtime/ecs` | runtime | **Created** (`oxreal-ecs`): generational entities, archetype tables with private storage and no `unsafe`, bundles, typed queries with `With`/`Without` filters and an aliasing check, resources, systems with declared access, ordered stages, deferred commands with reserved handles, lifecycle hooks, immutable components and in-place `modify` with hooks, change detection (`Added`/`Changed` filters against each system's previous run, resource change checks). Dynamic queries come with reflection (ADR-0014, ADR-0021). |
 | `runtime/hierarchy` | runtime | **Created** (`oxreal-hierarchy`): immutable `ChildOf` links with a per-link despawn policy (detach keeping world placement by default, or despawn with the parent) and an ordered, read-only `Children` kept consistent by ECS hooks; cycles and dead or despawning parents refused; `LocalTransform`/`WorldTransform` and propagation in `PostUpdate`. (ADR-0005, ADR-0014) |
+| `runtime/ecs-derive` | runtime | `oxreal-ecs-derive` (planned, ADR-0021): `#[derive(Component)]` (the component's reflection and its mutability), later `#[derive(Bundle)]`; re-exported by `oxreal-ecs` |
 | `systems/input` | systems | **Created** (`oxreal-input`): `InputState` built from platform events: held keys and buttons with per-frame edges, raw mouse motion, scroll, cursor position, focus-loss reset. Input contexts with consumption come with the second consumer (ADR-0018). |
 | `rendering/rhi` | rendering | **Created** (`oxreal-rhi`): `Device` trait, adapter selection, generational handles, surfaces, frames, command encoder and scoped render passes, textures (uploads, bindless sampling, depth targets), buffers (GPU addresses, ordered writes, readback), samplers, render pipelines (push constants, depth testing), draws and indexed draws (index buffers), standalone submission and readback, `RhiError`; `shaders/Bindless.slang` for shaders. (ADR-0016, ADR-0017) |
 | `rendering/backends/vulkan` | rendering | **Created** (`oxreal-rhi-vulkan`): instance, validation, GPU selection, device, allocator, surfaces and swapchains with internal recreation, timeline-paced frame loop, dynamic rendering with color and depth attachments, textures, buffers with device addresses and staged writes, the global bindless descriptor set and samplers, pipelines with a Y-up viewport, deferred destruction, readback, SPIR-V checks, pixel tests. (ADR-0011, ADR-0012, ADR-0016, ADR-0017) |
