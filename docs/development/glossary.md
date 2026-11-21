@@ -47,6 +47,11 @@ is our own (ADR-0007).
 | **Import / reimport** | Converting a source asset into engine data. Reimport preserves engine-side overrides (ADR-0006). |
 | **Cook** | Converting project data into the optimized, platform-specific form a shipped game loads |
 | **Derived data cache (DDC)** | Cache of import and cook results, keyed by source hash, importer version, settings and platform |
+| **Reflection** | What the engine knows about a type at run time: its fields, layout, attributes and operations, as plain data the editor, saving, scripting and other languages read (ADR-0021) |
+| **Type description** | One type's reflection data: kind, fields, size and alignment, attributes, operations and flags. Plain data, so tools can export it. |
+| **Stable type ID** | A type's persistent 128-bit identity, written once in its `#[reflect(id = …)]` attribute. It survives renames and moves. Files, overrides and the C ABI use it, never Rust's `TypeId` (ADR-0021). |
+| **Transient** | Never saved. A transient type needs no stable type ID; in-process copies (PIE) still copy it. |
+| **Rebuilt** | Recreated by its owner rather than copied or saved, such as `Children` from `ChildOf` links. Implies transient. |
 
 ## Project and process
 

@@ -831,3 +831,24 @@ ADR-0020 supersedes ADR-0008. This ADR's references to ADR-0008 read as follows:
   ticks; and a "removed" history (hooks see removals as they happen). Render extraction and the
   hierarchy don't use the filters yet: making them incremental is its own change, measured
   separately.
+
+## Note (2026-11-21): open items settled by ADR-0021
+
+ADR-0021 (reflection and the type registry) settles these notes of this ADR:
+- **The registry key** for dynamic queries and components without a Rust type: an explicit
+  128-bit stable type ID. `TypeId` stays an in-process key.
+- **Per-world or shared component IDs:** one `ComponentRegistry` shared by worlds, so the editor
+  world, PIE copies and the C ABI agree on every `ComponentId`. `ComponentId` is never saved.
+- **By-ID writes** go through the ECS: by-ID `modify` runs hooks, mutable by-ID views stamp
+  change ticks, the mutability flag is checked, and caller mistakes are errors, not panics. The
+  §3 amendment's rule that by-ID paths turn an edit of an immutable component into an `insert`
+  now reads: an `insert` or a by-ID `modify` that runs its hooks.
+- **The hierarchy's private stamp and `Children`** also can't be inserted, removed or edited by
+  ID at all (ADR-0021's owner-only flag), so the stamp invariant above holds for by-ID callers.
+- **The immutability check** becomes a trait bound once `#[derive(Component)]` exists
+  (`Component: Reflect`), and custom bundles get `#[derive(Bundle)]`.
+- **The hierarchy's private stamp, `Children` and `WorldTransform`** are rebuilt by their owner,
+  so copy and save paths skip them.
+
+The dynamic-query slice (§7) is ADR-0021's second slice. Handles still carry no world identity;
+that question stays open here.
