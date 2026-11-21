@@ -1,0 +1,8 @@
+# Retired stable type IDs (ADR-0021 §2). Never delete a line, and never reuse an ID listed here.
+#
+# Retire an ID when a type's saved form ends for good: the type is deleted, or it gets a new ID
+# through a D-07 migration. Add one line per ID: the UUID, then the type's last name, the date
+# and the reason. `cargo xtask type-ids` (part of `cargo xtask ci` and CI) rejects any retired ID
+# that appears in code again.
+#
+# Format: <uuid> <type name>, <yyyy-mm-dd>: <reason>

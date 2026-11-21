@@ -59,6 +59,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
       - run: cargo xtask layers
+      - run: cargo xtask type-ids
       - run: cargo xtask changelog check
       # Shader compilation with the pinned, hash-verified Slang (ADR-0013). The download is
       # cached per manifest; `xtask slang install` re-verifies the hash either way.
@@ -268,6 +269,29 @@ jobs:
       - name: frame_protocol checks (Lavapipe, X11 under Xvfb)
         timeout-minutes: 10
         run: OXREAL_LINUX_DISPLAY=x11 xvfb-run -a cargo run -p oxreal-rhi-vulkan --example frame_protocol --locked
+
+  # `unsafe` code under Miri, which reports undefined behavior that tests alone can miss
+  # (ADR-0014 §10, ADR-0021 §7). Miri needs nightly: the toolchain is pinned here and used by this
+  # job only. Bump the date deliberately (a newer nightly can report new findings).
+  miri:
+    name: miri
+    runs-on: ubuntu-24.04
+    env:
+      MIRI_TOOLCHAIN: nightly-2026-11-14
+      # Pointer-to-integer casts must not create pointers (the strictest provenance model).
+      MIRIFLAGS: -Zmiri-strict-provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri,rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: miri
+      - run: cargo "+$MIRI_TOOLCHAIN" miri setup
+      # Every crate with `unsafe` code that Miri can run (not the Vulkan backend, which calls
+      # into drivers through FFI).
+      - run: cargo "+$MIRI_TOOLCHAIN" miri test -p oxreal-reflection --locked
 
   docs:
     name: rustdoc

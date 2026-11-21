@@ -8,6 +8,12 @@
    ```sh
    cargo install cargo-deny   # license/advisory/ban checks (CI runs this)
    ```
+   To run the Miri job (undefined-behavior checks of `unsafe` code) locally, install the nightly
+   that `.github/workflows/ci.yml` pins in `MIRI_TOOLCHAIN`, then run its command, for example:
+   ```sh
+   rustup toolchain install nightly-2026-11-14 --profile minimal --component miri,rust-src
+   cargo +nightly-2026-11-14 miri test -p oxreal-reflection
+   ```
 3. Verify:
    ```sh
    cargo xtask ci
