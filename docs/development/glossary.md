@@ -54,6 +54,8 @@ is our own (ADR-0007).
 | **Stable type ID** | A type's persistent 128-bit identity, written once in its `#[reflect(id = …)]` attribute. It survives renames and moves. Files, overrides and the C ABI use it, never Rust's `TypeId` (ADR-0021). |
 | **Transient** | Never saved. A transient type needs no stable type ID. In-process copies (PIE) still copy it if it can be cloned. |
 | **Rebuilt** | Recreated by its owner rather than copied or saved, such as `Children` from `ChildOf` links. Implies transient. |
+| **Field path** | Where a value sits inside another, by name, such as `stats.health` or `waypoints[2].x`. Overrides and saved data use it (ADR-0021). |
+| **Patch** | A list of (field path, new value) edits applied whole or not at all. Once applied, it holds the old values, so applying it again undoes it (ADR-0021). |
 
 ## Project and process
 

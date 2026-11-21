@@ -46,6 +46,26 @@
 //! - **Explicit registration** (ADR-0021 §5). Registries are values the application creates
 //!   and shares; there's no global registry and no registration before `main`. Each crate with
 //!   reflected types exposes a `register_types` function.
+//! - **Types defined outside Rust** (C#, C++, scripts) are registered at run time with a
+//!   [`ForeignTypeDefinition`]: plain, ABI-safe data whose description is validated whole.
+//!
+//! # Reading and editing values
+//!
+//! - **Views:** [`ValueRef`] and [`ValueMut`] read and edit a value through its description:
+//!   fields, elements, `Option` payloads, enum variants and math components. Make them from
+//!   `&T` and `&mut T` with [`TypeRegistry::view`] and [`TypeRegistry::view_mut`].
+//! - **Field paths:** a [`FieldPath`] (`stats.health`, `waypoints[2].x`, `target?.armor`) names a
+//!   value inside another, for files and overrides. Resolving it against a type gives a
+//!   [`ResolvedPath`] for fast access.
+//! - **Owned values:** an [`OwnedValue`] holds a value of any reflected type, for undo and the
+//!   clipboard. One built from bytes ([`OwnedValue::from_bytes`]) is validated first: a `bool`
+//!   must be 0 or 1, and an enum's discriminant must name a variant.
+//! - **Patches:** a [`Patch`] is a list of (path, new value) that applies whole or not at all,
+//!   and returns its inverse for undo.
+//!
+//! Every mistake in a path or value is an error, never a panic: [`ValueError`] for views, paths
+//! and owned values, [`ParseFieldPathError`] for path text, and [`PatchError`] for patches. Paths
+//! and values come from files, the editor and other languages.
 //!
 //! # `#[derive(Reflect)]`
 //!
@@ -126,6 +146,20 @@
 //! struct NoDefault { value: f32 }
 //! ```
 //!
+//! ```compile_fail
+//! # use oxreal_reflection::Reflect;
+//! #[derive(Reflect)]
+//! #[reflect(transient)]
+//! enum Nothing {} // error: an enum without variants has no values
+//! ```
+//!
+//! ```compile_fail
+//! # use oxreal_reflection::Reflect;
+//! #[derive(Reflect)]
+//! #[reflect(transient)]
+//! struct Accented { café: u8 } // error: field paths can't name a non-ASCII field
+//! ```
+//!
 //! [ADR-0021]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0021-reflection-and-type-registry.md
 
 // `unsafe` is confined to the modules that opt in below (ADR-0021 §7).
@@ -135,6 +169,11 @@
 #[cfg(test)]
 extern crate self as oxreal_reflection;
 
+#[expect(
+    unsafe_code,
+    reason = "erased accessors for lists, options, enums and math components"
+)]
+mod access;
 mod attributes;
 #[expect(
     unsafe_code,
@@ -147,6 +186,7 @@ mod definition;
     reason = "the `unsafe fn`s that run erased operations on raw pointers"
 )]
 mod description;
+mod foreign;
 mod id;
 mod kind;
 #[expect(
@@ -154,10 +194,16 @@ mod kind;
     reason = "erased drop, clone and default through raw pointers"
 )]
 mod ops;
+mod patch;
+mod path;
 #[expect(unsafe_code, reason = "declares the `unsafe trait Reflect`")]
 mod reflect;
 mod registry;
+mod validate;
+#[expect(unsafe_code, reason = "views and owned values on raw pointers")]
+mod value;
 
+pub use access::UnitEnum;
 pub use attributes::{Attributes, AttributesDefinition, Range, Unit};
 pub use definition::{
     DefinitionBuilder, FieldDefinition, GenericArgDefinition, KindDefinition, Persistence,
@@ -167,14 +213,18 @@ pub use description::{
     ArrayInfo, Field, GenericArgument, HandleInfo, Identity, ListInfo, MathComponent, MathInfo,
     OptionInfo, StructInfo, TypeDescription, TypeKey, TypeKind, UnitEnumInfo, Variant,
 };
+pub use foreign::ForeignTypeDefinition;
 pub use id::{ConstArg, GenericIdInput, ParseStableTypeIdError, StableTypeId};
 pub use kind::{IntRepr, Primitive};
 pub use ops::{OperationError, Operations};
 pub use oxreal_reflection_derive::Reflect;
+pub use patch::{Patch, PatchError};
+pub use path::{FieldPath, ParseFieldPathError, PathSegment, ResolvedPath};
 pub use reflect::Reflect;
 pub use registry::{
     DefinitionProblem, GroupBuilder, GroupId, RegistrationError, RegistryId, TypeRegistry,
 };
+pub use value::{OwnedValue, ValueError, ValueMut, ValueRef};
 
 #[cfg(test)]
 #[expect(
@@ -182,3 +232,9 @@ pub use registry::{
     reason = "hand-written impls and erased operations under test"
 )]
 mod tests;
+#[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "a deliberately wrong hand-written impl under test"
+)]
+mod value_tests;

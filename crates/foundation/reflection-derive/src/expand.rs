@@ -148,6 +148,35 @@ pub(crate) fn reflect(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     // A non-generic type's definition is evaluated right here, so its checks fail the build
     // even if nothing registers the type. A generic one's is checked per instantiation.
+    // Unit enums are read and written by variant index through a safe `UnitEnum` impl, so the
+    // derive never emits `unsafe` code beyond the `Reflect` impl itself.
+    let unit_enum = match &input.data {
+        Data::Enum(data) if !attrs.opaque => {
+            let variants: Vec<&Ident> = data.variants.iter().map(|v| &v.ident).collect();
+            let indices = 0..variants.len();
+            let from_indices = 0..variants.len();
+            quote! {
+                impl #impl_generics ::oxreal_reflection::UnitEnum for #ident #ty_generics
+                #where_clause
+                {
+                    fn variant_index(&self) -> usize {
+                        match self {
+                            #(Self::#variants => #indices,)*
+                        }
+                    }
+
+                    fn from_variant_index(index: usize) -> ::core::option::Option<Self> {
+                        match index {
+                            #(#from_indices => ::core::option::Option::Some(Self::#variants),)*
+                            _ => ::core::option::Option::None,
+                        }
+                    }
+                }
+            }
+        }
+        _ => TokenStream::new(),
+    };
+
     let force = if generics.is_empty() {
         quote!(
             const _: ::oxreal_reflection::TypeDefinition =
@@ -170,6 +199,7 @@ pub(crate) fn reflect(input: &DeriveInput) -> syn::Result<TokenStream> {
             const DEFINITION: ::oxreal_reflection::TypeDefinition = #builder #checks .build();
         }
         #force
+        #unit_enum
     })
 }
 
@@ -243,6 +273,17 @@ fn struct_kind(fields: &Fields, ty: &str, attrs: &TypeAttributes) -> syn::Result
     for (index, field) in fields.iter().enumerate() {
         let member = member(field.ident.as_ref(), index);
         let name = member_name(&member);
+        if !name
+            .value()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(syn::Error::new(
+                name.span(),
+                "reflected field names must be ASCII letters, digits and underscores, so field \
+                 paths such as `stats.health` can name them",
+            ));
+        }
         let member_attrs = attrs::member_attributes(&field.attrs)?;
         if let (Some(span), Some(_)) = (member_attrs.opaque, attrs.abi) {
             return Err(syn::Error::new(
@@ -312,6 +353,12 @@ fn field_checks(fields: &Fields, ty: &str, attrs: &TypeAttributes) -> syn::Resul
 }
 
 fn enum_kind(data: &DataEnum, repr: &Repr) -> syn::Result<TokenStream> {
+    if data.variants.is_empty() {
+        return Err(syn::Error::new(
+            data.brace_token.span.join(),
+            "a reflected enum needs at least one variant: an enum without variants has no values",
+        ));
+    }
     let int_repr = match &repr.int {
         None => None,
         Some(int) => Some(match int.to_string().as_str() {
@@ -366,7 +413,12 @@ fn enum_kind(data: &DataEnum, repr: &Repr) -> syn::Result<TokenStream> {
         Some(int) => quote!(::core::option::Option::Some(::oxreal_reflection::IntRepr::#int)),
         None => quote!(::core::option::Option::None),
     };
-    Ok(quote!(::oxreal_reflection::KindDefinition::unit_enum(#repr_tokens, &[#(#variants),*])))
+    Ok(
+        quote!(::oxreal_reflection::KindDefinition::unit_enum::<Self>(
+            #repr_tokens,
+            &[#(#variants),*],
+        )),
+    )
 }
 
 /// `.attributes(...)` and `.aliases(...)` for a field or variant.

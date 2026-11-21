@@ -126,11 +126,15 @@ unsafe impl<T: Reflect, const N: usize> Reflect for [T; N] {
     };
 }
 
+// The math accessors are safe closures coerced to `unsafe fn` pointers. They're reachable only as
+// `ComponentGet` and `ComponentSet`, whose contracts their SAFETY comments rely on.
 macro_rules! math {
     ($($ty:ident, $id:ident: $($component:ident: $component_ty:ty),+;)*) => {$(
         // SAFETY: built with `builder::<$ty>`, so the layout and operations are `$ty`'s. A math
-        // kind has no offsets: its components are named for tools and reached through accessors.
-        // Not transient; not ABI-safe (the C ABI uses its own math structs, ADR-0011 item 7).
+        // kind has no offsets: its components are named for tools and reached through accessors
+        // that copy each component out of and into a `$ty` (its public field or, for glam's SIMD
+        // types, the field `Deref` exposes). Not transient; not ABI-safe (the C ABI uses its own
+        // math structs, ADR-0011 item 7).
         unsafe impl Reflect for $ty {
             const TRANSIENT: bool = false;
             const ABI: bool = false;
@@ -138,7 +142,25 @@ macro_rules! math {
                 stringify!($ty),
                 Persistence::Persisted(builtin::$id),
                 KindDefinition::math(&[
-                    $(MathComponentDefinition::new::<$component_ty>(stringify!($component)),)+
+                    $(MathComponentDefinition::new::<$component_ty>(
+                        stringify!($component),
+                        |math: *const u8, out: *mut u8| {
+                            // SAFETY: `ComponentGet`'s contract: `math` is a valid `$ty`, and
+                            // `out` is aligned and writable for the component's type.
+                            unsafe {
+                                out.cast::<$component_ty>()
+                                    .write((&*math.cast::<$ty>()).$component)
+                            }
+                        },
+                        |math: *mut u8, value: *const u8| {
+                            // SAFETY: `ComponentSet`'s contract: `math` is a valid, writable,
+                            // unaliased `$ty`, and `value` a valid value of the component's type.
+                            unsafe {
+                                (&mut *math.cast::<$ty>()).$component =
+                                    value.cast::<$component_ty>().read()
+                            }
+                        },
+                    ),)+
                 ]),
             )
             .cloneable()

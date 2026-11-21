@@ -16,7 +16,8 @@
      cargo +nightly-2026-11-14 miri test -p oxreal-reflection
    ```
    In PowerShell, set `$env:MIRIFLAGS` to the same flags first. Use the same `MIRIFLAGS` as CI,
-   or a local run can pass where CI fails.
+   or a local run can pass where CI fails. CI runs the tests a second time with
+   `-Zmiri-tree-borrows` added, the newer aliasing model.
 3. Verify:
    ```sh
    cargo xtask ci

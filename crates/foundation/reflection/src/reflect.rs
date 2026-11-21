@@ -42,6 +42,8 @@ use crate::TypeDefinition;
 ///   no field type is more aligned than `Self`, and each offset is a multiple of its alignment).
 /// - **Every** variant of a unit enum is listed, with its real discriminant when the enum has an
 ///   explicit `repr` (*checked*: unique and within the `repr`).
+/// - A unit enum kind is built with `KindDefinition::unit_enum::<Self>` (*checked*: the accessors'
+///   type is `Self`).
 /// - A primitive kind is used only by that primitive (*checked*: its layout), `String` only by
 ///   `String`, and so on.
 /// - A handle kind is used only by plain data without `Drop` for which every bit pattern is a
@@ -55,10 +57,13 @@ use crate::TypeDefinition;
 ///
 /// A hand-written impl takes on this proof obligation. The derive discharges it by construction.
 ///
-/// **Deriving exposes the fields.** Reflection can read and, through later APIs, write every
-/// field that isn't opaque, private ones included. A type whose own `unsafe` code relies on an
-/// invariant between its fields (such as `len <= capacity`) must mark those fields
-/// `#[reflect(opaque)]` (and `transient` if they're not saved) or implement `Reflect` by hand.
+/// **Deriving exposes the fields.** Any combination of valid values of the fields that aren't
+/// opaque must be a safe value of `Self`, including copies of existing values: reflection reads
+/// and writes every such field (private ones included), builds plain-data values from bytes, and
+/// zeroes and copies ABI-safe values bytewise. A type whose own `unsafe` code relies on a field's
+/// range, an invariant between fields (such as `len <= capacity`) or a value being unique must
+/// mark those fields `#[reflect(opaque)]` (and `transient` if they're not saved) or implement
+/// `Reflect` by hand.
 ///
 /// `Reflect` types are `Send + Sync`, like components: descriptions and their erased operations
 /// are shared between threads, so values may be cloned and dropped on any thread.

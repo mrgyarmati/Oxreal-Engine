@@ -276,7 +276,7 @@ jobs:
   miri:
     name: miri
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       MIRI_TOOLCHAIN: nightly-2026-11-14
       # The strictest provenance model (integers never become pointers), and alignment checked
@@ -298,6 +298,11 @@ jobs:
       # Every crate with `unsafe` code that Miri can run (not the Vulkan backend, which calls
       # into drivers through FFI).
       - run: cargo "+$MIRI_TOOLCHAIN" miri test -p oxreal-reflection --locked
+      # Again under Tree Borrows, the newer aliasing model: code must be sound under both.
+      - name: Miri with Tree Borrows
+        run: cargo "+$MIRI_TOOLCHAIN" miri test -p oxreal-reflection --locked
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows
 
   docs:
     name: rustdoc
