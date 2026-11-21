@@ -161,8 +161,8 @@ reflection crate found. Checked 2026-11-20 and 2026-11-21:
   - Cheaper today: existing impls and tests stay as they are.
   - Costs: unreflected components are invisible to the editor, saving and other languages.
     Every by-ID path, PIE copy and export needs a second case for them, and storage still needs
-    their layout and drop from a separate source: two kinds of component, which ADR-0020 §1
-    rules out.
+    their layout and drop from a separate source: two kinds of component, against ADR-0020
+    §1's one-model intent.
 
 ### 5. Registration
 
@@ -237,7 +237,8 @@ Crate versions checked on crates.io on 2026-11-20.
   duplicates and retired IDs, so a copy-pasted ID is caught even if the two types are never
   registered together.
 - **Registration completeness:** the same scan lists each crate's ID literals, and a test per
-  crate checks that its `register_types` registers every one of them.
+  crate checks that its `register_types` registers every one of them. The scan skips test,
+  benchmark and example code; test fixtures that are never registered use `transient`.
 - **C-ABI form of 128-bit IDs** (`StableTypeId`, `AssetId`): `[u8; 16]` in big-endian byte
   order, which is RFC 9562's "network byte order" and the order of the UUID text, never a
   `u128` (no portable C type, and alignment differs between compilers). RFC 9562 notes that
@@ -260,8 +261,11 @@ display name, size and alignment, kind, attributes, operations and flags.
   - **clone** only with `#[reflect(clone)]`, and **default construction** only with
     `#[reflect(default)]`. The derive checks them against the real `Clone` and `Default`
     impls. Nothing synthesizes them field by field.
-  - A copy path (PIE, clipboard, template instantiation) that meets a type without `clone`
-    reports a "not cloneable" error naming the type.
+  - A copy path (PIE, clipboard, template instantiation) clones a value when its type has
+    `clone`. Otherwise it copies the value through its persisted form (save, then load), which
+    every type with a `StableTypeId` has. Only a transient type without `clone` can't be
+    copied: the copy reports a "not cloneable" error naming the type. So PIE never fails on an
+    ordinary persisted component that lacks `#[reflect(clone)]`.
 - **Kinds:**
   - **primitive:** `bool`, signed and unsigned integers to 64 bits, `f32`, `f64`;
   - **string;**
@@ -289,8 +293,13 @@ display name, size and alignment, kind, attributes, operations and flags.
     through accessor functions that the derive generates (read the variant, project to a
     field), not offsets.
   - **`#[reflect(opaque)]` on a field:** the field's type needs no `Reflect`. The field isn't
-    navigable or editable. The containing type can't be saved unless D-07 provides a codec for
-    that field, and it can still be copied in process if the type has `clone`.
+    navigable or editable. Unless D-07 provides a codec for that field, saving the containing
+    type returns an error naming the type and the field; mark it `transient` if it's never
+    meant to be saved. It can still be copied in process if the type has `clone`.
+  - **Enums and containers** are reached through accessor functions too, not offsets: unit
+    enums without a `repr` are read and written by variant (the same derive-generated
+    accessors as data-carrying enums), and `String`, `Vec`, `Option` and maps through
+    operations specific to their kind.
 - **The C ABI contract:**
   - A type marked `#[reflect(abi)]` is exported as a plain C struct in generated headers. The
     derive requires `#[repr(C)]` (or `#[repr(transparent)]`) and only ABI-safe field types:
@@ -418,7 +427,9 @@ display name, size and alignment, kind, attributes, operations and flags.
   - **Removal leaves a tombstone.** A removed `ComponentId` or `TypeKey` is never reused.
 - **Plugins (D-13) and hot reload (D-11) use an explicit group transaction:** the types
   registered in a group become visible together when it commits, and are removed together.
-  A group is removed only when no world holds a value of its types. Reloading a module runs in
+  A group is removed only when no world holds a value of its types. The registry can't see
+  worlds, so the caller that owns them (the hot-reload driver, D-11, or the plugin host, D-13)
+  checks this before removing it. Reloading a module runs in
   this order: save the affected values, despawn them, remove the old group, register the new
   one, load the values. The new registration is therefore not a collision, and changed layouts
   migrate through the D-07 path. Code never swaps layouts in place under live values.
@@ -450,11 +461,16 @@ display name, size and alignment, kind, attributes, operations and flags.
   - the `unsafe impl Reflect` that `#[derive(Reflect)]` generates;
   - `oxreal-ecs`'s storage module: layout-erased columns (ADR-0014 §2 and §10).
     `oxreal-ecs` swaps `#![forbid(unsafe_code)]` (which no module can override) for a
-    crate-wide deny with one scoped, reasoned exception for that module and the `Entity` impl;
+    crate-wide deny with two scoped, reasoned exceptions: that module and the `Entity` impl;
   - later, the C-ABI layer (D-21).
 - **How it's confined:** safe public APIs, a `// SAFETY:` comment per block, and `unsafe trait
   Reflect` for the one obligation callers can't check. The derive rejects `#[repr(packed)]`
   types, whose fields can't be referenced safely.
+- **Crates that only use the derive keep `#![forbid(unsafe_code)]`.** A derive-generated
+  `unsafe impl` compiles in such a crate (checked on rustc 1.100 with a scratch proc-macro),
+  but an `#[allow(unsafe_code)]` the derive emitted would fail there (E0453), so the derive
+  never emits one. `oxreal-hierarchy`, `oxreal-input` and other component crates stay
+  `forbid`.
 - **Foreign descriptions are validated at registration:** every field within the type's size,
   correctly aligned, non-overlapping, and only ABI-safe field kinds. With that and per-kind
   value validation (§4), safe APIs aren't meant to let foreign data create an invalid Rust

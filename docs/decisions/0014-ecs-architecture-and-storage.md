@@ -845,8 +845,8 @@ ADR-0021 (reflection and the type registry) settles these notes of this ADR:
   now reads: an `insert` or a by-ID `modify` that runs its hooks.
 - **The hierarchy's private stamp and `Children`** also can't be inserted, removed or edited by
   ID at all (ADR-0021's owner-only flag), so the stamp invariant above holds for by-ID callers.
-- **The immutability check** becomes a trait bound once `#[derive(Component)]` exists
-  (`Component: Reflect`), and custom bundles get `#[derive(Bundle)]`.
+- **The immutability check** becomes a trait bound on a mutability associated type that
+  `#[derive(Component)]` supplies, and custom bundles get `#[derive(Bundle)]` later.
 - **The hierarchy's private stamp, `Children` and `WorldTransform`** are rebuilt by their owner,
   so copy and save paths skip them.
 

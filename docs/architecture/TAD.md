@@ -133,12 +133,13 @@ Reflection underpins the Details panel, serialization, undo/redo, visual scripti
 debugging. It lives in `foundation/reflection` with a derive macro (`foundation/reflection-derive`)
 (ADR-0021):
 - Types are described as **plain data** that tools and the future C ABI can export, and identified
-  by an explicit **128-bit stable type ID** that survives renames. Rust `TypeId` is only an
-  in-process lookup key.
+  by an explicit **128-bit stable type ID** that survives renames. In process, types are
+  identified by a registry `TypeKey`; Rust `TypeId` is never persisted.
 - Registries are **owned values** the application creates and passes, filled by explicit
   `register_types` calls. There is no global registration.
 - `oxreal-reflection` depends on `oxreal-math`; the ECS depends on reflection, never the reverse.
-  Every component is reflected (`Component: Reflect`), and worlds share one component registry.
+  Every component is reflected (`Component: Reflect`, with `#[derive(Component)]` in the
+  runtime-layer `oxreal-ecs-derive`), and worlds share one component registry.
 - Writes by type ID go through the ECS, so hooks, immutability and change detection apply.
 
 ### 5.5 Assets (ADR-0006)
