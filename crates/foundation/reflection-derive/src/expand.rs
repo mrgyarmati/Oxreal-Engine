@@ -148,6 +148,35 @@ pub(crate) fn reflect(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     // A non-generic type's definition is evaluated right here, so its checks fail the build
     // even if nothing registers the type. A generic one's is checked per instantiation.
+    // Unit enums are read and written by variant index through a safe `UnitEnum` impl, so the
+    // derive never emits `unsafe` code beyond the `Reflect` impl itself.
+    let unit_enum = match &input.data {
+        Data::Enum(data) if !attrs.opaque => {
+            let variants: Vec<&Ident> = data.variants.iter().map(|v| &v.ident).collect();
+            let indices = 0..variants.len();
+            let from_indices = 0..variants.len();
+            quote! {
+                impl #impl_generics ::oxreal_reflection::UnitEnum for #ident #ty_generics
+                #where_clause
+                {
+                    fn variant_index(&self) -> usize {
+                        match self {
+                            #(Self::#variants => #indices,)*
+                        }
+                    }
+
+                    fn from_variant_index(index: usize) -> ::core::option::Option<Self> {
+                        match index {
+                            #(#from_indices => ::core::option::Option::Some(Self::#variants),)*
+                            _ => ::core::option::Option::None,
+                        }
+                    }
+                }
+            }
+        }
+        _ => TokenStream::new(),
+    };
+
     let force = if generics.is_empty() {
         quote!(
             const _: ::oxreal_reflection::TypeDefinition =
@@ -170,6 +199,7 @@ pub(crate) fn reflect(input: &DeriveInput) -> syn::Result<TokenStream> {
             const DEFINITION: ::oxreal_reflection::TypeDefinition = #builder #checks .build();
         }
         #force
+        #unit_enum
     })
 }
 
@@ -366,7 +396,12 @@ fn enum_kind(data: &DataEnum, repr: &Repr) -> syn::Result<TokenStream> {
         Some(int) => quote!(::core::option::Option::Some(::oxreal_reflection::IntRepr::#int)),
         None => quote!(::core::option::Option::None),
     };
-    Ok(quote!(::oxreal_reflection::KindDefinition::unit_enum(#repr_tokens, &[#(#variants),*])))
+    Ok(
+        quote!(::oxreal_reflection::KindDefinition::unit_enum::<Self>(
+            #repr_tokens,
+            &[#(#variants),*],
+        )),
+    )
 }
 
 /// `.attributes(...)` and `.aliases(...)` for a field or variant.

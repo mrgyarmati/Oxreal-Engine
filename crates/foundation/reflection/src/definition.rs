@@ -19,6 +19,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::Reflect;
+use crate::access::{ComponentGet, ComponentSet, EnumAccess, ListAccess, OptionAccess, UnitEnum};
 use crate::attributes::AttributesDefinition;
 use crate::id::{ConstArg, StableTypeId};
 use crate::kind::{IntRepr, Primitive};
@@ -327,6 +328,7 @@ pub(crate) enum KindData {
     UnitEnum {
         repr: Option<IntRepr>,
         variants: &'static [VariantDefinition],
+        access: EnumAccess,
     },
     Array {
         element: TypeRef,
@@ -334,9 +336,11 @@ pub(crate) enum KindData {
     },
     List {
         element: TypeRef,
+        access: ListAccess,
     },
     Option {
         some: TypeRef,
+        access: OptionAccess,
     },
     Handle {
         domain: StableTypeId,
@@ -381,10 +385,18 @@ impl KindDefinition {
     ///
     /// With an explicit `#[repr(u8/u16/u32)]` (`repr`), every variant carries its discriminant
     /// and values are stored as that integer. Without one, the layout is Rust's, and values are
-    /// read, written and saved by variant name.
+    /// read, written and saved by variant name. Either way, reflection reads and writes them
+    /// through `T`'s [`UnitEnum`] impl, so `variants` must be in declaration order.
     #[must_use]
-    pub const fn unit_enum(repr: Option<IntRepr>, variants: &'static [VariantDefinition]) -> Self {
-        Self(KindData::UnitEnum { repr, variants })
+    pub const fn unit_enum<T: UnitEnum>(
+        repr: Option<IntRepr>,
+        variants: &'static [VariantDefinition],
+    ) -> Self {
+        Self(KindData::UnitEnum {
+            repr,
+            variants,
+            access: EnumAccess::of::<T>(),
+        })
     }
 
     /// `[T; N]`.
@@ -399,6 +411,7 @@ impl KindDefinition {
     pub(crate) const fn list<T: Reflect>() -> Self {
         Self(KindData::List {
             element: TypeRef::of::<T>(),
+            access: ListAccess::of::<T>(),
         })
     }
 
@@ -406,6 +419,7 @@ impl KindDefinition {
     pub(crate) const fn option<T: Reflect>() -> Self {
         Self(KindData::Option {
             some: TypeRef::of::<T>(),
+            access: OptionAccess::of::<T>(),
         })
     }
 
@@ -561,13 +575,23 @@ impl VariantDefinition {
 pub(crate) struct MathComponentDefinition {
     pub(crate) name: &'static str,
     pub(crate) ty: TypeRef,
+    pub(crate) get: ComponentGet,
+    pub(crate) set: ComponentSet,
 }
 
 impl MathComponentDefinition {
-    pub(crate) const fn new<T: Reflect>(name: &'static str) -> Self {
+    /// A component of type `T`, copied out and in by `get` and `set`, which must work on the
+    /// math type and `T`.
+    pub(crate) const fn new<T: Reflect>(
+        name: &'static str,
+        get: ComponentGet,
+        set: ComponentSet,
+    ) -> Self {
         Self {
             name,
             ty: TypeRef::of::<T>(),
+            get,
+            set,
         }
     }
 }

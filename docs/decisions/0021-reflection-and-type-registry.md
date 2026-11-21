@@ -695,14 +695,87 @@ type registration with its validation.
     drops that panic partway through a container, zero-sized and over-aligned elements, and
     zero-length arrays.
   - The ECS storage tests join it in slice 2.
-- **Planned for part 2 and slice 2:**
-  - Unit enums without a `repr` need a derive-generated accessor (variant index to value and
-    back) before views can read or write them.
-  - Writes through reflection must enforce `read_only` where a type relies on it, or such
-    fields stay opaque.
+- **Planned for slice 2:**
   - Handles: the "every bit pattern is valid" clause isn't checked. The first real handle type
     (`Entity`, slice 2) defines the representation, and registration can check it then.
 - **For hot reload (D-11):** a description holds `&'static` names and function pointers from
   the module that defined the type. Unloading a dynamic library while any `Arc<TypeDescription>`
   of its types is alive (an editor panel, a cache) would leave them dangling. Before dynamic
   hot reload lands, removing a group must also ensure no description of it is still held.
+
+## Implementation notes (2026-11-21, slice 1, second part)
+
+The second part completes slice 1: views, field paths, owned values, patches, value validation
+and types defined outside Rust.
+
+- **Accessors.** Lists, options, unit enums and math components can't be reached by offset, so
+  each description carries erased accessor functions, monomorphized by this crate's `pub(crate)`
+  constructors like the operations:
+  - lists: length, element, push, remove;
+  - options: payload, and set (`Some` or `None`);
+  - unit enums: variant index, and set by index;
+  - math types: copy one component out and in.
+- **Unit enums go through a safe `UnitEnum` trait** (`variant_index`, `from_variant_index`),
+  which `#[derive(Reflect)]` implements. The derive therefore still emits no `unsafe` code
+  beyond the `unsafe impl Reflect` header, and enums without a `repr` are read and written
+  without knowing their layout, which settles that item from part 1.
+- **Views:**
+  - `ValueRef` and `ValueMut` are a pointer, its type's description and the registry, tied to a
+    borrow. Safe code makes them from `&T` and `&mut T` (`TypeRegistry::view`, `view_mut`,
+    which register `T` if needed); engine storage uses the `unsafe fn from_raw` constructors
+    with a `# Safety` contract.
+  - Every navigation step checks the description before touching memory.
+  - Typed reads compare the description's recorded `TypeId`, so a downcast needs no registry
+    lookup. Foreign types have no `TypeId`, so downcasting one fails.
+- **Math components are copied, not borrowed.** glam's SIMD types hide their fields, so a path
+  that ends inside a math value (`placement.translation.x`) is read by copying components out
+  (`read_at`) and written by copying each enclosing math value out, changing it and copying it
+  back (`replace_at`). Borrowing such a path (`at`) is an error that says so. Once a path enters
+  a math type, every later segment must be a component.
+- **Field paths:**
+  - **Text syntax:** `.field` (or the first name alone), `[index]`, and `?` for an `Option`'s
+    payload, for example `target?.waypoints[2].x`. Fields resolve by name or alias.
+  - **Resolution** against a type gives a `ResolvedPath` of offsets and indices, valid only for
+    this build and registry. It records the registry's identity and is checked against it on
+    use.
+  - **Bounds:** array bounds are checked at resolution; list bounds and `Option`s when the path
+    is followed.
+  - **Field steps** carry the field's index as well as its offset, because zero-sized fields can
+    share an offset.
+- **Owned values:**
+  - `OwnedValue` owns an allocation laid out by the description (zero-sized types get a dangling,
+    aligned pointer and no allocation) and drops the value through it.
+  - Construction can't leak: the allocation is freed if a clone, default or push panics.
+  - Values that move into lists and options give up their allocation without dropping the
+    value.
+- **Patches.** `Patch::apply` takes the patch by value:
+  - it resolves every entry, follows it through the current value and checks each value's type,
+    then refuses overlapping entries (one changing a value another is inside of, aliases
+    included);
+  - only then does it swap the new values in, so it can't fail halfway;
+  - the old values form the inverse patch, which undo applies.
+- **Validation from bytes** (`OwnedValue::from_bytes`, `ValueMut::write_bytes`):
+  - **Plain data only:** primitives, unit enums with a `repr`, handles, fixed arrays, and structs
+    of those.
+  - **Rules:** a `bool` is 0 or 1, and an enum's discriminant names a variant. Other leaves
+    accept any bits, and padding isn't read.
+  - Errors name the type and the byte offset.
+  - The ECS's by-ID inserts (slice 2) will use the same validation.
+- **Foreign types** (`ForeignTypeDefinition`, `TypeRegistry::register_foreign`,
+  `GroupBuilder::add_foreign`):
+  - **What they are:** plain, ABI-safe structs with an explicit stable ID, name, size and
+    alignment, whose fields name registered ABI-safe types (so never `bool` or Rust enums).
+  - **Validation:** the layout, every field type, bounds, alignment (not more aligned than the
+    type), overlap and unique names.
+  - **Behavior:** no `Drop`; cloned by copying bytes; defaulted to zero bytes, valid for every
+    ABI-safe type.
+  - They join groups and leave with them like Rust types.
+- **`read_only` stays an editor attribute.** Views don't enforce it, because the editor's own
+  commands and serialization must write such fields. A type that relies on an invariant between
+  its fields marks them opaque, as `Reflect`'s safety contract says.
+- **Randomized tests.** A deterministic generator (xorshift, so failures reproduce) checks two
+  things:
+  - random paths read the same values as typed access;
+  - random patches, some with invalid entries, either match the same edits made in typed code
+    and are undone by their inverse, or change nothing.
+- **Miri** runs every test above, including the randomized ones (fewer rounds under Miri).

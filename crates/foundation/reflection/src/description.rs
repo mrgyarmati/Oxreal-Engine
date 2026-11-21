@@ -9,6 +9,7 @@ use std::alloc::Layout;
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::access::Access;
 use crate::attributes::Attributes;
 use crate::id::{ConstArg, StableTypeId};
 use crate::kind::{IntRepr, Primitive};
@@ -88,6 +89,9 @@ pub struct TypeDescription {
     pub(crate) operations: Operations,
     pub(crate) abi: bool,
     pub(crate) group: GroupId,
+    pub(crate) access: Access,
+    /// The Rust type, or `None` for a type defined outside Rust.
+    pub(crate) type_id: Option<std::any::TypeId>,
 }
 
 impl TypeDescription {
@@ -205,7 +209,10 @@ impl TypeDescription {
     ) -> Result<(), OperationError> {
         // SAFETY: the operations belong to this description's type, and the caller's contract
         // is `Operations::clone_into`'s.
-        if unsafe { self.operations.clone_into(source, target) } {
+        if unsafe {
+            self.operations
+                .clone_into(source, target, self.layout.size())
+        } {
             Ok(())
         } else {
             Err(OperationError::NotCloneable {
@@ -230,7 +237,7 @@ impl TypeDescription {
     pub unsafe fn default_value(&self, target: *mut u8) -> Result<(), OperationError> {
         // SAFETY: the operations belong to this description's type, and the caller's contract
         // is `Operations::default_into`'s.
-        if unsafe { self.operations.default_into(target) } {
+        if unsafe { self.operations.default_into(target, self.layout.size()) } {
             Ok(())
         } else {
             Err(OperationError::NoDefault {

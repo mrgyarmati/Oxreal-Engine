@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::Reflect;
+use crate::access::Access;
 use crate::attributes::AttributesDefinition;
 use crate::definition::{
     FieldDefinition, GenericArgDefinition, KindData, MathComponentDefinition, Persistence,
@@ -19,6 +20,7 @@ use crate::description::{
     ArrayInfo, Field, GenericArgument, HandleInfo, Identity, ListInfo, MathComponent, MathInfo,
     OptionInfo, StructInfo, TypeDescription, TypeKey, TypeKind, UnitEnumInfo, Variant,
 };
+use crate::foreign::ForeignTypeDefinition;
 use crate::id::{GenericIdInput, ParseStableTypeIdError, StableTypeId};
 use crate::kind::{IntRepr, Primitive};
 use crate::ops::Operations;
@@ -208,6 +210,23 @@ impl TypeRegistry {
         Ok(missing)
     }
 
+    /// Registers a type defined outside Rust (a C#, C++ or script component) in the root group,
+    /// after validating its whole description (see [`ForeignTypeDefinition`]).
+    ///
+    /// # Errors
+    ///
+    /// If its stable ID is already used, or the description is invalid: a bad layout, an
+    /// unregistered or non-ABI-safe field type, or a field outside the type, misaligned,
+    /// overlapping another, or sharing its name. Nothing is registered then.
+    pub fn register_foreign(
+        &self,
+        definition: ForeignTypeDefinition,
+    ) -> Result<TypeKey, RegistrationError> {
+        let mut inner = self.write();
+        let root = self.root_group();
+        inner.transaction(|inner| inner.register_foreign(&definition, root))
+    }
+
     /// Starts a registration group: types added to it become visible together when it's
     /// committed, and are removed together (ADR-0021 §5, for plugins and hot reload).
     pub fn group(&self, name: impl Into<String>) -> GroupBuilder<'_> {
@@ -289,7 +308,12 @@ impl TypeRegistry {
     /// The number of registered types.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.read().by_type_id.len()
+        let inner = self.read();
+        inner
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Live(_)))
+            .count()
     }
 
     /// Whether no type is registered. Never true for a registry made with
@@ -339,7 +363,14 @@ impl fmt::Debug for TypeRegistry {
 pub struct GroupBuilder<'a> {
     registry: &'a TypeRegistry,
     name: String,
-    types: Vec<TypeRef>,
+    types: Vec<Pending>,
+}
+
+/// A type waiting in a [`GroupBuilder`].
+#[derive(Debug)]
+enum Pending {
+    Rust(TypeRef),
+    Foreign(ForeignTypeDefinition),
 }
 
 impl GroupBuilder<'_> {
@@ -351,7 +382,13 @@ impl GroupBuilder<'_> {
     /// group instead: `Vec<f32>` is shared and stays in the root group even when a plugin adds
     /// it, while `Vec<PluginType>` joins the plugin's group with `PluginType`.
     pub fn add<T: Reflect>(&mut self) -> &mut Self {
-        self.types.push(TypeRef::of::<T>());
+        self.types.push(Pending::Rust(TypeRef::of::<T>()));
+        self
+    }
+
+    /// Adds a type defined outside Rust to the group (see [`TypeRegistry::register_foreign`]).
+    pub fn add_foreign(&mut self, definition: ForeignTypeDefinition) -> &mut Self {
+        self.types.push(Pending::Foreign(definition));
         self
     }
 
@@ -373,7 +410,14 @@ impl GroupBuilder<'_> {
                 .expect("fewer than u32::MAX registration groups"),
         };
         inner.transaction(|inner| {
-            for ty in &self.types {
+            for pending in &self.types {
+                let ty = match pending {
+                    Pending::Rust(ty) => ty,
+                    Pending::Foreign(definition) => {
+                        inner.register_foreign(definition, group)?;
+                        continue;
+                    }
+                };
                 if let Some(key) = inner.by_type_id.get(&ty.type_id())
                     && let existing = inner.summary(*key)
                     && existing.group != group
@@ -540,7 +584,7 @@ impl Inner {
             self.by_stable_id.insert(id, key);
         }
 
-        let kind = self.resolve_kind(&definition, &summary, group)?;
+        let (kind, access) = self.resolve_kind(&definition, &summary, group)?;
         let attributes = attributes(definition.attributes(), &summary.name, None)?;
         if definition.is_abi() {
             if definition.operations().needs_drop() {
@@ -562,7 +606,100 @@ impl Inner {
             operations: definition.operations(),
             abi: definition.is_abi(),
             group,
+            access,
+            type_id: Some(ty.type_id()),
         }));
+        Ok(key)
+    }
+
+    /// Validates and registers a type defined outside Rust (ADR-0021 §7): plain, ABI-safe data
+    /// whose every field is checked, so no foreign description can make safe code create an
+    /// invalid value.
+    fn register_foreign(
+        &mut self,
+        definition: &ForeignTypeDefinition,
+        group: GroupId,
+    ) -> Result<TypeKey, RegistrationError> {
+        let invalid = |problem| RegistrationError::InvalidDefinition {
+            ty: definition.name.clone(),
+            problem,
+        };
+        let layout = Layout::from_size_align(definition.size, definition.align)
+            .ok()
+            .filter(|layout| layout.size() % layout.align() == 0)
+            .ok_or_else(|| invalid(DefinitionProblem::WrongLayout))?;
+        let names = definition.fields.iter().map(|f| (f.name.as_str(), &[][..]));
+        check_unique_names(names)
+            .map_err(|name| invalid(DefinitionProblem::DuplicateField(name)))?;
+        if let Some(existing) = self.by_stable_id.get(&definition.id) {
+            return Err(RegistrationError::DuplicateStableId {
+                id: definition.id,
+                existing: self.summary(*existing).name.into_owned(),
+                new: definition.name.clone(),
+            });
+        }
+
+        let mut fields = Vec::with_capacity(definition.fields.len());
+        let mut extents = Vec::with_capacity(definition.fields.len());
+        for field in &definition.fields {
+            if self.live(field.ty).is_none() {
+                return Err(invalid(DefinitionProblem::UnknownFieldType(
+                    field.name.clone(),
+                )));
+            }
+            let field_type = self.summary(field.ty);
+            if !field_type.abi {
+                return Err(invalid(DefinitionProblem::NonAbiField(field.name.clone())));
+            }
+            let fits = field
+                .offset
+                .checked_add(field_type.layout.size())
+                .is_some_and(|end| end <= layout.size());
+            if !fits {
+                return Err(invalid(DefinitionProblem::FieldOutOfBounds(
+                    field.name.clone(),
+                )));
+            }
+            let align = field_type.layout.align();
+            if field.offset % align != 0 || align > layout.align() {
+                return Err(invalid(DefinitionProblem::MisalignedField(
+                    field.name.clone(),
+                )));
+            }
+            extents.push((field.offset, field_type.layout.size(), field.name.as_str()));
+            fields.push(Field {
+                name: Cow::Owned(field.name.clone()),
+                ty: Some(field.ty),
+                offset: field.offset,
+                attributes: crate::Attributes::default(),
+                aliases: Vec::new(),
+                transient: false,
+            });
+        }
+        check_overlap(extents)
+            .map_err(|name| invalid(DefinitionProblem::OverlappingFields(name)))?;
+
+        let key = TypeKey(
+            u32::try_from(self.entries.len()).expect("fewer than u32::MAX registered types"),
+        );
+        self.by_stable_id.insert(definition.id, key);
+        self.entries.push(Entry::Live(Arc::new(TypeDescription {
+            key,
+            identity: Identity::Persisted(definition.id),
+            name: Cow::Owned(definition.name.clone()),
+            generic_args: Vec::new(),
+            layout,
+            kind: TypeKind::Struct(StructInfo {
+                fields,
+                tuple: false,
+            }),
+            attributes: crate::Attributes::default(),
+            operations: Operations::plain(),
+            abi: true,
+            group,
+            access: Access::Direct,
+            type_id: None,
+        })));
         Ok(key)
     }
 
@@ -571,13 +708,22 @@ impl Inner {
         definition: &TypeDefinition,
         this: &Summary,
         group: GroupId,
-    ) -> Result<TypeKind, RegistrationError> {
+    ) -> Result<(TypeKind, Access), RegistrationError> {
         let invalid = |problem| RegistrationError::InvalidDefinition {
             ty: this.name.clone().into_owned(),
             problem,
         };
         let layout = definition.layout();
-        Ok(match definition.kind().0 {
+        let access = match definition.kind().0 {
+            KindData::UnitEnum { access, .. } => Access::Enum(access),
+            KindData::List { access, .. } => Access::List(access),
+            KindData::Option { access, .. } => Access::Option(access),
+            KindData::Math { components } => {
+                Access::Math(components.iter().map(|c| (c.get, c.set)).collect())
+            }
+            _ => Access::Direct,
+        };
+        let kind = match definition.kind().0 {
             KindData::Primitive(primitive) => {
                 if layout != primitive_layout(primitive) {
                     return Err(invalid(DefinitionProblem::WrongLayout));
@@ -595,7 +741,7 @@ impl Inner {
             KindData::Struct { fields, tuple } => {
                 TypeKind::Struct(self.resolve_struct(fields, tuple, this, group)?)
             }
-            KindData::UnitEnum { repr, variants } => {
+            KindData::UnitEnum { repr, variants, .. } => {
                 TypeKind::UnitEnum(resolve_enum(repr, variants, layout, this)?)
             }
             KindData::Array { element, len } => {
@@ -606,16 +752,17 @@ impl Inner {
                 }
                 TypeKind::Array(ArrayInfo { element, len })
             }
-            KindData::List { element } => TypeKind::List(ListInfo {
+            KindData::List { element, .. } => TypeKind::List(ListInfo {
                 element: self.register(element, group)?,
             }),
-            KindData::Option { some } => TypeKind::Option(OptionInfo {
+            KindData::Option { some, .. } => TypeKind::Option(OptionInfo {
                 some: self.register(some, group)?,
             }),
             KindData::Math { components } => {
                 TypeKind::Math(self.resolve_math(components, this, group)?)
             }
-        })
+        };
+        Ok((kind, access))
     }
 
     fn resolve_struct(
@@ -706,15 +853,8 @@ impl Inner {
             });
         }
 
-        extents.sort_unstable_by_key(|&(offset, size, _)| (offset, size));
-        for pair in extents.windows(2) {
-            let ((offset, size, _), (next, _, name)) = (pair[0], pair[1]);
-            if offset + size > next {
-                return Err(invalid(DefinitionProblem::OverlappingFields(
-                    name.to_owned(),
-                )));
-            }
-        }
+        check_overlap(extents)
+            .map_err(|name| invalid(DefinitionProblem::OverlappingFields(name)))?;
         Ok(StructInfo {
             fields: resolved,
             tuple,
@@ -878,6 +1018,19 @@ fn attributes(
         });
     }
     Ok(attributes)
+}
+
+/// Checks that no two fields' byte ranges overlap, returning the name of a field that overlaps
+/// the one before it. Each extent is (offset, size, name).
+fn check_overlap(mut extents: Vec<(usize, usize, &str)>) -> Result<(), String> {
+    extents.sort_unstable_by_key(|&(offset, size, _)| (offset, size));
+    for pair in extents.windows(2) {
+        let ((offset, size, _), (next, _, name)) = (pair[0], pair[1]);
+        if offset + size > next {
+            return Err(name.to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// Checks that names and aliases are unique among each other, returning the first repeat.
@@ -1098,6 +1251,9 @@ pub enum DefinitionProblem {
         /// What's wrong with it.
         problem: &'static str,
     },
+    /// A foreign type's field names a type key that isn't registered.
+    #[error("the type of field '{0}' isn't registered (or was removed)")]
+    UnknownFieldType(String),
     /// An ABI-safe type has a field that isn't ABI-safe (or is opaque).
     #[error(
         "it's declared #[reflect(abi)], but field '{0}' isn't ABI-safe (use integers, floats, \

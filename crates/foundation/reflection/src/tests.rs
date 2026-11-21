@@ -514,6 +514,16 @@ enum Repeated {
     A = 1,
 }
 
+impl crate::UnitEnum for Repeated {
+    fn variant_index(&self) -> usize {
+        0
+    }
+
+    fn from_variant_index(index: usize) -> Option<Self> {
+        (index == 0).then_some(Self::A)
+    }
+}
+
 // SAFETY: deliberately wrong (two variants claim discriminant 1): registration must refuse it.
 unsafe impl Reflect for Repeated {
     const TRANSIENT: bool = false;
@@ -523,7 +533,7 @@ unsafe impl Reflect for Repeated {
         Persistence::Persisted(StableTypeId::from_uuid(
             "e5c9a6b4-1f7d-4a2c-9e0b-4d6f8a0b2c5e",
         )),
-        KindDefinition::unit_enum(
+        KindDefinition::unit_enum::<Self>(
             Some(IntRepr::U8),
             &[
                 crate::VariantDefinition::with_discriminant("A", Repeated::A as u32),
@@ -1213,6 +1223,16 @@ unsafe impl Reflect for DroppingAbi {
 /// A hand-written enum without variants.
 enum Never {}
 
+impl crate::UnitEnum for Never {
+    fn variant_index(&self) -> usize {
+        match *self {}
+    }
+
+    fn from_variant_index(_: usize) -> Option<Self> {
+        None
+    }
+}
+
 // SAFETY: deliberately describes an empty enum; registration must refuse it.
 unsafe impl Reflect for Never {
     const TRANSIENT: bool = true;
@@ -1220,7 +1240,7 @@ unsafe impl Reflect for Never {
     const DEFINITION: TypeDefinition = TypeDefinition::builder::<Self>(
         "Never",
         Persistence::Transient,
-        KindDefinition::unit_enum(None, &[]),
+        KindDefinition::unit_enum::<Self>(None, &[]),
     )
     .build();
 }

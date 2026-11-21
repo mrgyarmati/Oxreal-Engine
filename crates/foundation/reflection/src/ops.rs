@@ -34,12 +34,15 @@ type DefaultFn = unsafe fn(*mut u8);
 /// [`default_value`](crate::TypeDescription::default_value).
 ///
 /// Invariant: every function pointer was monomorphized for the type whose definition holds
-/// these operations. Only this crate's constructors set them, through `builder::<T>`.
+/// these operations. Only this crate's constructors set them, through `builder::<T>`. Types
+/// defined outside Rust are `plain`: plain data with no `Drop`, cloned by copying their bytes
+/// and defaulted to zero bytes, which registration checks are valid values.
 #[derive(Clone, Copy)]
 pub struct Operations {
     drop: Option<DropFn>,
     clone: Option<CloneFn>,
     default: Option<DefaultFn>,
+    plain: bool,
 }
 
 impl Operations {
@@ -53,6 +56,17 @@ impl Operations {
             },
             clone: None,
             default: None,
+            plain: false,
+        }
+    }
+
+    /// Plain data defined outside Rust: no drop, cloned by copying bytes, defaulted to zeroes.
+    pub(crate) const fn plain() -> Self {
+        Self {
+            drop: None,
+            clone: None,
+            default: None,
+            plain: true,
         }
     }
 
@@ -111,13 +125,13 @@ impl Operations {
     /// Whether values can be cloned.
     #[must_use]
     pub const fn is_cloneable(&self) -> bool {
-        self.clone.is_some()
+        self.plain || self.clone.is_some()
     }
 
     /// Whether a default value can be constructed.
     #[must_use]
     pub const fn is_defaultable(&self) -> bool {
-        self.default.is_some()
+        self.plain || self.default.is_some()
     }
 
     /// Drops the value at `value`.
@@ -141,7 +155,19 @@ impl Operations {
     ///
     /// The contract of [`TypeDescription::clone_value`](crate::TypeDescription::clone_value), for
     /// the type these operations belong to.
-    pub(crate) unsafe fn clone_into(&self, source: *const u8, target: *mut u8) -> bool {
+    /// `size` is the type's size.
+    pub(crate) unsafe fn clone_into(
+        &self,
+        source: *const u8,
+        target: *mut u8,
+        size: usize,
+    ) -> bool {
+        if self.plain {
+            // SAFETY: plain data is valid in any copy of its bytes; the caller's contract makes
+            // both pointers valid for `size` bytes and non-overlapping.
+            unsafe { ptr::copy_nonoverlapping(source, target, size) };
+            return true;
+        }
         let Some(clone) = self.clone else {
             return false;
         };
@@ -158,7 +184,14 @@ impl Operations {
     ///
     /// The contract of [`TypeDescription::default_value`](crate::TypeDescription::default_value),
     /// for the type these operations belong to.
-    pub(crate) unsafe fn default_into(&self, target: *mut u8) -> bool {
+    /// `size` is the type's size.
+    pub(crate) unsafe fn default_into(&self, target: *mut u8, size: usize) -> bool {
+        if self.plain {
+            // SAFETY: registration checked that zero bytes are a valid value of a plain type; the
+            // caller's contract makes `target` writable for `size` bytes.
+            unsafe { ptr::write_bytes(target, 0, size) };
+            return true;
+        }
         let Some(default) = self.default else {
             return false;
         };
