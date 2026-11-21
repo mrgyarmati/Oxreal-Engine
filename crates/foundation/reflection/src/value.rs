@@ -26,7 +26,7 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use crate::Reflect;
-use crate::access::Access;
+use crate::access::{Access, ComponentGet, ComponentSet};
 use crate::description::{TypeDescription, TypeKey, TypeKind};
 use crate::ops::OperationError;
 use crate::path::{FieldPath, ResolvedPath, Step};
@@ -47,11 +47,12 @@ use crate::registry::{RegistrationError, RegistryId, TypeRegistry};
 /// let registry = TypeRegistry::new();
 /// let door = Door { locked: true, hinges: vec![0.5, 1.5] };
 /// let view = registry.view(&door)?;
-/// assert_eq!(view.field("locked")?.downcast::<bool>()?, &true);
-/// assert_eq!(view.field("hinges")?.element(1)?.downcast::<f32>()?, &1.5);
-/// assert_eq!(view.path(&"hinges[0]".parse()?)?.downcast::<f32>()?, &0.5);
+/// assert_eq!(view.field("locked")?.downcast_ref::<bool>()?, &true);
+/// assert_eq!(view.field("hinges")?.element(1)?.downcast_ref::<f32>()?, &1.5);
+/// assert_eq!(view.path(&"hinges[0]".parse()?)?.downcast_ref::<f32>()?, &0.5);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+#[derive(Clone)]
 pub struct ValueRef<'a> {
     registry: &'a TypeRegistry,
     description: Arc<TypeDescription>,
@@ -99,6 +100,10 @@ unsafe impl Sync for OwnedValue {}
 impl TypeRegistry {
     /// A shared view of `value`, registering `T` if it isn't registered yet.
     ///
+    /// Registering here puts `T` in the root group. A plugin's type must be registered
+    /// through its group ([`TypeRegistry::group`]) before it's viewed, or it can't join the
+    /// group and won't be removed with it.
+    ///
     /// # Errors
     ///
     /// [`ValueError::Registration`] if `T` can't be registered.
@@ -114,6 +119,8 @@ impl TypeRegistry {
     }
 
     /// An exclusive view of `value`, registering `T` if it isn't registered yet.
+    ///
+    /// As with [`TypeRegistry::view`], registering here puts `T` in the root group.
     ///
     /// # Errors
     ///
@@ -178,7 +185,7 @@ impl<'a> ValueRef<'a> {
     /// # Errors
     ///
     /// [`ValueError::TypeMismatch`] if the value isn't a `T`.
-    pub fn downcast<T: Reflect>(&self) -> Result<&'a T, ValueError> {
+    pub fn downcast_ref<T: Reflect>(&self) -> Result<&'a T, ValueError> {
         check_type::<T>(&self.description)?;
         // SAFETY: the value is a `T` (checked above) that lives and is only read for `'a` (the
         // view's invariant).
@@ -249,7 +256,7 @@ impl<'a> ValueRef<'a> {
     /// # Errors
     ///
     /// [`ValueError::WrongKind`] if the value isn't a unit enum.
-    pub fn variant(&self) -> Result<usize, ValueError> {
+    pub fn variant_index(&self) -> Result<usize, ValueError> {
         let Access::Enum(access) = &self.description.access else {
             return Err(wrong_kind(&self.description, "a unit enum"));
         };
@@ -264,9 +271,18 @@ impl<'a> ValueRef<'a> {
     ///
     /// If the value isn't a math type or has no such component.
     pub fn component(&self, name: &str) -> Result<OwnedValue, ValueError> {
-        let index = component_index(&self.description, name)?;
-        // SAFETY: the view's invariant; `index` is one of the type's components.
-        unsafe { get_component(self.registry, &self.description, self.ptr, index) }
+        let (index, component) = component_of(self.registry, &self.description, name)?;
+        // SAFETY: the view's invariant; `index` is one of the type's components, of type
+        // `component`.
+        Ok(unsafe {
+            get_component(
+                self.registry.id(),
+                &self.description,
+                &component,
+                self.ptr,
+                index,
+            )
+        })
     }
 
     /// The value at `path`, which must not end inside a math value (use
@@ -284,9 +300,9 @@ impl<'a> ValueRef<'a> {
         }
         self.check_path(path)?;
         // SAFETY: the view's invariant; the path was resolved for this type and registry.
-        let ptr = unsafe { navigate(self.registry, &self.description, self.ptr, path, false)? };
+        let ptr = unsafe { navigate(self.ptr, path, false)? };
         // SAFETY: the path's target, of the path's leaf type, inside the value.
-        unsafe { self.child(ptr, path.leaf) }
+        Ok(unsafe { self.child_described(ptr, Arc::clone(path.leaf_description())) })
     }
 
     /// A copy of the value at `path`, which may end inside a math value.
@@ -298,24 +314,38 @@ impl<'a> ValueRef<'a> {
     pub fn read_at(&self, path: &ResolvedPath) -> Result<OwnedValue, ValueError> {
         self.check_path(path)?;
         // SAFETY: the view's invariant; the path was resolved for this type and registry.
-        let ptr = unsafe { navigate(self.registry, &self.description, self.ptr, path, false)? };
-        let Some((&(last, _), outer)) = path.components.split_last() else {
+        let ptr = unsafe { navigate(self.ptr, path, false)? };
+        if path.components.is_empty() {
             // SAFETY: the path's target, of the leaf type.
-            return unsafe { self.child(ptr, path.leaf) }?.to_owned_value();
-        };
-        let owner = path.steps.last().map_or(self.description.key(), |s| s.ty);
-        let mut math = self.registry.live(owner)?;
-        let mut copy = None::<OwnedValue>;
-        for &(index, ty) in outer {
-            let source = copy.as_ref().map_or(ptr, |c| c.ptr);
-            // SAFETY: `source` is a valid value of `math`'s type: the navigated target, or the
-            // previous component copy.
-            copy = Some(unsafe { get_component(self.registry, &math, source, index)? });
-            math = self.registry.live(ty)?;
+            let leaf = unsafe { self.child_described(ptr, Arc::clone(path.leaf_description())) };
+            return leaf.to_owned_value();
         }
-        let source = copy.as_ref().map_or(ptr, |c| c.ptr);
-        // SAFETY: as above.
-        unsafe { get_component(self.registry, &math, source, last) }
+        let base = path.steps.len();
+        // SAFETY: `ptr` is a valid value of the math type the steps reach (`base`), whose first
+        // component's description follows it.
+        let mut copy = unsafe {
+            get_component(
+                self.registry.id(),
+                &path.descriptions[base],
+                &path.descriptions[base + 1],
+                ptr,
+                path.components[0].0,
+            )
+        };
+        for (i, &(index, _)) in path.components.iter().enumerate().skip(1) {
+            // SAFETY: `copy` is a valid value of the math type at `base + i`, the previous
+            // component; the next description is this component's.
+            copy = unsafe {
+                get_component(
+                    self.registry.id(),
+                    &path.descriptions[base + i],
+                    &path.descriptions[base + i + 1],
+                    copy.ptr,
+                    index,
+                )
+            };
+        }
+        Ok(copy)
     }
 
     /// The value at `path`, resolved against this value's type.
@@ -358,30 +388,55 @@ impl<'a> ValueRef<'a> {
     pub(crate) fn check_reachable(&self, path: &ResolvedPath) -> Result<(), ValueError> {
         self.check_path(path)?;
         // SAFETY: the view's invariant; the path was resolved for this type and registry.
-        unsafe { navigate(self.registry, &self.description, self.ptr, path, false) }.map(|_| ())
+        unsafe { navigate(self.ptr, path, false) }.map(|_| ())
     }
 
     fn check_path(&self, path: &ResolvedPath) -> Result<(), ValueError> {
-        if path.registry != self.registry.id() {
-            return Err(ValueError::WrongRegistry);
-        }
-        if path.root != self.description.key() {
-            return Err(type_mismatch(self.registry, path.root, &self.description));
-        }
-        Ok(())
+        check_path(self.registry, &self.description, path)
     }
 
     /// # Safety
     ///
     /// `ptr` points to a valid value of type `key` inside this view's value.
     unsafe fn child(&self, ptr: NonNull<u8>, key: TypeKey) -> Result<ValueRef<'a>, ValueError> {
-        Ok(ValueRef {
+        // SAFETY: the caller's contract, with `key`'s description.
+        Ok(unsafe { self.child_described(ptr, self.registry.live(key)?) })
+    }
+
+    /// # Safety
+    ///
+    /// `ptr` points to a valid value of `description`'s type inside this view's value, and the
+    /// description belongs to this view's registry.
+    unsafe fn child_described(
+        &self,
+        ptr: NonNull<u8>,
+        description: Arc<TypeDescription>,
+    ) -> ValueRef<'a> {
+        ValueRef {
             registry: self.registry,
-            description: self.registry.live(key)?,
+            description,
             ptr,
             borrow: PhantomData,
-        })
+        }
     }
+}
+
+/// Checks that `path` was resolved in `registry` for `description`'s type.
+fn check_path(
+    registry: &TypeRegistry,
+    description: &TypeDescription,
+    path: &ResolvedPath,
+) -> Result<(), ValueError> {
+    if path.registry != registry.id() {
+        return Err(ValueError::WrongRegistry);
+    }
+    if path.root != description.key() {
+        return Err(ValueError::PathForOtherType {
+            path_root: path.descriptions[0].name().to_owned(),
+            ty: description.name().to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl<'a> ValueMut<'a> {
@@ -427,6 +482,7 @@ impl<'a> ValueMut<'a> {
     }
 
     /// A shorter exclusive view of the same value.
+    #[must_use]
     pub fn reborrow(&mut self) -> ValueMut<'_> {
         ValueMut {
             registry: self.registry,
@@ -518,9 +574,20 @@ impl<'a> ValueMut<'a> {
         name: &str,
         value: OwnedValue,
     ) -> Result<OwnedValue, ValueError> {
-        let index = component_index(&self.description, name)?;
-        // SAFETY: the view's invariant; `index` is one of the type's components.
-        unsafe { set_component(self.registry, &self.description, self.ptr, index, value) }
+        let (index, component) = component_of(self.registry, &self.description, name)?;
+        check_owned(self.registry, &component, &value)?;
+        // SAFETY: the view's invariant; `index` is one of the type's components, of type
+        // `component`, which `value` has (checked above).
+        Ok(unsafe {
+            set_component(
+                self.registry.id(),
+                &self.description,
+                &component,
+                self.ptr,
+                index,
+                value,
+            )
+        })
     }
 
     /// Replaces the value with `value`, returning the old one. Nothing is dropped.
@@ -635,15 +702,29 @@ impl<'a> ValueMut<'a> {
                 ty: self.description.name().to_owned(),
             });
         }
-        self.as_ref().check_path(path)?;
+        check_path(self.registry, &self.description, path)?;
         // SAFETY: the view's invariant; the path was resolved for this type and registry.
-        let ptr = unsafe { navigate(self.registry, &self.description, self.ptr, path, true)? };
-        // SAFETY: the path's target, reached for writing.
-        unsafe { self.child(ptr, path.leaf) }
+        let ptr = unsafe { navigate(self.ptr, path, true)? };
+        // SAFETY: the path's target, of the leaf type, reached for writing.
+        Ok(unsafe { self.child_described(ptr, Arc::clone(path.leaf_description())) })
+    }
+
+    /// The value at `path`, resolved against this value's type, which must not end inside a
+    /// math value.
+    ///
+    /// # Errors
+    ///
+    /// As [`FieldPath::resolve`] and [`ValueMut::at_mut`].
+    pub fn path_mut(&mut self, path: &FieldPath) -> Result<ValueMut<'_>, ValueError> {
+        let resolved = path.resolve(self.registry, self.description.key())?;
+        self.at_mut(&resolved)
     }
 
     /// Replaces the value at `path` with `value`, returning the old one. A path that ends inside
     /// a math value copies the math value out, changes the component and copies it back.
+    ///
+    /// It uses the descriptions `path` was resolved with and doesn't look types up again, so it
+    /// fails only for the reasons its errors list, which depend on the value alone.
     ///
     /// # Errors
     ///
@@ -654,20 +735,27 @@ impl<'a> ValueMut<'a> {
         path: &ResolvedPath,
         value: OwnedValue,
     ) -> Result<OwnedValue, ValueError> {
-        self.as_ref().check_path(path)?;
-        let leaf = self.registry.live(path.leaf)?;
-        check_owned(self.registry, &leaf, &value)?;
+        check_path(self.registry, &self.description, path)?;
+        check_owned(self.registry, path.leaf_description(), &value)?;
         // SAFETY: the view's invariant; the path was resolved for this type and registry.
-        let ptr = unsafe { navigate(self.registry, &self.description, self.ptr, path, true)? };
+        let ptr = unsafe { navigate(self.ptr, path, true)? };
         if path.components.is_empty() {
             // SAFETY: the path's target, of the leaf type, reached for writing.
-            return unsafe { self.child(ptr, path.leaf) }?.replace(value);
+            let mut leaf =
+                unsafe { self.child_described(ptr, Arc::clone(path.leaf_description())) };
+            return leaf.replace(value);
         }
-        let owner = path.steps.last().map_or(self.description.key(), |s| s.ty);
-        let math = self.registry.live(owner)?;
-        // SAFETY: `ptr` is a valid, exclusively borrowed value of `math`'s type, and the
-        // components were resolved from it.
-        unsafe { replace_in_math(self.registry, &math, ptr, &path.components, value) }
+        // SAFETY: `ptr` is a valid, exclusively borrowed value of the math type the steps reach,
+        // and the components and their descriptions were resolved from it.
+        Ok(unsafe {
+            replace_in_math(
+                self.registry.id(),
+                &path.descriptions[path.steps.len()..],
+                &path.components,
+                ptr,
+                value,
+            )
+        })
     }
 
     /// Replaces the value at `path`, resolved against this value's type, returning the old one.
@@ -701,17 +789,33 @@ impl<'a> ValueMut<'a> {
     /// `ptr` points to a valid value of type `key` inside this view's value, reached with write
     /// provenance.
     unsafe fn child(&mut self, ptr: NonNull<u8>, key: TypeKey) -> Result<ValueMut<'_>, ValueError> {
-        Ok(ValueMut {
+        let description = self.registry.live(key)?;
+        // SAFETY: the caller's contract, with `key`'s description.
+        Ok(unsafe { self.child_described(ptr, description) })
+    }
+
+    /// # Safety
+    ///
+    /// `ptr` points to a valid value of `description`'s type inside this view's value, reached
+    /// with write provenance, and the description belongs to this view's registry.
+    unsafe fn child_described(
+        &mut self,
+        ptr: NonNull<u8>,
+        description: Arc<TypeDescription>,
+    ) -> ValueMut<'_> {
+        ValueMut {
             registry: self.registry,
-            description: self.registry.live(key)?,
+            description,
             ptr,
             borrow: PhantomData,
-        })
+        }
     }
 }
 
 impl OwnedValue {
     /// `value`, owned through its description, registering `T` if it isn't registered yet.
+    ///
+    /// As with [`TypeRegistry::view`], registering here puts `T` in the root group.
     ///
     /// # Errors
     ///
@@ -769,8 +873,9 @@ impl OwnedValue {
         // SAFETY: the slot is writable for the type's size, which is `bytes.len()`; the two
         // don't overlap.
         unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), slot.ptr.as_ptr(), bytes.len()) };
-        // SAFETY: the bytes form a valid value: the type is plain data with no `Drop`, whose
-        // validity depends only on the bytes `validate` checked.
+        // SAFETY: the bytes form a valid value: the type is plain data, whose validity depends
+        // only on the bytes `validate` checked. A struct's own `Drop`, if any, then runs on field
+        // values the `Reflect` contract allows reflection to build.
         Ok(unsafe { slot.into_owned(registry.id(), description) })
     }
 
@@ -785,7 +890,7 @@ impl OwnedValue {
     /// # Errors
     ///
     /// [`ValueError::WrongRegistry`] if `registry` isn't the one the value belongs to.
-    pub fn as_ref<'a>(&'a self, registry: &'a TypeRegistry) -> Result<ValueRef<'a>, ValueError> {
+    pub fn view<'a>(&'a self, registry: &'a TypeRegistry) -> Result<ValueRef<'a>, ValueError> {
         if registry.id() != self.registry {
             return Err(ValueError::WrongRegistry);
         }
@@ -802,7 +907,7 @@ impl OwnedValue {
     /// # Errors
     ///
     /// [`ValueError::WrongRegistry`] if `registry` isn't the one the value belongs to.
-    pub fn as_mut<'a>(
+    pub fn view_mut<'a>(
         &'a mut self,
         registry: &'a TypeRegistry,
     ) -> Result<ValueMut<'a>, ValueError> {
@@ -1001,19 +1106,6 @@ fn check_owned(
     Ok(())
 }
 
-fn type_mismatch(
-    registry: &TypeRegistry,
-    expected: TypeKey,
-    found: &TypeDescription,
-) -> ValueError {
-    ValueError::TypeMismatch {
-        expected: registry
-            .description(expected)
-            .map_or_else(|| expected.to_string(), |d| d.name().to_owned()),
-        found: found.name().to_owned(),
-    }
-}
-
 fn wrong_kind(description: &TypeDescription, expected: &'static str) -> ValueError {
     ValueError::WrongKind {
         ty: description.name().to_owned(),
@@ -1034,10 +1126,9 @@ fn field_of(description: &TypeDescription, name: &str) -> Result<(usize, TypeKey
     let TypeKind::Struct(info) = description.kind() else {
         return Err(wrong_kind(description, "a struct"));
     };
-    let (_, field) = info.field(name).ok_or_else(|| ValueError::NoSuchField {
-        ty: description.name().to_owned(),
-        field: name.to_owned(),
-    })?;
+    let (_, field) = info
+        .field(name)
+        .ok_or_else(|| ValueError::no_such_field(description, name))?;
     let key = field.ty().ok_or_else(|| ValueError::OpaqueField {
         ty: description.name().to_owned(),
         field: field.name().to_owned(),
@@ -1045,17 +1136,21 @@ fn field_of(description: &TypeDescription, name: &str) -> Result<(usize, TypeKey
     Ok((field.offset(), key))
 }
 
-fn component_index(description: &TypeDescription, name: &str) -> Result<usize, ValueError> {
+/// The index and type of the math component `name`.
+fn component_of(
+    registry: &TypeRegistry,
+    description: &TypeDescription,
+    name: &str,
+) -> Result<(usize, Arc<TypeDescription>), ValueError> {
     let TypeKind::Math(info) = description.kind() else {
         return Err(wrong_kind(description, "a math type"));
     };
-    info.components()
+    let index = info
+        .components()
         .iter()
         .position(|c| c.name() == name)
-        .ok_or_else(|| ValueError::NoSuchField {
-            ty: description.name().to_owned(),
-            field: name.to_owned(),
-        })
+        .ok_or_else(|| ValueError::no_such_field(description, name))?;
+    Ok((index, registry.live(info.components()[index].ty())?))
 }
 
 /// # Safety
@@ -1133,21 +1228,19 @@ unsafe fn payload(
     Ok(NonNull::new(payload).map(|payload| (payload, info.some())))
 }
 
-/// Follows `path`'s steps (not its math components) from `ptr`.
+/// Follows `path`'s steps (not its math components) from `ptr`, using the descriptions the
+/// path was resolved with: it fails only on the value (a list index out of bounds, an option
+/// that's `None`), never on a type lookup.
 ///
 /// # Safety
 ///
-/// As [`element`], for `root`'s type; `path` was resolved for that type in `registry`.
+/// As [`element`], for the path's root type; `path` was resolved for that type.
 unsafe fn navigate(
-    registry: &TypeRegistry,
-    root: &TypeDescription,
     mut ptr: NonNull<u8>,
     path: &ResolvedPath,
     mutable: bool,
 ) -> Result<NonNull<u8>, ValueError> {
-    let mut container = None::<Arc<TypeDescription>>;
-    for step in &path.steps {
-        let description = container.as_deref().unwrap_or(root);
+    for (step, description) in path.steps.iter().zip(&path.descriptions) {
         debug_assert_eq!(description.key(), step.container);
         ptr = match step.step {
             // SAFETY: resolution read the offset from this type's description, so the inner
@@ -1169,99 +1262,99 @@ unsafe fn navigate(
                 }
             },
         };
-        container = Some(registry.live(step.ty)?);
     }
     Ok(ptr)
+}
+
+/// The getter and setter of component `index` of a math type.
+fn math_accessors(math: &TypeDescription, index: usize) -> (ComponentGet, ComponentSet) {
+    match &math.access {
+        Access::Math(accessors) => accessors[index],
+        _ => unreachable!("components are only resolved on math types"),
+    }
 }
 
 /// A copy of component `index` of the math value at `ptr`.
 ///
 /// # Safety
 ///
-/// `ptr` points to a valid value of `math`'s type, a math type with that component.
+/// `ptr` points to a valid value of `math`'s type, a math type with that component, whose type
+/// `component` describes.
 unsafe fn get_component(
-    registry: &TypeRegistry,
+    registry: RegistryId,
     math: &TypeDescription,
+    component: &Arc<TypeDescription>,
     ptr: NonNull<u8>,
     index: usize,
-) -> Result<OwnedValue, ValueError> {
-    let (TypeKind::Math(info), Access::Math(accessors)) = (math.kind(), &math.access) else {
-        return Err(wrong_kind(math, "a math type"));
-    };
-    let component = registry.live(info.components()[index].ty())?;
+) -> OwnedValue {
+    let (get, _) = math_accessors(math, index);
     let slot = Slot::new(component.layout());
     // SAFETY: `ptr` is a valid math value (caller's contract); the slot is aligned and
     // writable for the component's type; the getter belongs to this math type.
-    unsafe { (accessors[index].0)(ptr.as_ptr(), slot.ptr.as_ptr()) };
+    unsafe { get(ptr.as_ptr(), slot.ptr.as_ptr()) };
     // SAFETY: the getter wrote a valid component value into the slot.
-    Ok(unsafe { slot.into_owned(registry.id(), component) })
+    unsafe { slot.into_owned(registry, Arc::clone(component)) }
 }
 
 /// Sets component `index` of the math value at `ptr` to `value`, returning the old component.
 ///
 /// # Safety
 ///
-/// `ptr` points to a valid, exclusively borrowed value of `math`'s type, a math type with
-/// that component, with write provenance.
+/// As [`get_component`], and the value is exclusively borrowed with write provenance. `value`
+/// is of the component's type (checked by the caller).
 unsafe fn set_component(
-    registry: &TypeRegistry,
+    registry: RegistryId,
     math: &TypeDescription,
+    component: &Arc<TypeDescription>,
     ptr: NonNull<u8>,
     index: usize,
     value: OwnedValue,
-) -> Result<OwnedValue, ValueError> {
-    let (TypeKind::Math(info), Access::Math(accessors)) = (math.kind(), &math.access) else {
-        return Err(wrong_kind(math, "a math type"));
-    };
-    let component = registry.live(info.components()[index].ty())?;
-    check_owned(registry, &component, &value)?;
+) -> OwnedValue {
     // SAFETY: the caller's contract.
-    let old = unsafe { get_component(registry, math, ptr, index)? };
-    // SAFETY: the caller's contract; `value` is a valid component value (checked above), which
-    // the setter copies. Components are plain values without `Drop`, so `value` is dropped
-    // normally afterwards.
-    unsafe { (accessors[index].1)(ptr.as_ptr(), value.ptr.as_ptr()) };
-    Ok(old)
+    let old = unsafe { get_component(registry, math, component, ptr, index) };
+    let (_, set) = math_accessors(math, index);
+    // SAFETY: the caller's contract; `value` is a valid component value, which the setter
+    // copies. Component types are `Copy` (`MathComponentDefinition::new` requires it), so `value`
+    // stays valid and is dropped normally afterwards.
+    unsafe { set(ptr.as_ptr(), value.ptr.as_ptr()) };
+    old
 }
 
 /// Replaces the value at the end of a chain of math components, copying each enclosing math
 /// value out and back in, and returns the old value.
 ///
+/// `descriptions` starts with the math type at `ptr`, then each component's type.
+///
 /// # Safety
 ///
-/// As [`set_component`], for the first component of `components`; each later component
-/// belongs to the type of the one before it.
+/// `ptr` points to a valid, exclusively borrowed value of `descriptions[0]`'s type, with write
+/// provenance; each component belongs to the type before it; `value` is of the last
+/// component's type.
 unsafe fn replace_in_math(
-    registry: &TypeRegistry,
-    math: &TypeDescription,
-    ptr: NonNull<u8>,
+    registry: RegistryId,
+    descriptions: &[Arc<TypeDescription>],
     components: &[(usize, TypeKey)],
+    ptr: NonNull<u8>,
     value: OwnedValue,
-) -> Result<OwnedValue, ValueError> {
-    let Some((&(index, ty), rest)) = components.split_first() else {
+) -> OwnedValue {
+    let Some((&(index, _), rest)) = components.split_first() else {
         unreachable!("callers pass at least one component");
     };
+    let (math, component) = (&descriptions[0], &descriptions[1]);
     if rest.is_empty() {
         // SAFETY: the caller's contract.
-        return unsafe { set_component(registry, math, ptr, index, value) };
+        return unsafe { set_component(registry, math, component, ptr, index, value) };
     }
     // SAFETY: the caller's contract.
-    let inner = unsafe { get_component(registry, math, ptr, index)? };
-    let inner_math = registry.live(ty)?;
-    // SAFETY: `inner` is an owned, valid value of `inner_math`'s type, and `rest` was resolved
-    // from it.
-    let old = unsafe { replace_in_math(registry, &inner_math, inner.ptr, rest, value)? };
+    let inner = unsafe { get_component(registry, math, component, ptr, index) };
+    // SAFETY: `inner` is an owned, valid value of the component's type, the next math type in
+    // the chain.
+    let old = unsafe { replace_in_math(registry, &descriptions[1..], rest, inner.ptr, value) };
+    let (_, set) = math_accessors(math, index);
     // SAFETY: `inner` is a valid component value of the right type; the setter copies it, and
-    // `inner` (plain math data) is then dropped normally.
-    unsafe { (math_setter(math, index))(ptr.as_ptr(), inner.ptr.as_ptr()) };
-    Ok(old)
-}
-
-fn math_setter(math: &TypeDescription, index: usize) -> crate::access::ComponentSet {
-    match &math.access {
-        Access::Math(accessors) => accessors[index].1,
-        _ => unreachable!("resolved math components belong to math types"),
-    }
+    // `inner` (a `Copy` math value) is then dropped normally.
+    unsafe { set(ptr.as_ptr(), inner.ptr.as_ptr()) };
+    old
 }
 
 /// Reading or writing a value through reflection failed (ADR-0021 §4).
@@ -1280,12 +1373,14 @@ pub enum ValueError {
         expected: &'static str,
     },
     /// The struct or math type has no such field or component.
-    #[error("'{ty}' has no field '{field}'")]
+    #[error("'{ty}' has no field '{field}'; its fields are: {available}")]
     NoSuchField {
         /// The type.
         ty: String,
         /// The requested name.
         field: String,
+        /// The names it has, comma-separated.
+        available: String,
     },
     /// The field is opaque (`#[reflect(opaque)]`), so it can't be reached.
     #[error("field '{field}' of '{ty}' is opaque and can't be read or written through reflection")]
@@ -1306,7 +1401,7 @@ pub enum ValueError {
         len: usize,
     },
     /// An option on the way is `None`.
-    #[error("'{ty}' is None")]
+    #[error("'{ty}' is None; set it to Some before reading or editing inside it")]
     NoValue {
         /// The option type.
         ty: String,
@@ -1328,9 +1423,14 @@ pub enum ValueError {
         index: usize,
     },
     /// A path continues after a math component with something other than another component.
-    #[error("inside the math value '{ty}', a path can only name further components")]
+    #[error(
+        "after the math component '{component}' (a '{ty}'), a path can only name that value's \
+         own components"
+    )]
     AfterMathComponent {
-        /// The math component's type.
+        /// The last component in the path.
+        component: String,
+        /// Its type.
         ty: String,
     },
     /// A path that ends inside a math value was used to borrow, but math components can only be
@@ -1350,8 +1450,21 @@ pub enum ValueError {
         key: TypeKey,
     },
     /// A value or path from another registry was used.
-    #[error("the value or path belongs to another type registry")]
+    #[error(
+        "the value or path belongs to another type registry; use values and paths made with the \
+         registry this view or value belongs to"
+    )]
     WrongRegistry,
+    /// A resolved path was used on a value of another type than the one it was resolved for.
+    #[error(
+        "the path was resolved for '{path_root}' but used on '{ty}'; resolve it against '{ty}'"
+    )]
+    PathForOtherType {
+        /// The type the path was resolved for.
+        path_root: String,
+        /// The type of the value it was used on.
+        ty: String,
+    },
     /// Only plain data can be read from bytes.
     #[error("'{ty}' isn't plain data, so it can't be read from bytes")]
     NotPlainData {
@@ -1384,4 +1497,24 @@ pub enum ValueError {
     /// The type couldn't be registered.
     #[error(transparent)]
     Registration(#[from] RegistrationError),
+}
+
+impl ValueError {
+    /// [`ValueError::NoSuchField`], listing the fields or components the type does have.
+    pub(crate) fn no_such_field(description: &TypeDescription, field: &str) -> Self {
+        let available: Vec<&str> = match description.kind() {
+            TypeKind::Struct(info) => info.fields().iter().map(crate::Field::name).collect(),
+            TypeKind::Math(info) => info
+                .components()
+                .iter()
+                .map(crate::MathComponent::name)
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self::NoSuchField {
+            ty: description.name().to_owned(),
+            field: field.to_owned(),
+            available: available.join(", "),
+        }
+    }
 }

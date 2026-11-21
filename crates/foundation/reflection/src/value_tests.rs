@@ -83,7 +83,10 @@ fn shared_views_read_every_kind() {
     let view = registry.view(&value).expect("registers");
 
     assert_eq!(
-        view.field("name").unwrap().downcast::<String>().unwrap(),
+        view.field("name")
+            .unwrap()
+            .downcast_ref::<String>()
+            .unwrap(),
         "Ada"
     );
     assert_eq!(
@@ -92,24 +95,35 @@ fn shared_views_read_every_kind() {
             .unwrap()
             .field("armour")
             .unwrap()
-            .downcast::<u16>()
+            .downcast_ref::<u16>()
             .unwrap(),
         3,
         "found by alias"
     );
-    assert_eq!(view.field("stance").unwrap().variant().unwrap(), 1);
-    assert_eq!(view.field("team").unwrap().variant().unwrap(), 1);
+    assert_eq!(view.field("stance").unwrap().variant_index().unwrap(), 1);
+    assert_eq!(view.field("team").unwrap().variant_index().unwrap(), 1);
     let waypoints = view.field("waypoints").unwrap();
     assert_eq!(waypoints.len().unwrap(), 2);
     assert_eq!(
-        *waypoints.element(1).unwrap().downcast::<Vec3>().unwrap(),
+        *waypoints
+            .element(1)
+            .unwrap()
+            .downcast_ref::<Vec3>()
+            .unwrap(),
         Vec3::Y
     );
     let scores = view.field("scores").unwrap();
-    assert_eq!(*scores.element(2).unwrap().downcast::<i32>().unwrap(), 7);
+    assert_eq!(
+        *scores.element(2).unwrap().downcast_ref::<i32>().unwrap(),
+        7
+    );
     let target = view.field("target").unwrap().some().unwrap().expect("Some");
     assert_eq!(
-        *target.field("health").unwrap().downcast::<f32>().unwrap(),
+        *target
+            .field("health")
+            .unwrap()
+            .downcast_ref::<f32>()
+            .unwrap(),
         10.0
     );
     let y = view
@@ -155,13 +169,16 @@ fn view_mistakes_are_errors() {
     let error = view
         .field("name")
         .unwrap()
-        .downcast::<u32>()
+        .downcast_ref::<u32>()
         .expect_err("not a u32");
     assert_eq!(
         error.to_string(),
         "expected a value of type 'u32', found 'String'"
     );
-    assert!(matches!(view.variant(), Err(ValueError::WrongKind { .. })));
+    assert!(matches!(
+        view.variant_index(),
+        Err(ValueError::WrongKind { .. })
+    ));
     assert!(matches!(view.some(), Err(ValueError::WrongKind { .. })));
 }
 
@@ -232,7 +249,7 @@ fn paths_read_and_replace_values_including_math_components() {
         *view
             .path(&path("target?.armor"))
             .unwrap()
-            .downcast::<u16>()
+            .downcast_ref::<u16>()
             .unwrap(),
         0
     );
@@ -240,7 +257,7 @@ fn paths_read_and_replace_values_including_math_components() {
         *view
             .path(&path("waypoints[1]"))
             .unwrap()
-            .downcast::<Vec3>()
+            .downcast_ref::<Vec3>()
             .unwrap(),
         Vec3::Y
     );
@@ -337,10 +354,11 @@ fn path_resolution_and_use_report_what_went_wrong() {
     let stats_path = path("health")
         .resolve(&registry, registry.register::<Stats>().unwrap())
         .unwrap();
-    assert!(matches!(
-        view.at(&stats_path),
-        Err(ValueError::TypeMismatch { .. })
-    ));
+    let error = view.at(&stats_path).expect_err("resolved for Stats");
+    assert!(
+        matches!(&error, ValueError::PathForOtherType { path_root, .. } if path_root.ends_with("Stats")),
+        "{error}"
+    );
 }
 
 #[test]
@@ -370,7 +388,7 @@ fn patches_apply_whole_and_their_inverse_restores() {
             path("waypoints[1]"),
             OwnedValue::new(&registry, Vec3::NEG_Z).unwrap(),
         );
-    let inverse = patch
+    patch
         .apply(&mut registry.view_mut(&mut value).unwrap())
         .expect("valid");
     assert_eq!(value.stats.health, 5.0);
@@ -379,11 +397,11 @@ fn patches_apply_whole_and_their_inverse_restores() {
     assert_eq!(value.target, Some(Stats::default()));
     assert_eq!(value.waypoints[1], Vec3::NEG_Z);
 
-    let again = inverse
+    patch
         .apply(&mut registry.view_mut(&mut value).unwrap())
-        .expect("the inverse applies");
+        .expect("the patch, now the inverse, applies");
     assert_eq!(value, original);
-    assert_eq!(again.len(), 5);
+    assert_eq!(patch.len(), 5);
 }
 
 #[test]
@@ -392,7 +410,7 @@ fn an_invalid_patch_changes_nothing() {
     let original = soldier();
     let mut value = original.clone();
     let apply =
-        |value: &mut Soldier, patch: Patch| patch.apply(&mut registry.view_mut(value).unwrap());
+        |value: &mut Soldier, mut patch: Patch| patch.apply(&mut registry.view_mut(value).unwrap());
 
     let mut patch = Patch::new();
     patch
@@ -547,7 +565,7 @@ fn defaults_and_wrong_registries() {
 
     let other = TypeRegistry::new();
     assert!(matches!(
-        default.as_ref(&other),
+        default.view(&other),
         Err(ValueError::WrongRegistry)
     ));
     let mut value = soldier();
@@ -640,8 +658,7 @@ fn health_type(registry: &TypeRegistry) -> ForeignTypeDefinition {
     ForeignTypeDefinition::new(
         StableTypeId::from_uuid("6e0a8c2f-4b7d-4f1a-9c5e-9f1b3d5f7a0c"),
         "Script.Health",
-        12,
-        4,
+        layout(12, 4),
     )
     .field("current", f32_type, 0)
     .field("max", f32_type, 4)
@@ -662,7 +679,7 @@ fn foreign_types_are_validated_plain_data() {
     let mut health = OwnedValue::from_bytes(&registry, key, &bytes).unwrap();
     let copy = health.try_clone().unwrap();
     {
-        let mut view = health.as_mut(&registry).unwrap();
+        let mut view = health.view_mut(&registry).unwrap();
         *view
             .field_mut("current")
             .unwrap()
@@ -671,11 +688,11 @@ fn foreign_types_are_validated_plain_data() {
     }
     let read = |value: &OwnedValue, field: &str| {
         *value
-            .as_ref(&registry)
+            .view(&registry)
             .unwrap()
             .field(field)
             .unwrap()
-            .downcast::<f32>()
+            .downcast_ref::<f32>()
             .unwrap()
     };
     assert_eq!(
@@ -705,14 +722,18 @@ fn malformed_foreign_descriptions_are_refused() {
         Err(RegistrationError::InvalidDefinition { problem, .. }) => problem,
         other => panic!("expected an invalid definition, got {other:?}"),
     };
-    let base = |n| ForeignTypeDefinition::new(id(n), "Bad", 8, 4);
+    let base = |n| ForeignTypeDefinition::new(id(n), "Bad", layout(8, 4));
 
     assert_eq!(
-        problem(ForeignTypeDefinition::new(id(1), "Bad", 8, 3)),
-        DefinitionProblem::WrongLayout
+        problem(ForeignTypeDefinition::new(
+            id(1),
+            "Bad",
+            layout(ForeignTypeDefinition::MAX_SIZE + 4, 4)
+        )),
+        DefinitionProblem::TooLarge
     );
     assert_eq!(
-        problem(ForeignTypeDefinition::new(id(2), "Bad", 6, 4)),
+        problem(ForeignTypeDefinition::new(id(2), "Bad", layout(6, 4))),
         DefinitionProblem::WrongLayout,
         "size not a multiple of the alignment"
     );
@@ -748,7 +769,7 @@ fn malformed_foreign_descriptions_are_refused() {
     );
     let other = TypeRegistry::new();
     let stranger = other
-        .register_foreign(ForeignTypeDefinition::new(id(10), "X", 4, 4))
+        .register_foreign(ForeignTypeDefinition::new(id(10), "X", layout(4, 4)))
         .unwrap();
     let unknown = crate::TypeKey(stranger.index() + 10_000);
     assert_eq!(
@@ -898,9 +919,9 @@ fn random_patches_apply_all_or_nothing_and_agree_with_typed_edits() {
         let before = value.clone();
         let result = patch.apply(&mut registry.view_mut(&mut value).unwrap());
         if valid {
-            let inverse = result.unwrap_or_else(|e| panic!("round {round}: {e}"));
+            result.unwrap_or_else(|e| panic!("round {round}: {e}"));
             assert_eq!(value, expected, "round {round}");
-            inverse
+            patch
                 .apply(&mut registry.view_mut(&mut value).unwrap())
                 .unwrap();
             assert_eq!(value, before, "round {round}: the inverse restores");
@@ -910,6 +931,7 @@ fn random_patches_apply_all_or_nothing_and_agree_with_typed_edits() {
                 "round {round}: an invalid entry fails the patch"
             );
             assert_eq!(value, before, "round {round}: nothing changed");
+            assert_eq!(patch.len(), seen.len(), "round {round}: the patch is kept");
         }
     }
 }
@@ -948,4 +970,293 @@ fn views_and_owned_values_are_send_and_sync() {
     check::<crate::ValueRef<'_>>();
     check::<crate::ValueMut<'_>>();
     check::<OwnedValue>();
+}
+
+fn layout(size: usize, align: usize) -> std::alloc::Layout {
+    std::alloc::Layout::from_size_align(size, align).expect("test layouts are valid")
+}
+
+// --- Regression tests from the part 2 reviews ---
+
+#[repr(u8)]
+enum Small {
+    X,
+}
+
+impl crate::UnitEnum for Small {
+    fn variant_index(&self) -> usize {
+        0
+    }
+
+    fn from_variant_index(index: usize) -> Option<Self> {
+        (index == 0).then_some(Self::X)
+    }
+}
+
+// SAFETY: deliberately wrong (its enum accessors are `Team`'s): registration must refuse it
+// before any view could write a `Team` into a `Small`.
+unsafe impl Reflect for Small {
+    const TRANSIENT: bool = true;
+    const ABI: bool = false;
+    const DEFINITION: crate::TypeDefinition = crate::TypeDefinition::builder::<Self>(
+        "Small",
+        crate::Persistence::Transient,
+        crate::KindDefinition::unit_enum::<Team>(None, &[crate::VariantDefinition::new("X")]),
+    )
+    .build();
+}
+
+#[test]
+fn enum_accessors_of_another_type_are_refused() {
+    let registry = TypeRegistry::new();
+    let error = registry
+        .register::<Small>()
+        .expect_err("accessors for Team");
+    assert!(
+        matches!(
+            &error,
+            RegistrationError::InvalidDefinition {
+                problem: DefinitionProblem::WrongType,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let Small::X = Small::X;
+}
+
+#[test]
+fn a_failed_patch_is_kept_whole() {
+    let registry = TypeRegistry::new();
+    let mut value = soldier();
+    let mut patch = Patch::new();
+    patch
+        .set(
+            path("name"),
+            OwnedValue::new(&registry, "Kept".to_owned()).unwrap(),
+        )
+        .set(
+            path("waypoints[5]"),
+            OwnedValue::new(&registry, Vec3::ONE).unwrap(),
+        );
+    assert!(
+        patch
+            .apply(&mut registry.view_mut(&mut value).unwrap())
+            .is_err()
+    );
+    assert_eq!(patch.len(), 2, "nothing was lost");
+    let (_, name) = patch.entries().next().unwrap();
+    assert_eq!(name.downcast_ref::<String>().unwrap(), "Kept");
+
+    // Once the target fits, the same patch applies.
+    value.waypoints.extend([Vec3::ZERO; 4]);
+    patch
+        .apply(&mut registry.view_mut(&mut value).unwrap())
+        .unwrap();
+    assert_eq!(value.name, "Kept");
+    assert_eq!(value.waypoints[5], Vec3::ONE);
+}
+
+#[derive(Reflect, Debug, PartialEq, Clone)]
+#[reflect(id = "7f1b9d3a-5c8e-4a2b-8d6f-0a2c4e6a8b1d", clone)]
+struct PluginData {
+    values: Vec<Vec3>,
+}
+
+#[test]
+fn a_resolved_path_still_works_after_its_group_is_removed() {
+    // Applying a resolved path uses the descriptions it was resolved with, so a registry change
+    // between validating and applying a patch can't make it fail halfway.
+    let registry = TypeRegistry::new();
+    let mut group = registry.group("plugin");
+    group.add::<PluginData>();
+    let id = group.commit().unwrap();
+    let key = registry.key_of::<PluginData>().unwrap();
+    let resolved = path("values[0].y").resolve(&registry, key).unwrap();
+
+    let mut data = PluginData {
+        values: vec![Vec3::ZERO],
+    };
+    let mut view = registry.view_mut(&mut data).unwrap();
+    registry.remove_group(id).unwrap();
+    let old = view
+        .replace_at(&resolved, OwnedValue::new(&registry, 2.0_f32).unwrap())
+        .unwrap();
+    assert_eq!(old.into_value::<f32>().unwrap(), 0.0);
+    assert_eq!(data.values[0].y, 2.0);
+}
+
+#[test]
+fn errors_name_the_alternatives_and_remedies() {
+    let registry = TypeRegistry::new();
+    let value = soldier();
+    let view = registry.view(&value).unwrap();
+    let error = view.field("stats").unwrap().field("hp").expect_err("no hp");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "'{}::Stats' has no field 'hp'; its fields are: health, armor",
+            module_path!()
+        )
+    );
+    let error = path("placement.translation.x.y")
+        .resolve(&registry, registry.key_of::<Soldier>().unwrap())
+        .expect_err("x has no components");
+    assert_eq!(
+        error.to_string(),
+        "after the math component 'x' (a 'f32'), a path can only name that value's own components"
+    );
+    let mut none = soldier();
+    none.target = None;
+    let error = registry
+        .view(&none)
+        .unwrap()
+        .path(&path("target?.armor"))
+        .expect_err("None");
+    assert!(error.to_string().contains("set it to Some"), "{error}");
+
+    let error = "a[01]".parse::<FieldPath>().expect_err("leading zero");
+    assert_eq!(
+        (error.position(), error.problem()),
+        (2, "expected an index such as [0] or [12]")
+    );
+}
+
+#[test]
+fn foreign_field_names_must_be_path_names() {
+    let registry = TypeRegistry::new();
+    let u32_type = registry.key_of::<u32>().unwrap();
+    for (n, name) in ["", "a.b", "hp[0]", "é"].into_iter().enumerate() {
+        let definition = ForeignTypeDefinition::new(
+            StableTypeId::from_bytes([u8::try_from(n).unwrap() + 100; 16]),
+            "Named",
+            layout(4, 4),
+        )
+        .field(name, u32_type, 0);
+        assert_eq!(
+            registry.register_foreign(definition),
+            Err(RegistrationError::InvalidDefinition {
+                ty: "Named".to_owned(),
+                problem: DefinitionProblem::InvalidFieldName(name.to_owned()),
+            }),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_write_of_bytes_leaves_the_value_unchanged() {
+    let registry = TypeRegistry::new();
+    let mut packet = Packet {
+        alive: true,
+        stance: Stance::Prone,
+        pad: [1, 2],
+        value: 9,
+    };
+    let before = packet.clone();
+    let mut view = registry.view_mut(&mut packet).unwrap();
+    assert!(view.write_bytes(&packet_bytes(7, 1, 0)).is_err());
+    assert_eq!(packet, before);
+}
+
+/// Panics when dropped with the value 1.
+#[derive(Reflect)]
+#[reflect(transient)]
+struct Boom(u32);
+
+impl Drop for Boom {
+    fn drop(&mut self) {
+        assert!(self.0 != 1, "drop of Boom(1) panics");
+    }
+}
+
+#[derive(Reflect, Clone, Default, Debug, PartialEq)]
+#[reflect(transient, clone, default)]
+struct Empty;
+
+#[derive(Reflect)]
+#[reflect(transient)]
+struct Holder {
+    lists: Vec<Vec<String>>,
+    boom: Option<Boom>,
+    empties: Vec<Empty>,
+    array: [Empty; 3],
+}
+
+#[test]
+fn zero_sized_values_nested_lists_and_panicking_drops() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let registry = TypeRegistry::new();
+
+    // Zero-sized owned values.
+    let empty = OwnedValue::new(&registry, Empty).unwrap();
+    assert_eq!(
+        empty.try_clone().unwrap().into_value::<Empty>().unwrap(),
+        Empty
+    );
+    let default = OwnedValue::default_of(&registry, registry.key_of::<Empty>().unwrap()).unwrap();
+
+    let mut holder = Holder {
+        lists: vec![vec!["a".into()]],
+        boom: Some(Boom(1)),
+        empties: vec![Empty, Empty],
+        array: [Empty, Empty, Empty],
+    };
+    {
+        let mut view = registry.view_mut(&mut holder).unwrap();
+        {
+            let mut empties = view.field_mut("empties").unwrap();
+            empties.push(default).unwrap();
+            let old = empties.element_mut(2).unwrap().replace(empty).unwrap();
+            drop(old);
+            drop(empties.remove(0).unwrap());
+            let mut array = view.field_mut("array").unwrap();
+            array
+                .element_mut(2)
+                .unwrap()
+                .downcast_mut::<Empty>()
+                .unwrap();
+        }
+        {
+            // A child of a list element, then pushes that reallocate the list, then the child
+            // again.
+            let mut lists = view.field_mut("lists").unwrap();
+            {
+                let mut inner = lists.element_mut(0).unwrap();
+                inner
+                    .push(OwnedValue::new(&registry, "b".to_owned()).unwrap())
+                    .unwrap();
+            }
+            for _ in 0..8 {
+                lists
+                    .push(OwnedValue::new(&registry, vec!["x".to_owned()]).unwrap())
+                    .unwrap();
+            }
+            let mut inner = lists.element_mut(0).unwrap();
+            inner
+                .element_mut(1)
+                .unwrap()
+                .downcast_mut::<String>()
+                .unwrap()
+                .push('!');
+        }
+        // Dropping the old payload panics: the new payload is in place, and nothing leaks.
+        let panicked = catch_unwind(AssertUnwindSafe(|| {
+            view.field_mut("boom")
+                .unwrap()
+                .set_option(Some(OwnedValue::new(&registry, Boom(2)).unwrap()))
+                .unwrap();
+        }))
+        .is_err();
+        assert!(panicked);
+    }
+    assert_eq!(holder.lists[0][1], "b!");
+    assert_eq!(holder.boom.as_ref().map(|b| b.0), Some(2));
+
+    // An owned value whose drop panics still frees its allocation.
+    let boom = OwnedValue::new(&registry, Boom(1)).unwrap();
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(boom))).is_err());
+    let mut list = vec![Boom(1), Boom(0)];
+    let removed = registry.view_mut(&mut list).unwrap().remove(0).unwrap();
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(removed))).is_err());
 }

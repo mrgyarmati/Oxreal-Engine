@@ -1,6 +1,8 @@
 //! Types defined outside Rust: C#, C++ and script components, described at run time
 //! (ADR-0021 §3 and §7).
 
+use std::alloc::Layout;
+
 use crate::description::TypeKey;
 use crate::id::StableTypeId;
 
@@ -9,17 +11,20 @@ use crate::id::StableTypeId;
 /// Foreign types are restricted to ABI-safe plain data until engine-owned string and list types
 /// exist for them: every field's type must be ABI-safe (integers, floats, handles, fixed arrays
 /// and other ABI-safe types; never `bool` or Rust enums). Registration validates the whole
-/// description, so no foreign description can make safe code create an invalid Rust value
-/// (ADR-0021 §7):
+/// description, so that safe code can't use a foreign description to create an invalid Rust value
+/// (ADR-0021 §7; a property the tests and Miri check, not a proof):
 ///
 /// - the alignment is a power of two and the size a multiple of it;
 /// - every field type is registered and ABI-safe;
-/// - every field lies inside the type, aligned, without overlapping another, with a unique name.
+/// - every field lies inside the type, aligned, without overlapping another, with a unique name
+///   that field paths can name;
+/// - the size is at most [`ForeignTypeDefinition::MAX_SIZE`].
 ///
 /// Foreign values have no `Drop`, are cloned by copying their bytes, and default to zero bytes,
 /// which is a valid value of every ABI-safe type.
 ///
 /// ```
+/// use std::alloc::Layout;
 /// use oxreal_reflection::{ForeignTypeDefinition, StableTypeId, TypeRegistry};
 ///
 /// let registry = TypeRegistry::new();
@@ -30,8 +35,7 @@ use crate::id::StableTypeId;
 /// let health = ForeignTypeDefinition::new(
 ///     StableTypeId::from_uuid("6e4a0c3b-8d5f-4b9a-9c7e-3f5a7b9c1d4e"),
 ///     "Game.Health",
-///     12,
-///     4,
+///     Layout::from_size_align(12, 4).expect("a valid layout"),
 /// )
 /// .field("current", f32_type, 0)
 /// .field("max", f32_type, 4)
@@ -44,8 +48,7 @@ use crate::id::StableTypeId;
 pub struct ForeignTypeDefinition {
     pub(crate) id: StableTypeId,
     pub(crate) name: String,
-    pub(crate) size: usize,
-    pub(crate) align: usize,
+    pub(crate) layout: Layout,
     pub(crate) fields: Vec<ForeignField>,
 }
 
@@ -58,19 +61,27 @@ pub(crate) struct ForeignField {
 }
 
 impl ForeignTypeDefinition {
-    /// A type with this stable ID, display name, size and alignment, and no fields yet.
+    /// A type with this stable ID, display name and layout, and no fields yet.
+    ///
+    /// Registration refuses a size that isn't a multiple of the alignment (as in C), and types
+    /// larger than [`ForeignTypeDefinition::MAX_SIZE`].
     #[must_use]
-    pub fn new(id: StableTypeId, name: impl Into<String>, size: usize, align: usize) -> Self {
+    pub fn new(id: StableTypeId, name: impl Into<String>, layout: Layout) -> Self {
         Self {
             id,
             name: name.into(),
-            size,
-            align,
+            layout,
             fields: Vec::new(),
         }
     }
 
-    /// Adds a field of the registered type `ty` at byte `offset`.
+    /// The largest size a foreign type may have, 1 MiB. Foreign descriptions come from other
+    /// languages and data, so the limit turns an absurd size into a registration error instead
+    /// of an allocation failure later. Components are far smaller.
+    pub const MAX_SIZE: usize = 1 << 20;
+
+    /// Adds a field of the registered type `ty` at byte `offset`. Its name must be ASCII
+    /// letters, digits and underscores, so field paths can name it.
     #[must_use]
     pub fn field(mut self, name: impl Into<String>, ty: TypeKey, offset: usize) -> Self {
         self.fields.push(ForeignField {

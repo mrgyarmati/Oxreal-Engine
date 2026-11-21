@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::description::{TypeDescription, TypeKey, TypeKind};
 use crate::registry::{RegistryId, TypeRegistry};
@@ -43,8 +44,8 @@ pub enum PathSegment {
     Field(Cow<'static, str>),
     /// An array or list element.
     Index(usize),
-    /// The value inside an `Option`.
-    Some,
+    /// The value inside an `Option` (written `?`).
+    OptionValue,
 }
 
 impl FieldPath {
@@ -71,7 +72,7 @@ impl FieldPath {
     /// This path, then the value inside an `Option`.
     #[must_use]
     pub fn some(mut self) -> Self {
-        self.segments.push(PathSegment::Some);
+        self.segments.push(PathSegment::OptionValue);
         self
     }
 
@@ -101,34 +102,37 @@ impl FieldPath {
         registry: &TypeRegistry,
         root: TypeKey,
     ) -> Result<ResolvedPath, ValueError> {
-        let mut current = registry
-            .description(root)
-            .ok_or(ValueError::UnknownType { key: root })?;
+        let mut current = description(registry, root)?;
+        let mut descriptions = vec![Arc::clone(&current)];
         let mut steps = Vec::new();
         let mut components = Vec::new();
+        // The last math component, by name, once the path is inside a math value.
+        let mut last_component: Option<&str> = None;
         for segment in &self.segments {
-            let in_math = !components.is_empty();
             let (step, next) = match (segment, current.kind()) {
                 (PathSegment::Field(name), TypeKind::Math(info)) => {
                     let index = info
                         .components()
                         .iter()
                         .position(|c| c.name() == name)
-                        .ok_or_else(|| no_such_field(&current, name))?;
+                        .ok_or_else(|| ValueError::no_such_field(&current, name))?;
                     let ty = info.components()[index].ty();
                     components.push((index, ty));
                     current = description(registry, ty)?;
+                    descriptions.push(Arc::clone(&current));
+                    last_component = Some(name);
                     continue;
                 }
-                _ if in_math => {
+                _ if last_component.is_some() => {
                     return Err(ValueError::AfterMathComponent {
+                        component: last_component.unwrap_or_default().to_owned(),
                         ty: current.name().to_owned(),
                     });
                 }
                 (PathSegment::Field(name), TypeKind::Struct(info)) => {
                     let (index, field) = info
                         .field(name)
-                        .ok_or_else(|| no_such_field(&current, name))?;
+                        .ok_or_else(|| ValueError::no_such_field(&current, name))?;
                     let ty = field.ty().ok_or_else(|| ValueError::OpaqueField {
                         ty: current.name().to_owned(),
                         field: field.name().to_owned(),
@@ -160,14 +164,14 @@ impl FieldPath {
                 (PathSegment::Index(index), TypeKind::List(info)) => {
                     (Step::ListElement { index: *index }, info.element())
                 }
-                (PathSegment::Some, TypeKind::Option(info)) => (Step::Some, info.some()),
+                (PathSegment::OptionValue, TypeKind::Option(info)) => (Step::Some, info.some()),
                 (segment, _) => {
                     return Err(ValueError::WrongKind {
                         ty: current.name().to_owned(),
                         expected: match segment {
                             PathSegment::Field(_) => "a struct or math type",
                             PathSegment::Index(_) => "an array or list",
-                            PathSegment::Some => "an option",
+                            PathSegment::OptionValue => "an option",
                         },
                     });
                 }
@@ -178,6 +182,7 @@ impl FieldPath {
                 ty: next,
             });
             current = description(registry, next)?;
+            descriptions.push(Arc::clone(&current));
         }
         Ok(ResolvedPath {
             registry: registry.id(),
@@ -185,26 +190,16 @@ impl FieldPath {
             leaf: current.key(),
             steps,
             components,
+            descriptions,
         })
     }
 }
 
-fn description(
-    registry: &TypeRegistry,
-    key: TypeKey,
-) -> Result<std::sync::Arc<TypeDescription>, ValueError> {
+fn description(registry: &TypeRegistry, key: TypeKey) -> Result<Arc<TypeDescription>, ValueError> {
     registry
         .description(key)
         .ok_or(ValueError::UnknownType { key })
 }
-
-fn no_such_field(ty: &TypeDescription, field: &str) -> ValueError {
-    ValueError::NoSuchField {
-        ty: ty.name().to_owned(),
-        field: field.to_owned(),
-    }
-}
-
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, segment) in self.segments.iter().enumerate() {
@@ -212,7 +207,7 @@ impl fmt::Display for FieldPath {
                 PathSegment::Field(name) if i == 0 => f.write_str(name)?,
                 PathSegment::Field(name) => write!(f, ".{name}")?,
                 PathSegment::Index(index) => write!(f, "[{index}]")?,
-                PathSegment::Some => f.write_str("?")?,
+                PathSegment::OptionValue => f.write_str("?")?,
             }
         }
         Ok(())
@@ -251,9 +246,19 @@ impl FromStr for FieldPath {
                     let close = rest
                         .find(']')
                         .ok_or_else(|| error(position, "'[' without a closing ']'"))?;
-                    let index = rest[1..close]
+                    let digits = &rest[1..close];
+                    // Digits only, without a sign or leading zeros, so each path has one text
+                    // form (overrides are keyed by it).
+                    let canonical = !digits.is_empty()
+                        && digits.bytes().all(|b| b.is_ascii_digit())
+                        && (digits == "0" || !digits.starts_with('0'));
+                    let index = digits
                         .parse::<usize>()
-                        .map_err(|_| error(position + 1, "expected an index such as [0]"))?;
+                        .ok()
+                        .filter(|_| canonical)
+                        .ok_or_else(|| {
+                            error(position + 1, "expected an index such as [0] or [12]")
+                        })?;
                     path = path.index(index);
                     rest = &rest[close + 1..];
                 }
@@ -282,10 +287,28 @@ pub struct ParseFieldPathError {
     problem: &'static str,
 }
 
+impl ParseFieldPathError {
+    /// The byte offset in the text where parsing failed, for highlighting it.
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// What was expected there.
+    #[must_use]
+    pub fn problem(&self) -> &str {
+        self.problem
+    }
+}
+
 /// A [`FieldPath`] resolved against one type in one registry: the runtime form, with offsets
 /// and indices instead of names (ADR-0021 §4). Valid for this build and registry only; never
 /// save it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It holds the descriptions it was resolved with, so a path that resolved can be followed even
+/// if its types' group is removed meanwhile: what [`Patch::apply`](crate::Patch::apply) relies
+/// on to never fail halfway.
+#[derive(Debug, Clone)]
 pub struct ResolvedPath {
     pub(crate) registry: RegistryId,
     pub(crate) root: TypeKey,
@@ -293,7 +316,23 @@ pub struct ResolvedPath {
     pub(crate) steps: Vec<ResolvedStep>,
     /// Trailing math components: (component index, component type).
     pub(crate) components: Vec<(usize, TypeKey)>,
+    /// The root's description, then the description after each step, then each component's.
+    pub(crate) descriptions: Vec<Arc<TypeDescription>>,
 }
+
+impl PartialEq for ResolvedPath {
+    /// Equal when they follow the same steps from the same type in the same registry (the
+    /// descriptions follow from the keys).
+    fn eq(&self, other: &Self) -> bool {
+        self.registry == other.registry
+            && self.root == other.root
+            && self.leaf == other.leaf
+            && self.steps == other.steps
+            && self.components == other.components
+    }
+}
+
+impl Eq for ResolvedPath {}
 
 impl ResolvedPath {
     /// The type the path starts at.
@@ -317,6 +356,13 @@ impl ResolvedPath {
 
     /// Whether `self` and `other` reach the same value, or one reaches a value inside the
     /// other's.
+    /// The description of the leaf.
+    pub(crate) fn leaf_description(&self) -> &Arc<TypeDescription> {
+        self.descriptions
+            .last()
+            .expect("a resolved path holds at least its root's description")
+    }
+
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
         let shared = self.steps.len().min(other.steps.len());
         if self.steps[..shared] != other.steps[..shared] {
@@ -375,7 +421,7 @@ mod tests {
             path.segments(),
             [
                 PathSegment::Field("target".into()),
-                PathSegment::Some,
+                PathSegment::OptionValue,
                 PathSegment::Field("waypoints".into()),
                 PathSegment::Index(2),
                 PathSegment::Field("x".into()),
@@ -394,6 +440,9 @@ mod tests {
             ("a[-1]", 2),
             ("a b", 1),
             ("a-b", 1),
+            ("a[+1]", 2),
+            ("a[01]", 2),
+            ("a[]", 2),
         ] {
             let error = text.parse::<FieldPath>().expect_err(text);
             assert_eq!(error.position, position, "{text}: {error}");

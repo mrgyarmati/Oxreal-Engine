@@ -748,12 +748,15 @@ and types defined outside Rust.
   - Construction can't leak: the allocation is freed if a clone, default or push panics.
   - Values that move into lists and options give up their allocation without dropping the
     value.
-- **Patches.** `Patch::apply` takes the patch by value:
-  - it resolves every entry, follows it through the current value and checks each value's type,
+- **Patches.** `Patch::apply(&mut self, target)`:
+  - resolves every entry, follows it through the current value and checks each value's type,
     then refuses overlapping entries (one changing a value another is inside of, aliases
     included);
-  - only then does it swap the new values in, so it can't fail halfway;
-  - the old values form the inverse patch, which undo applies.
+  - only then swaps the new values in. It applies through the descriptions the paths were
+    resolved with, without looking types up again, so a registry change between validating and
+    applying can't make it fail halfway;
+  - on success the patch holds the old values: it has become its own inverse, which undo
+    applies. On failure the patch is unchanged, so an undo or redo is never lost.
 - **Validation from bytes** (`OwnedValue::from_bytes`, `ValueMut::write_bytes`):
   - **Plain data only:** primitives, unit enums with a `repr`, handles, fixed arrays, and structs
     of those.
@@ -778,4 +781,33 @@ and types defined outside Rust.
   - random paths read the same values as typed access;
   - random patches, some with invalid entries, either match the same edits made in typed code
     and are undone by their inverse, or change nothing.
-- **Miri** runs every test above, including the randomized ones (fewer rounds under Miri).
+- **Miri** runs every test above, including the randomized ones (fewer rounds under Miri), under
+  both Stacked Borrows and Tree Borrows. Drop accounting is checked by counting tests (values
+  that count their live instances) and, across the randomized patches, by Miri's leak and
+  double-free checks.
+- **From the reviews of this part:**
+  - `KindDefinition::unit_enum::<T>` records `T`'s `TypeId`, and registration refuses accessors
+    made for another type than the one described: a hand-written definition could otherwise
+    make `set_variant` write one enum's value into another's memory.
+  - Math component types are `Copy` (a bound on the internal constructor), so copying a
+    component in leaves its source valid.
+  - The `Reflect` contract says any combination of valid values of the non-opaque fields must be
+    a safe value of the type, since reflection builds values from bytes and copies ABI-safe ones
+    bytewise.
+  - Field names must be ASCII letters, digits and underscores, the characters field paths can
+    name: the derive refuses other names, and foreign registration does too. Path indices have
+    one text form (no sign, no leading zeros), because overrides are keyed by the text.
+  - Foreign types take a `Layout` and are at most 1 MiB, so an absurd size from other languages
+    is a registration error rather than an allocation failure.
+  - `TypeRegistry::view`, `view_mut` and `OwnedValue::new` register an unregistered type in the
+    root group. Plugins register their types through their group before using them this way.
+  - Arrays of data that accepts any bits skip per-element validation, which matters for large
+    arrays of untrusted data.
+- **Follow-ups:**
+  - **Handles (slice 2):** `Entity` is a `NonZeroU64` today, so zero isn't a valid entity. Either
+    `Entity` is described so that every bit pattern stays valid, or handles get a validity rule
+    in `validate.rs`, and foreign types with handle fields stop defaulting to zero bytes (or
+    can't have handle fields).
+  - **Script nodes (D-12) and C-ABI setters (D-21)** honor `read_only` themselves; views don't.
+  - **Foreign types** carry no attributes, aliases or transient fields yet. They come with C-ABI
+    registration (§8 "Later").

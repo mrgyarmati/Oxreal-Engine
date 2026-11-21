@@ -63,8 +63,9 @@
 //! - **Patches:** a [`Patch`] is a list of (path, new value) that applies whole or not at all,
 //!   and returns its inverse for undo.
 //!
-//! Every mistake in a path or value is a [`ValueError`], never a panic: paths and values come
-//! from files, the editor and other languages.
+//! Every mistake in a path or value is an error, never a panic: [`ValueError`] for views, paths
+//! and owned values, [`ParseFieldPathError`] for path text, and [`PatchError`] for patches. Paths
+//! and values come from files, the editor and other languages.
 //!
 //! # `#[derive(Reflect)]`
 //!
@@ -145,6 +146,20 @@
 //! struct NoDefault { value: f32 }
 //! ```
 //!
+//! ```compile_fail
+//! # use oxreal_reflection::Reflect;
+//! #[derive(Reflect)]
+//! #[reflect(transient)]
+//! enum Nothing {} // error: an enum without variants has no values
+//! ```
+//!
+//! ```compile_fail
+//! # use oxreal_reflection::Reflect;
+//! #[derive(Reflect)]
+//! #[reflect(transient)]
+//! struct Accented { café: u8 } // error: field paths can't name a non-ASCII field
+//! ```
+//!
 //! [ADR-0021]: https://github.com/mrgyarmati/Oxreal-Engine/blob/main/docs/decisions/0021-reflection-and-type-registry.md
 
 // `unsafe` is confined to the modules that opt in below (ADR-0021 §7).
@@ -218,4 +233,8 @@ pub use value::{OwnedValue, ValueError, ValueMut, ValueRef};
 )]
 mod tests;
 #[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "a deliberately wrong hand-written impl under test"
+)]
 mod value_tests;

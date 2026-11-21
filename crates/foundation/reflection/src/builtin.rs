@@ -126,6 +126,8 @@ unsafe impl<T: Reflect, const N: usize> Reflect for [T; N] {
     };
 }
 
+// The math accessors are safe closures coerced to `unsafe fn` pointers. They're reachable only as
+// `ComponentGet` and `ComponentSet`, whose contracts their SAFETY comments rely on.
 macro_rules! math {
     ($($ty:ident, $id:ident: $($component:ident: $component_ty:ty),+;)*) => {$(
         // SAFETY: built with `builder::<$ty>`, so the layout and operations are `$ty`'s. A math

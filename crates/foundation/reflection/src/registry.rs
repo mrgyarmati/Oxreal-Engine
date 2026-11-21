@@ -624,10 +624,18 @@ impl Inner {
             ty: definition.name.clone(),
             problem,
         };
-        let layout = Layout::from_size_align(definition.size, definition.align)
-            .ok()
-            .filter(|layout| layout.size() % layout.align() == 0)
-            .ok_or_else(|| invalid(DefinitionProblem::WrongLayout))?;
+        let layout = definition.layout;
+        if !layout.size().is_multiple_of(layout.align()) {
+            return Err(invalid(DefinitionProblem::WrongLayout));
+        }
+        if layout.size() > ForeignTypeDefinition::MAX_SIZE {
+            return Err(invalid(DefinitionProblem::TooLarge));
+        }
+        if let Some(field) = definition.fields.iter().find(|f| !is_path_name(&f.name)) {
+            return Err(invalid(DefinitionProblem::InvalidFieldName(
+                field.name.clone(),
+            )));
+        }
         let names = definition.fields.iter().map(|f| (f.name.as_str(), &[][..]));
         check_unique_names(names)
             .map_err(|name| invalid(DefinitionProblem::DuplicateField(name)))?;
@@ -715,7 +723,14 @@ impl Inner {
         };
         let layout = definition.layout();
         let access = match definition.kind().0 {
-            KindData::UnitEnum { access, .. } => Access::Enum(access),
+            KindData::UnitEnum { access, .. } => {
+                // `unit_enum::<T>` is public: a hand-written definition could name another enum,
+                // whose accessors would then write a `T` into this type's memory.
+                if access.type_id != definition.type_id() {
+                    return Err(invalid(DefinitionProblem::WrongType));
+                }
+                Access::Enum(access)
+            }
             KindData::List { access, .. } => Access::List(access),
             KindData::Option { access, .. } => Access::Option(access),
             KindData::Math { components } => {
@@ -1020,6 +1035,11 @@ fn attributes(
     Ok(attributes)
 }
 
+/// Whether field paths can name a field called `name`: ASCII letters, digits and underscores.
+fn is_path_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Checks that no two fields' byte ranges overlap, returning the name of a field that overlaps
 /// the one before it. Each extent is (offset, size, name).
 fn check_overlap(mut extents: Vec<(usize, usize, &str)>) -> Result<(), String> {
@@ -1251,6 +1271,15 @@ pub enum DefinitionProblem {
         /// What's wrong with it.
         problem: &'static str,
     },
+    /// A foreign type is larger than [`ForeignTypeDefinition::MAX_SIZE`].
+    #[error("it's larger than the 1 MiB limit for types defined outside Rust")]
+    TooLarge,
+    /// A foreign field's name isn't one field paths can name.
+    #[error(
+        "field name '{0}' must be ASCII letters, digits and underscores, so field paths can \
+         name it"
+    )]
+    InvalidFieldName(String),
     /// A foreign type's field names a type key that isn't registered.
     #[error("the type of field '{0}' isn't registered (or was removed)")]
     UnknownFieldType(String),

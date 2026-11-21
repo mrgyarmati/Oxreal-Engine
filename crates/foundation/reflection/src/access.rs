@@ -5,6 +5,7 @@
 //! one type by this crate's `pub(crate)` constructors. Only [`crate::value`] calls them, under
 //! the pointer contracts its views and owned values keep.
 
+use std::any::TypeId;
 use std::fmt;
 use std::ptr;
 
@@ -24,6 +25,8 @@ pub trait UnitEnum: Sized + 'static {
 /// Reads and writes a unit enum by variant index.
 #[derive(Clone, Copy)]
 pub(crate) struct EnumAccess {
+    /// The enum the accessors were made for; registration checks it's the described type.
+    pub(crate) type_id: TypeId,
     /// # Safety: the pointer is to a valid, aligned value of the enum.
     pub(crate) index: unsafe fn(*const u8) -> usize,
     /// Replaces the value (dropping the old one) with the variant at the index. Returns `false`,
@@ -36,6 +39,7 @@ pub(crate) struct EnumAccess {
 impl EnumAccess {
     pub(crate) const fn of<T: UnitEnum>() -> Self {
         Self {
+            type_id: TypeId::of::<T>(),
             index: enum_index::<T>,
             set: enum_set::<T>,
         }
@@ -223,6 +227,7 @@ unsafe fn option_set<T>(option: *mut u8, value: *mut u8) {
 pub(crate) type ComponentGet = unsafe fn(*const u8, *mut u8);
 
 /// Copies the component value at the second pointer into the math value at the first.
+/// The component type is `Copy`, so the source stays valid and its owner drops it normally.
 ///
 /// # Safety: the first pointer is to a valid, aligned math value that may be written and isn't
 /// aliased; the second is to a valid value of the component's type.

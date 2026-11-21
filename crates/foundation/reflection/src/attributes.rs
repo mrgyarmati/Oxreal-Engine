@@ -174,7 +174,8 @@ impl AttributesDefinition {
         self
     }
 
-    /// Shown but not editable in tools.
+    /// Shown but not editable in tools. Reflection's views don't enforce it (the editor's own
+    /// commands and saving write such fields); tools and bindings honor it themselves.
     #[must_use]
     pub const fn read_only(mut self) -> Self {
         self.read_only = true;
@@ -249,7 +250,8 @@ impl Attributes {
         self.hidden
     }
 
-    /// Whether tools show it without letting people edit it.
+    /// Whether tools show it without letting people edit it. Views don't enforce it: tools and
+    /// bindings (script set nodes, C-ABI setters) honor it themselves.
     #[must_use]
     pub fn is_read_only(&self) -> bool {
         self.read_only

@@ -51,11 +51,11 @@ is our own (ADR-0007).
 | **Type definition** | What a Rust type declares about itself at compile time: the `const` of `Reflect`, usually emitted by `#[derive(Reflect)]`. Registering it produces the type description (ADR-0021). |
 | **Type description** | One type's reflection data: kind, fields, size and alignment, attributes, operations and flags. Plain data, so tools can export it. |
 | **Type key** | A type's index in one type registry: its identity while the process runs. Never saved; files use the stable type ID. |
-| **Field path** | Where a value sits inside another, by name, such as `stats.health` or `waypoints[2].x`. Overrides and saved data use it (ADR-0021). |
-| **Patch** | A list of (field path, new value) edits applied whole or not at all, returning its inverse for undo (ADR-0021). |
 | **Stable type ID** | A type's persistent 128-bit identity, written once in its `#[reflect(id = …)]` attribute. It survives renames and moves. Files, overrides and the C ABI use it, never Rust's `TypeId` (ADR-0021). |
 | **Transient** | Never saved. A transient type needs no stable type ID. In-process copies (PIE) still copy it if it can be cloned. |
 | **Rebuilt** | Recreated by its owner rather than copied or saved, such as `Children` from `ChildOf` links. Implies transient. |
+| **Field path** | Where a value sits inside another, by name, such as `stats.health` or `waypoints[2].x`. Overrides and saved data use it (ADR-0021). |
+| **Patch** | A list of (field path, new value) edits applied whole or not at all. Once applied, it holds the old values, so applying it again undoes it (ADR-0021). |
 
 ## Project and process
 

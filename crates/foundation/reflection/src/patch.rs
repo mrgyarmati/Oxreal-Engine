@@ -6,8 +6,8 @@ use crate::value::{OwnedValue, ValueError, ValueMut};
 /// A list of edits, each a [`FieldPath`] and the new value there, applied as a whole.
 ///
 /// [`Patch::apply`] checks every entry against the target before changing anything (Cordite's
-/// validated-patch choice, ADR-0021 §4), then swaps the new values in. It returns the inverse
-/// patch, holding the old values, which undo applies to restore them.
+/// validated-patch choice, ADR-0021 §4), then swaps the new values in. The patch then holds the
+/// old values: it has become the inverse, which undo applies to restore them.
 ///
 /// ```
 /// use oxreal_reflection::{OwnedValue, Patch, Reflect, TypeRegistry};
@@ -25,10 +25,11 @@ use crate::value::{OwnedValue, ValueError, ValueMut};
 /// let mut patch = Patch::new();
 /// patch.set("intensity".parse()?, OwnedValue::new(&registry, 4.0_f32)?);
 /// patch.set("enabled".parse()?, OwnedValue::new(&registry, true)?);
-/// let undo = patch.apply(&mut registry.view_mut(&mut light)?)?;
+/// patch.apply(&mut registry.view_mut(&mut light)?)?;
 /// assert_eq!(light, Light { intensity: 4.0, enabled: true });
 ///
-/// undo.apply(&mut registry.view_mut(&mut light)?)?;
+/// // The patch now holds the old values: applying it again undoes the edit.
+/// patch.apply(&mut registry.view_mut(&mut light)?)?;
 /// assert_eq!(light, Light { intensity: 1.0, enabled: false });
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -67,7 +68,9 @@ impl Patch {
         self.entries.is_empty()
     }
 
-    /// Applies every entry to `target`, or none of them, and returns the inverse patch.
+    /// Applies every entry to `target`, or none of them. On success the patch becomes its own
+    /// inverse: each entry now holds the value it replaced, so applying it again undoes the edit.
+    /// On failure the patch and `target` are unchanged, so an undo or redo is never lost.
     ///
     /// Before anything changes, each entry's path is resolved against `target`'s type and
     /// followed through the current value (list indices, `Option`s), and each value is checked
@@ -77,12 +80,13 @@ impl Patch {
     /// # Errors
     ///
     /// [`PatchError::Entry`] naming the first invalid entry, or [`PatchError::Overlap`] naming
-    /// two overlapping ones. `target` is unchanged then.
+    /// two overlapping ones. Nothing changes then.
     ///
     /// # Panics
     ///
-    /// Only on a bug in this crate: an entry that passed validation failing to apply.
-    pub fn apply(self, target: &mut ValueMut<'_>) -> Result<Patch, PatchError> {
+    /// Only on a bug in this crate: an entry that passed validation failing to apply. Applying
+    /// uses the descriptions validation resolved, so a concurrent registry change can't cause it.
+    pub fn apply(&mut self, target: &mut ValueMut<'_>) -> Result<(), PatchError> {
         let registry = target.as_ref().registry();
         let root = target.description().key();
         let mut resolved: Vec<ResolvedPath> = Vec::with_capacity(self.entries.len());
@@ -108,16 +112,16 @@ impl Patch {
             resolved.push(checked);
         }
 
-        let mut inverse = Patch::new();
-        for ((path, value), resolved) in self.entries.into_iter().zip(&resolved) {
-            // Every entry was checked against this value, and swapping a leaf can't invalidate
-            // another entry, because no entry is inside another.
+        let entries = std::mem::take(&mut self.entries);
+        for ((path, value), resolved) in entries.into_iter().zip(&resolved) {
+            // Every entry was checked against this value with these descriptions, and swapping a
+            // leaf can't invalidate another entry, because no entry is inside another.
             let old = target
                 .replace_at(resolved, value)
                 .expect("a validated, non-overlapping patch entry applies");
-            inverse.set(path, old);
+            self.entries.push((path, old));
         }
-        Ok(inverse)
+        Ok(())
     }
 }
 

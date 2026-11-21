@@ -7,9 +7,13 @@
   - `OwnedValue` holds a value of any reflected type, for undo and the clipboard. Values read from
     bytes are validated first: a `bool` must be 0 or 1, and an enum's discriminant must name a
     variant.
-  - `Patch` applies a list of edits whole or not at all, refuses overlapping edits, and returns
-    its inverse for undo.
-  - Every mistake in a path or value is an error naming the type, never a panic.
+  - `Patch` applies a list of edits whole or not at all and refuses overlapping edits. Once
+    applied, the patch holds the old values, so applying it again undoes the edit; a patch that
+    fails is left unchanged.
+  - Every mistake in a path or value is an error, never a panic, naming the type involved and
+    what to do.
 - `TypeRegistry::register_foreign` and `GroupBuilder::add_foreign` register types defined outside
-  Rust (C#, C++, scripts) as plain, ABI-safe data, after validating every field's type, offset,
-  alignment and overlap.
+  Rust (C#, C++, scripts) as plain, ABI-safe data of at most 1 MiB, after validating every
+  field's name, type, offset, alignment and overlap.
+- `#[derive(Reflect)]` refuses enums without variants and field names other than ASCII letters,
+  digits and underscores, which field paths can't name.

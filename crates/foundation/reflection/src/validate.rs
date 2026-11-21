@@ -62,6 +62,11 @@ pub(crate) fn validate(
                 .ok_or(ValueError::UnknownType {
                     key: info.element(),
                 })?;
+            // Arrays of data that accepts any bits (bytes, floats, handles) need no per-element
+            // pass, which matters for large arrays of untrusted data.
+            if accepts_any_bits(registry, &element) {
+                return Ok(());
+            }
             let stride = element.layout().size();
             for index in 0..info.len() {
                 validate(registry, &element, bytes, offset + index * stride)?;
@@ -69,6 +74,25 @@ pub(crate) fn validate(
             Ok(())
         }
         _ => Err(not_plain(description)),
+    }
+}
+
+/// Whether every bit pattern is a valid value: integers, floats, handles, and arrays and structs
+/// of only those. (Padding, which structs may have, is never read.)
+fn accepts_any_bits(registry: &TypeRegistry, description: &TypeDescription) -> bool {
+    match description.kind() {
+        TypeKind::Primitive(Primitive::Bool) => false,
+        TypeKind::Primitive(_) | TypeKind::Handle(_) => true,
+        TypeKind::Array(info) => registry
+            .description(info.element())
+            .is_some_and(|element| accepts_any_bits(registry, &element)),
+        TypeKind::Struct(info) => info.fields().iter().all(|field| {
+            field
+                .ty()
+                .and_then(|key| registry.description(key))
+                .is_some_and(|ty| accepts_any_bits(registry, &ty))
+        }),
+        _ => false,
     }
 }
 

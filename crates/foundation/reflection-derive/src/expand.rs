@@ -273,6 +273,17 @@ fn struct_kind(fields: &Fields, ty: &str, attrs: &TypeAttributes) -> syn::Result
     for (index, field) in fields.iter().enumerate() {
         let member = member(field.ident.as_ref(), index);
         let name = member_name(&member);
+        if !name
+            .value()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(syn::Error::new(
+                name.span(),
+                "reflected field names must be ASCII letters, digits and underscores, so field \
+                 paths such as `stats.health` can name them",
+            ));
+        }
         let member_attrs = attrs::member_attributes(&field.attrs)?;
         if let (Some(span), Some(_)) = (member_attrs.opaque, attrs.abi) {
             return Err(syn::Error::new(
@@ -342,6 +353,12 @@ fn field_checks(fields: &Fields, ty: &str, attrs: &TypeAttributes) -> syn::Resul
 }
 
 fn enum_kind(data: &DataEnum, repr: &Repr) -> syn::Result<TokenStream> {
+    if data.variants.is_empty() {
+        return Err(syn::Error::new(
+            data.brace_token.span.join(),
+            "a reflected enum needs at least one variant: an enum without variants has no values",
+        ));
+    }
     let int_repr = match &repr.int {
         None => None,
         Some(int) => Some(match int.to_string().as_str() {

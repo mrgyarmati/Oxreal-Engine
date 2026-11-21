@@ -581,8 +581,8 @@ pub(crate) struct MathComponentDefinition {
 
 impl MathComponentDefinition {
     /// A component of type `T`, copied out and in by `get` and `set`, which must work on the
-    /// math type and `T`.
-    pub(crate) const fn new<T: Reflect>(
+    /// math type and `T`. `T` is `Copy`: the setter copies the value and its source stays valid.
+    pub(crate) const fn new<T: Reflect + Copy>(
         name: &'static str,
         get: ComponentGet,
         set: ComponentSet,
