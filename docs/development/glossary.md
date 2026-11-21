@@ -48,7 +48,9 @@ is our own (ADR-0007).
 | **Cook** | Converting project data into the optimized, platform-specific form a shipped game loads |
 | **Derived data cache (DDC)** | Cache of import and cook results, keyed by source hash, importer version, settings and platform |
 | **Reflection** | What the engine knows about a type at run time: its fields, layout, attributes and operations, as plain data the editor, saving, scripting and other languages read (ADR-0021) |
+| **Type definition** | What a Rust type declares about itself at compile time: the `const` of `Reflect`, usually emitted by `#[derive(Reflect)]`. Registering it produces the type description (ADR-0021). |
 | **Type description** | One type's reflection data: kind, fields, size and alignment, attributes, operations and flags. Plain data, so tools can export it. |
+| **Type key** | A type's index in one type registry: its identity while the process runs. Never saved; files use the stable type ID. |
 | **Stable type ID** | A type's persistent 128-bit identity, written once in its `#[reflect(id = …)]` attribute. It survives renames and moves. Files, overrides and the C ABI use it, never Rust's `TypeId` (ADR-0021). |
 | **Transient** | Never saved. A transient type needs no stable type ID. In-process copies (PIE) still copy it if it can be cloned. |
 | **Rebuilt** | Recreated by its owner rather than copied or saved, such as `Children` from `ChildOf` links. Implies transient. |

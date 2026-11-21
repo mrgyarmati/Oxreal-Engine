@@ -6,6 +6,8 @@ members = [
     # foundation
     "crates/foundation/diagnostics",
     "crates/foundation/math",
+    "crates/foundation/reflection",
+    "crates/foundation/reflection-derive",
     # platform
     "crates/platform/window",
     # runtime
@@ -46,6 +48,9 @@ serde_json = "1"
 flate2 = "1.1.11"
 sha2 = "0.11.1"
 tar = "0.4.46"
+# xtask only: OS randomness for `cargo xtask new-type-id` (ADR-0021 §2). The 0.3 line is already
+# built on Linux (winit -> ahash), so this adds no duplicate getrandom.
+getrandom = "0.3.4"
 
 # Math (ADR-0011): f32 core types plus f64 (future large worlds) and i32/u32 vectors only.
 glam = { version = "0.34.3", default-features = false, features = ["std", "f64", "i32", "u32"] }
@@ -85,11 +90,26 @@ tracy-client = { version = "0.19.0", default-features = false, features = [
     "only-localhost",
 ] }
 
+# Proc-macro crates (ADR-0021) and `tools/xtask` (the stable-type-ID scan). syn 3 is the line
+# `thiserror-impl` already uses on both targets, so there is no duplicate syn. Base features are
+# syn's defaults, listed explicitly; members add only what they need (xtask: `full`, `visit`).
+# Cargo keeps proc-macro and normal-dependency features apart, so xtask's never reach a derive.
+syn = { version = "3.0.10", default-features = false, features = [
+    "derive",
+    "parsing",
+    "printing",
+    "proc-macro",
+    "clone-impls",
+] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
+
 # Workspace crates. Each one's layer is checked by `cargo xtask layers`.
 oxreal-diagnostics = { path = "crates/foundation/diagnostics" }
 oxreal-ecs = { path = "crates/runtime/ecs" }
 oxreal-hierarchy = { path = "crates/runtime/hierarchy" }
 oxreal-math = { path = "crates/foundation/math" }
+oxreal-reflection-derive = { path = "crates/foundation/reflection-derive" }
 oxreal-input = { path = "crates/systems/input" }
 oxreal-shader-compiler = { path = "crates/tools/shader-compiler" }
 oxreal-rhi = { path = "crates/rendering/rhi" }

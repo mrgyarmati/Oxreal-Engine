@@ -570,3 +570,139 @@ display name, size and alignment, kind, attributes, operations and flags.
     panel, serialization or the C ABI.
   - Duplicate or lost IDs become a real problem in practice despite the xtask scan.
   - D-21's design needs a layout contract that `#[reflect(abi)]` can't express.
+
+## Implementation notes (2026-11-21, slice 1, first part)
+
+Slice 1 lands in two pull requests, so each stays reviewable. This first part brings the crates,
+identity, the metadata model, the registry, the derive, erased drop, clone and default, the ID
+scan and the Miri job. The second part brings erased views, field paths, patches, owned values,
+value validation, the accessors of enums, containers and math types, and foreign (run-time)
+type registration with its validation.
+
+- **Definitions and descriptions.** `Reflect` provides a `TypeDefinition`: `Copy`, `'static`
+  data with no destructor, built with `const fn`s, naming other types through `TypeRef`s (a
+  `TypeId` and a function returning that type's definition). Registering it produces a
+  `TypeDescription` that names types by `TypeKey`. The two forms are separate types because a
+  constant can't hold owned data that foreign types will need, and a description can't hold
+  keys before registration.
+- **`Reflect` has two more constants, `TRANSIENT` and `ABI`,** besides `DEFINITION`. The derive's
+  compile-time checks read them instead of field types' definitions, because evaluating
+  definitions eagerly makes recursive types (`struct Node { children: Vec<Node> }`) a
+  const-evaluation cycle. Registration refuses a definition that disagrees with them, and one
+  built for a different Rust type.
+- **The derive's checks are `.ensure(condition, message)` calls on the definition builder,**
+  failing the build with the message when the constant is evaluated. They're expressions,
+  because a statement in the constant's block stops its `&[...]` field lists from being promoted
+  to `'static`. A non-generic type's definition is evaluated by a generated `const _`, so its
+  checks fail the build even if nothing registers it; a generic type's are checked per
+  instantiation. For generic types, `clone` and `default` add `Self: Clone` and
+  `Self: Default` bounds to the impl.
+- **Checked at registration, not at compile time:**
+  - that a transient field's type is defaultable, unless the containing type is transient too
+    (reading that needs the field type's definition);
+  - the layout of primitives, arrays and `repr` enums;
+  - field bounds, overlap and alignment. No field type may be more aligned than the containing
+    type, so a hand-written impl of a `#[repr(packed)]` type is refused even if its offsets are
+    honest;
+  - duplicate field and variant names, discriminants, enums with no variants, and ranges;
+  - the `abi` rules, including no `Drop`, and no `Drop` for handle types.
+
+  An opaque transient field in a saved type needs the containing type to be `default`, since
+  reflection can't construct the field.
+- **`Reflect: Send + Sync + 'static`.** Descriptions and their erased operations are shared
+  between threads, and layout-erased columns (slice 2) have only a description, no
+  `T: Component` bound, so the thread-safety requirement sits on `Reflect` itself, matching
+  `Component`.
+- **The `Reflect` safety contract** names what registration checks and what stays the
+  implementer's proof:
+  - every field and every variant is listed (opaque if not reflected);
+  - `abi` types are `#[repr(C)]` or `#[repr(transparent)]`, with padding bytes that readers
+    copy but never interpret;
+  - handles are plain values for which every bit pattern is valid.
+
+  It also says that deriving exposes the fields: a type whose own `unsafe` code relies on
+  invariants between fields marks them opaque. `oxreal-reflection` denies `unsafe_code`
+  crate-wide, with a reasoned exception on each module that needs it. The derive crate forbids
+  it.
+- **Erased operations run through the description:** `TypeDescription::drop_value`,
+  `clone_value` and `default_value` (`unsafe fn`s with the full pointer contract). Their
+  `OperationError` names the type ("'Node' can't be cloned"), as §3 asks.
+- **Built-in types:**
+  - Short display names (`f32`, `String`, `Vec<f32>`, `[f32; 4]`).
+  - Array lengths are const arguments encoded as `u64`, because `usize` isn't a reflected type.
+    Arrays are ABI-safe when their element is.
+  - `Transform` is a math type (§3 lists it) with the components `translation`, `rotation` and
+    `scale`, so the editor edits it as one value, rotation shown in degrees.
+  - `LinearRgba` is a struct with four `f32` fields, which the editor edits channel by channel.
+  - `Vec`, `Option` and arrays clone and default element by element through the element's
+    operations, which is what their std impls do. User types never get synthesized operations.
+- **Units are an enum** (`Unit`), written `units = MetersPerSecond`, so the editor can convert
+  angles without parsing strings. A `range` is in the stored units (radians for angles); the
+  editor converts it the same way it converts the value. Custom attributes stay in slice 3.
+- **Groups:**
+  - A group can't be removed while a type outside it refers to one of its types. Removal names
+    both types.
+  - A built-in container (`Vec`, `Option`, array) belongs to its element type's group, not to
+    the group that happened to register it first. So `Vec<f32>` is root's even if a plugin
+    needed it first, and `Vec<PluginType>` leaves with the plugin.
+  - A type added to a group that is already registered elsewhere is refused
+    (`AlreadyInGroup`): removing the group couldn't remove it.
+  - Group IDs carry their registry's identity, and another registry refuses them.
+- **`register_types` returns `Result<(), RegistrationError>`,** a refinement of §5: two crates
+  can declare the same ID, and the application must see that as an error rather than a panic.
+  No crate has one yet; the first come with slice 2. Slice 2 also defines what spawning does
+  when registering a component fails.
+- **The generic-ID encoding** (§2), fixed here for every language:
+  - **Input:** the ASCII tag `oxreal.reflection.generic-type-id.v1`, then the definition's 16
+    ID bytes, then the argument count as a big-endian `u32`.
+  - **Each type argument:** the byte `0x01` and its 16 ID bytes.
+  - **Each const argument:** the byte `0x02`, its type's 16 ID bytes, and its value as a
+    16-byte big-endian two's-complement integer (`bool` is 0 or 1).
+  - `usize` arguments use `u64`'s ID.
+  - **Output:** the first 16 bytes of SHA-256 over the input.
+
+  Test vectors, computed independently with .NET's SHA-256 (`Vec`, `Option` and the array
+  definition use the built-in IDs in `oxreal-reflection`'s `id.rs`):
+
+  | Instantiation | Derived ID |
+  |---|---|
+  | `Vec<f32>` | `4fdf80ff-0bbd-6cde-61d4-18b31a945d77` |
+  | `Option<String>` | `e86c420d-80de-4bcd-a4ff-4e38e53a4063` |
+  | `[f32; 4]` | `f8c37ab2-39b9-653f-585b-3198a76711c8` |
+  | `Vec<u8>` | `d74428bc-dbb8-7ad8-7bd2-6f0ea70fecdb` |
+  | `Vec<Vec<u8>>` | `0aa52579-6b0f-9fb6-903a-5645e9f79c78` |
+- **The ID scan** (`cargo xtask type-ids`, in `cargo xtask ci` and CI):
+  - **What it reads:** every source file of the workspace, parsed with `syn`. It collects
+    `#[reflect(id = "...")]` and `StableTypeId::from_uuid("...")`, the latter also inside macro
+    invocations, so the built-in types' ID list (one `macro_rules!` list that also produces the
+    test's `ALL`) is scanned. Hand-written IDs must use `from_uuid` with a literal.
+  - **What it skips:** `tests/`, `benches/` and `examples/`, items marked exactly
+    `#[cfg(test)]` or `#[test]`, and out-of-line `#[cfg(test)]` modules. It can't see items
+    that macros generate. Symbolic links are skipped, because git checks them out differently
+    on Windows and Linux.
+  - **Retired IDs** are listed in `docs/development/retired-type-ids.txt`.
+  - **Per-crate listings.** For each crate, it keeps `stable-type-ids.txt` at the crate root up
+    to date (`--write` regenerates it). The listing holds the IDs that crate's `register_types`
+    must register: non-generic types outside function bodies that derive an ID, or whose
+    hand-written impl declares `Persistence::Persisted(StableTypeId::from_uuid("..."))`. The
+    crate's test checks them with `TypeRegistry::unregistered_ids`.
+  - **The built-in IDs** are checked by `oxreal-reflection`'s own test, since three of them
+    (`Vec`, `Option`, arrays) are generic definitions rather than types.
+  - `cargo xtask new-type-id` prints a new random (version 4) UUID.
+- **Miri:**
+  - A `miri` CI job on a pinned nightly (`nightly-2026-11-14`) runs `oxreal-reflection`'s tests
+    with strict provenance and symbolic alignment checks. The tests cover clones, defaults and
+    drops that panic partway through a container, zero-sized and over-aligned elements, and
+    zero-length arrays.
+  - The ECS storage tests join it in slice 2.
+- **Planned for part 2 and slice 2:**
+  - Unit enums without a `repr` need a derive-generated accessor (variant index to value and
+    back) before views can read or write them.
+  - Writes through reflection must enforce `read_only` where a type relies on it, or such
+    fields stay opaque.
+  - Handles: the "every bit pattern is valid" clause isn't checked. The first real handle type
+    (`Entity`, slice 2) defines the representation, and registration can check it then.
+- **For hot reload (D-11):** a description holds `&'static` names and function pointers from
+  the module that defined the type. Unloading a dynamic library while any `Arc<TypeDescription>`
+  of its types is alive (an editor panel, a cache) would leave them dangling. Before dynamic
+  hot reload lands, removing a group must also ensure no description of it is still held.

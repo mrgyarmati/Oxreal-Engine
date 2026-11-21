@@ -13,8 +13,13 @@ layer = "tool"
 
 [dependencies]
 flate2.workspace = true
+getrandom.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Stable-type-ID scan (ADR-0021): `syn::parse_file` and a visitor over items at any depth.
+syn = { workspace = true, features = ["full", "visit"] }
+# Token trees of macro invocations, which `syn` leaves unparsed, for the same scan.
+proc-macro2.workspace = true
 tar.workspace = true
 
 [lints]

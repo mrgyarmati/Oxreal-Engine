@@ -1110,6 +1110,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxreal-reflection"
+version = "0.1.0-dev"
+dependencies = [
+ "oxreal-math",
+ "oxreal-reflection-derive",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "oxreal-reflection-derive"
+version = "0.1.0-dev"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
 name = "oxreal-render-bridge"
 version = "0.1.0-dev"
 dependencies = [
@@ -2385,8 +2404,11 @@ name = "xtask"
 version = "0.1.0-dev"
 dependencies = [
  "flate2",
+ "getrandom 0.3.4",
+ "proc-macro2",
  "serde_json",
  "sha2",
+ "syn 3.0.10",
  "tar",
 ]
 

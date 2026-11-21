@@ -12,6 +12,7 @@ mod changelog;
 mod cook;
 mod layers;
 mod slang;
+mod type_ids;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ Commands:
   ci                           Run everything CI runs: fmt check; clippy (-D warnings) and tests
                                with default and with all features; shader compiler and cook
                                tests with the pinned Slang (installed if needed); rustdoc; layer
-                               check; changelog fragment check
+                               check; stable type ID check; changelog fragment check
   layers                       Check workspace crate layering rules (docs/architecture/TAD.md section 4)
   changelog check              Validate changelog fragments in changelog.d/ (ADR-0009)
   changelog release <X.Y.Z> [--dry-run]
@@ -37,6 +38,10 @@ Commands:
                                (installed if needed) and spirv-val (required; Vulkan SDK) into
                                <target dir>/<profile dir>/cooked/shaders (ADR-0019). The default
                                profile is dev. --out replaces the cooked root
+  new-type-id                  Print a new random stable type ID for #[reflect(id = ...)]
+  type-ids [--write]           Check stable type IDs (ADR-0021): no duplicates, no retired IDs,
+                               and each crate's stable-type-ids.txt up to date (--write
+                               regenerates them)
   help                         Show this message";
 
 fn main() -> ExitCode {
@@ -47,6 +52,8 @@ fn main() -> ExitCode {
         Some("changelog") => changelog::run(&workspace_root(), &args[1..]),
         Some("slang") => slang::run(&workspace_root(), &args[1..]),
         Some("cook-shaders") => cook::run(&cargo(), &workspace_root(), &args[1..]),
+        Some("new-type-id") => type_ids::new_type_id(),
+        Some("type-ids") => type_ids::run(&workspace_root(), &args[1..]),
         Some("help" | "-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -158,6 +165,8 @@ fn ci() -> Result<(), String> {
     )?;
     println!("\n==> layer check");
     layers::run(&cargo(), &workspace_root())?;
+    println!("\n==> stable type ID check");
+    type_ids::run(&workspace_root(), &[])?;
     println!("\n==> changelog fragment check");
     changelog::run(&workspace_root(), &["check".to_owned()])?;
     println!("\nci: all checks passed");
