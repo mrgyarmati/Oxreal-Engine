@@ -700,3 +700,9 @@ type registration with its validation.
     back) before views can read or write them.
   - Writes through reflection must enforce `read_only` where a type relies on it, or such
     fields stay opaque.
+  - Handles: the "every bit pattern is valid" clause isn't checked. The first real handle type
+    (`Entity`, slice 2) defines the representation, and registration can check it then.
+- **For hot reload (D-11):** a description holds `&'static` names and function pointers from
+  the module that defined the type. Unloading a dynamic library while any `Arc<TypeDescription>`
+  of its types is alive (an editor panel, a cache) would leave them dangling. Before dynamic
+  hot reload lands, removing a group must also ensure no description of it is still held.

@@ -1090,6 +1090,14 @@ fn a_type_already_in_another_group_cant_join_a_group() {
     let mut group = registry.group("plugin");
     group.add::<Weather>();
     let error = group.commit().expect_err("Weather is root's");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "'{}::Weather' is already registered in group 'root'; add it to its group before \
+             anything else registers it",
+            module_path!()
+        )
+    );
     assert!(
         matches!(&error, RegistrationError::AlreadyInGroup { ty, group }
             if ty.ends_with("Weather") && group == "root"),

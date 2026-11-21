@@ -346,6 +346,10 @@ impl GroupBuilder<'_> {
     /// Adds `T` to the group. Committing fails if `T` is already registered in another group
     /// (for example in the root group, because something used it first): removing this group
     /// couldn't remove it then.
+    ///
+    /// A built-in container (`Vec<T>`, `Option<T>`, `[T; N]`) always joins its element type's
+    /// group instead: `Vec<f32>` is shared and stays in the root group even when a plugin adds
+    /// it, while `Vec<PluginType>` joins the plugin's group with `PluginType`.
     pub fn add<T: Reflect>(&mut self) -> &mut Self {
         self.types.push(TypeRef::of::<T>());
         self
@@ -1003,7 +1007,8 @@ pub enum RegistrationError {
     /// A type added to a group is already registered in another group, so removing this group
     /// couldn't remove it.
     #[error(
-        "'{ty}' is already registered in group '{group}'; add it to its group before anything else \n         registers it"
+        "'{ty}' is already registered in group '{group}'; add it to its group before anything \
+         else registers it"
     )]
     AlreadyInGroup {
         /// The type.
@@ -1052,8 +1057,8 @@ pub enum DefinitionProblem {
     /// Two variants share a name or alias.
     #[error("two variants are named or aliased '{0}'")]
     DuplicateVariant(String),
-    /// A field doesn't fit in the type, or is misaligned.
-    #[error("field '{0}' lies outside the type or is misaligned")]
+    /// A field doesn't fit in the type.
+    #[error("field '{0}' lies outside the type")]
     FieldOutOfBounds(String),
     /// A field's offset isn't a multiple of its alignment, or its type is more aligned than the
     /// containing type (a packed type).

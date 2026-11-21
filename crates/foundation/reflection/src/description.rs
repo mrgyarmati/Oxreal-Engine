@@ -193,8 +193,8 @@ impl TypeDescription {
     /// # Safety
     ///
     /// - `source` is non-null, aligned for this type, and points to a valid value of **this**
-    ///   type whose own invariants hold. Nothing writes to it during the call (it's read
-    ///   through a shared reference).
+    ///   type whose own invariants hold. It's read through a shared reference, so no `&mut` to it
+    ///   is live during the call, and it's mutated only through `UnsafeCell` (atomics, locks).
     /// - `target` is non-null, aligned for this type, valid for writes of its size, and doesn't
     ///   overlap `source`. It's overwritten without being dropped, so anything it held leaks
     ///   (which is safe, but usually a bug).

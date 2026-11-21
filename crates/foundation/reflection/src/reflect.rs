@@ -49,7 +49,8 @@ use crate::TypeDefinition;
 /// - [`Reflect::ABI`] (and `.abi()`) only for a `#[repr(C)]` or `#[repr(transparent)]` type
 ///   without `Drop` (*checked*) whose layout is exactly its field definitions, every field
 ///   ABI-safe (*checked*). Other languages read it as that C struct. Padding bytes may exist and
-///   have no defined value: readers copy them but never interpret them.
+///   have no defined value: readers copy them only as untyped memory (`ptr::copy`, `memcpy`,
+///   `MaybeUninit<u8>`), never as `u8`s.
 /// - [`Reflect::TRANSIENT`] and [`Reflect::ABI`] agree with the definition (*checked*).
 ///
 /// A hand-written impl takes on this proof obligation. The derive discharges it by construction.
