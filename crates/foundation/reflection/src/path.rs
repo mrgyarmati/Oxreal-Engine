@@ -354,8 +354,6 @@ impl ResolvedPath {
         !self.components.is_empty()
     }
 
-    /// Whether `self` and `other` reach the same value, or one reaches a value inside the
-    /// other's.
     /// The description of the leaf.
     pub(crate) fn leaf_description(&self) -> &Arc<TypeDescription> {
         self.descriptions
@@ -363,6 +361,8 @@ impl ResolvedPath {
             .expect("a resolved path holds at least its root's description")
     }
 
+    /// Whether `self` and `other` reach the same value, or one reaches a value inside the
+    /// other's.
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
         let shared = self.steps.len().min(other.steps.len());
         if self.steps[..shared] != other.steps[..shared] {

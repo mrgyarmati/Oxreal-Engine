@@ -548,7 +548,7 @@ impl<'a> ValueMut<'a> {
     /// # Errors
     ///
     /// If the value isn't a unit enum or has no such variant.
-    pub fn set_variant(&mut self, index: usize) -> Result<(), ValueError> {
+    pub fn set_variant_index(&mut self, index: usize) -> Result<(), ValueError> {
         let Access::Enum(access) = &self.description.access else {
             return Err(wrong_kind(&self.description, "a unit enum"));
         };
@@ -1373,13 +1373,13 @@ pub enum ValueError {
         expected: &'static str,
     },
     /// The struct or math type has no such field or component.
-    #[error("'{ty}' has no field '{field}'; its fields are: {available}")]
+    #[error("'{ty}' has no field '{field}'; {available}")]
     NoSuchField {
         /// The type.
         ty: String,
         /// The requested name.
         field: String,
-        /// The names it has, comma-separated.
+        /// The fields it has instead, as "its fields are: a, b" or "it has no fields".
         available: String,
     },
     /// The field is opaque (`#[reflect(opaque)]`), so it can't be reached.
@@ -1514,7 +1514,11 @@ impl ValueError {
         Self::NoSuchField {
             ty: description.name().to_owned(),
             field: field.to_owned(),
-            available: available.join(", "),
+            available: if available.is_empty() {
+                "it has no fields".to_owned()
+            } else {
+                format!("its fields are: {}", available.join(", "))
+            },
         }
     }
 }

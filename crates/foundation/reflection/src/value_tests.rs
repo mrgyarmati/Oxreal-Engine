@@ -195,10 +195,16 @@ fn exclusive_views_edit_every_kind() {
             .unwrap()
             .downcast_mut::<f32>()
             .unwrap() = 1.0;
-        view.field_mut("stance").unwrap().set_variant(2).unwrap();
-        view.field_mut("team").unwrap().set_variant(0).unwrap();
+        view.field_mut("stance")
+            .unwrap()
+            .set_variant_index(2)
+            .unwrap();
+        view.field_mut("team")
+            .unwrap()
+            .set_variant_index(0)
+            .unwrap();
         assert!(matches!(
-            view.field_mut("team").unwrap().set_variant(2),
+            view.field_mut("team").unwrap().set_variant_index(2),
             Err(ValueError::NoSuchVariant { index: 2, .. })
         ));
 
@@ -1016,7 +1022,7 @@ fn enum_accessors_of_another_type_are_refused() {
         matches!(
             &error,
             RegistrationError::InvalidDefinition {
-                problem: DefinitionProblem::WrongType,
+                problem: DefinitionProblem::EnumAccessorsForOtherType,
                 ..
             }
         ),
@@ -1259,4 +1265,42 @@ fn zero_sized_values_nested_lists_and_panicking_drops() {
     let mut list = vec![Boom(1), Boom(0)];
     let removed = registry.view_mut(&mut list).unwrap().remove(0).unwrap();
     assert!(catch_unwind(AssertUnwindSafe(|| drop(removed))).is_err());
+}
+
+#[derive(Reflect)]
+#[reflect(transient)]
+struct BadAlias {
+    #[reflect(alias = "my-field")]
+    value: u8,
+}
+
+#[derive(Reflect)]
+#[reflect(transient)]
+struct NoFields;
+
+#[test]
+fn aliases_must_be_path_names_and_empty_structs_say_so() {
+    let registry = TypeRegistry::new();
+    let error = registry
+        .register::<BadAlias>()
+        .expect_err("alias with a hyphen");
+    assert!(
+        matches!(&error, RegistrationError::InvalidDefinition {
+            problem: DefinitionProblem::InvalidFieldName(name), ..
+        } if name == "my-field"),
+        "{error}"
+    );
+    let _ = BadAlias { value: 0 }.value;
+
+    let error = registry
+        .view(&NoFields)
+        .unwrap()
+        .field("x")
+        .expect_err("no fields");
+    assert!(
+        error
+            .to_string()
+            .ends_with("has no field 'x'; it has no fields"),
+        "{error}"
+    );
 }

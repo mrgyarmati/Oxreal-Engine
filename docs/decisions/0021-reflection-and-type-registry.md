@@ -700,8 +700,10 @@ type registration with its validation.
     (`Entity`, slice 2) defines the representation, and registration can check it then.
 - **For hot reload (D-11):** a description holds `&'static` names and function pointers from
   the module that defined the type. Unloading a dynamic library while any `Arc<TypeDescription>`
-  of its types is alive (an editor panel, a cache) would leave them dangling. Before dynamic
-  hot reload lands, removing a group must also ensure no description of it is still held.
+  of its types is alive (an editor panel, a cache, a resolved field path, an owned value, a
+  view) would leave their names and function pointers dangling. Before dynamic hot reload
+  lands, unloading must wait until no description of the removed group is held (a strong-count
+  check), after its values were saved and despawned as §5 orders.
 
 ## Implementation notes (2026-11-21, slice 1, second part)
 

@@ -727,7 +727,7 @@ impl Inner {
                 // `unit_enum::<T>` is public: a hand-written definition could name another enum,
                 // whose accessors would then write a `T` into this type's memory.
                 if access.type_id != definition.type_id() {
-                    return Err(invalid(DefinitionProblem::WrongType));
+                    return Err(invalid(DefinitionProblem::EnumAccessorsForOtherType));
                 }
                 Access::Enum(access)
             }
@@ -791,6 +791,16 @@ impl Inner {
         let invalid = |problem| RegistrationError::InvalidDefinition { ty: ty(), problem };
         check_unique_names(fields.iter().map(|f| (f.name, f.aliases)))
             .map_err(|name| invalid(DefinitionProblem::DuplicateField(name)))?;
+        // One enforcement point for the path-name rule, whatever wrote the definition.
+        if let Some(name) = fields
+            .iter()
+            .flat_map(|f| std::iter::once(f.name).chain(f.aliases.iter().copied()))
+            .find(|name| !is_path_name(name))
+        {
+            return Err(invalid(DefinitionProblem::InvalidFieldName(
+                name.to_owned(),
+            )));
+        }
 
         let mut resolved = Vec::with_capacity(fields.len());
         // (offset, size) of every reflected field, for the overlap check.
@@ -1217,6 +1227,9 @@ pub enum DefinitionProblem {
     /// The definition was built for a different Rust type.
     #[error("the definition was built for a different Rust type")]
     WrongType,
+    /// A unit enum's accessors were made for another type.
+    #[error("its unit enum kind was built for another type; build it with `unit_enum::<Self>`")]
+    EnumAccessorsForOtherType,
     /// `Reflect::TRANSIENT` or `Reflect::ABI` disagrees with the definition.
     #[error("Reflect::TRANSIENT or Reflect::ABI disagrees with the definition")]
     FlagMismatch,
@@ -1274,7 +1287,7 @@ pub enum DefinitionProblem {
     /// A foreign type is larger than [`ForeignTypeDefinition::MAX_SIZE`].
     #[error("it's larger than the 1 MiB limit for types defined outside Rust")]
     TooLarge,
-    /// A foreign field's name isn't one field paths can name.
+    /// A field's name or alias isn't one field paths can name.
     #[error(
         "field name '{0}' must be ASCII letters, digits and underscores, so field paths can \
          name it"
